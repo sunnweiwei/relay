@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import os
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
-import os
-from typing import Any, Sequence
+from typing import Any
 
-from .base import BaseStrategy, PreparedInput
-
+from .base import BaseStrategy, GeneratedCheckpoint, PreparedInput
 
 # openai/codex, codex-rs/prompts/templates/compact/prompt.md
 # commit 2b5bdcf67547860f2e5c5a605009a70026796b2b
@@ -51,15 +51,19 @@ class Compact(BaseStrategy):
         threshold = _request_threshold(request, self.compact_threshold)
         if not _over_threshold(responses, request, active, threshold):
             return PreparedInput(deepcopy(active))
+        compacted, checkpoints = self._compact(responses, request, active, threshold)
         return PreparedInput(
-            self._compact(responses, request, active, threshold), compacted=True
+            compacted,
+            compacted=True,
+            checkpoints=checkpoints,
         )
 
     def compact(
         self, responses: Any, request: dict[str, Any], active: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         threshold = _request_threshold(request, self.compact_threshold)
-        return self._compact(responses, request, active, threshold)
+        compacted, _ = self._compact(responses, request, active, threshold)
+        return compacted
 
     def _compact(
         self,
@@ -67,12 +71,25 @@ class Compact(BaseStrategy):
         request: dict[str, Any],
         active: list[dict[str, Any]],
         threshold: int,
-    ) -> list[dict[str, Any]]:
-        summary = _summarize(responses, request, active, threshold)
-        retained = _retain_user_messages(
-            active, max_tokens=CODEX_RETAINED_USER_MESSAGE_TOKENS
+    ) -> tuple[list[dict[str, Any]], tuple[GeneratedCheckpoint, ...]]:
+        summaries = _summarize(responses, request, active, threshold)
+        checkpoints = tuple(
+            GeneratedCheckpoint(
+                covered_items=end,
+                input=_compacted_input(active[:end], summary),
+            )
+            for end, summary in summaries
         )
-        return [*_protected_prefix(active), *retained, _summary_item(summary)]
+        return checkpoints[-1].input, checkpoints
+
+
+def _compacted_input(
+    active: Sequence[dict[str, Any]], summary: str
+) -> list[dict[str, Any]]:
+    retained = _retain_user_messages(
+        active, max_tokens=CODEX_RETAINED_USER_MESSAGE_TOKENS
+    )
+    return [*_protected_prefix(active), *retained, _summary_item(summary)]
 
 
 def _request_threshold(request: dict[str, Any], default: int) -> int:
@@ -111,7 +128,7 @@ def _summarize(
     request: dict[str, Any],
     active: list[dict[str, Any]],
     max_input_tokens: int,
-) -> str:
+) -> list[tuple[int, str]]:
     model = request.get("model")
     if not isinstance(model, str) or not model:
         raise ValueError("a model is required for compaction")
@@ -123,11 +140,12 @@ def _summarize(
         summary_input = _summary_input(None, [])
         if _summary_input_tokens(responses, request, summary_input) > max_input_tokens:
             raise ValueError("the compaction prompt exceeds compact_threshold")
-        return _summarize_chunk(responses, request, summary_input)
+        return [(0, _summarize_chunk(responses, request, summary_input))]
     if not boundaries or boundaries[-1] != len(active):
         raise ValueError("the trajectory ends with an incomplete tool call")
 
     summary: str | None = None
+    summaries: list[tuple[int, str]] = []
     start = 0
     while start < len(active):
         candidates = [boundary for boundary in boundaries if boundary > start]
@@ -152,6 +170,7 @@ def _summarize(
             try:
                 summary = _summarize_chunk(responses, request, summary_input)
                 start = end
+                summaries.append((end, summary))
                 break
             except Exception as exc:
                 if not _is_context_window_error(exc):
@@ -163,7 +182,7 @@ def _summarize(
             )
 
     assert summary is not None
-    return summary
+    return summaries
 
 
 def _largest_fitting_boundary(
@@ -270,7 +289,11 @@ def _output_text(response: Any) -> str:
             else getattr(item, "content", ())
         )
         for part in content or ():
-            text = part.get("text") if isinstance(part, dict) else getattr(part, "text", None)
+            text = (
+                part.get("text")
+                if isinstance(part, dict)
+                else getattr(part, "text", None)
+            )
             if isinstance(text, str):
                 parts.append(text)
     if not parts:
@@ -336,10 +359,7 @@ def _retain_user_messages(
             selected.append(_truncate_middle(text, remaining))
             break
     selected.reverse()
-    return [
-        {"type": "message", "role": "user", "content": text}
-        for text in selected
-    ]
+    return [{"type": "message", "role": "user", "content": text} for text in selected]
 
 
 def _approx_token_count(text: str) -> int:

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 import unittest
+from types import SimpleNamespace
 
 import httpx
 from openai import AsyncOpenAI
 
-from relay import Compact
+from relay import Compact, PrefixCheckpointCache
 from relay.proxy import ProxyConfig, create_app
 from relay.strategies.compact import CODEX_COMPACTION_PROMPT
 
@@ -26,9 +26,7 @@ class FakeInputTokens:
         is_summary = bool(
             input_items and input_items[-1].get("content") == CODEX_COMPACTION_PROMPT
         )
-        return SimpleNamespace(
-            input_tokens=1 if is_summary else self.owner.token_count
-        )
+        return SimpleNamespace(input_tokens=1 if is_summary else self.owner.token_count)
 
 
 class FakeManagementResponses:
@@ -191,7 +189,124 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("portable summary", second_upstream["input"][1]["content"])
         self.assertEqual(second_upstream["input"][-1]["content"], "continue")
 
-    async def test_pre_compaction_rewrites_sse_indices_and_completed_output(self) -> None:
+    async def test_cache_mode_is_transparent_and_reuses_an_exact_prefix(self) -> None:
+        management = FakeManagementResponses(token_count=500)
+        cache = PrefixCheckpointCache(secret=b"test-secret")
+        config = ProxyConfig(
+            upstream_base_url="https://upstream.test/v1",
+            upstream_api_key="test-key",
+            checkpoint_mode="cache",
+        )
+        app = create_app(
+            Compact(compact_threshold=100),
+            config,
+            upstream_transport=self.transport,
+            management_responses=management,
+            checkpoint_cache=cache,
+        )
+        trajectory = [message("user", "long task")]
+        headers = {"authorization": "Bearer tenant-a"}
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://proxy.test"
+            ) as client:
+                first = (
+                    await client.post(
+                        "/v1/responses",
+                        headers=headers,
+                        json={
+                            "model": "test",
+                            "input": trajectory,
+                            "store": False,
+                        },
+                    )
+                ).json()
+                self.assertFalse(
+                    any(item.get("type") == "compaction" for item in first["output"])
+                )
+                trajectory.extend(first["output"])
+                trajectory.append(message("user", "continue"))
+                management.token_count = 1
+                second = await client.post(
+                    "/v1/responses",
+                    headers=headers,
+                    json={"model": "test", "input": trajectory, "store": False},
+                )
+                self.assertEqual(second.status_code, 200)
+
+        second_upstream = self.upstream_calls[1][1]
+        assert second_upstream is not None
+        self.assertIn("portable summary", second_upstream["input"][1]["content"])
+        self.assertEqual(second_upstream["input"][-1]["content"], "continue")
+        self.assertEqual(cache.stats().hits, 1)
+
+    async def test_cache_mode_requires_a_tenant_identity(self) -> None:
+        config = ProxyConfig(
+            upstream_base_url="https://upstream.test/v1",
+            upstream_api_key="test-key",
+            checkpoint_mode="cache",
+        )
+        app = create_app(
+            Compact(),
+            config,
+            upstream_transport=self.transport,
+            management_responses=FakeManagementResponses(),
+            checkpoint_cache=PrefixCheckpointCache(secret=b"test-secret"),
+        )
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://proxy.test"
+            ) as client:
+                response = await client.post(
+                    "/v1/responses",
+                    json={"model": "test", "input": [message("user", "hello")]},
+                )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("per-tenant Bearer", response.json()["error"]["message"])
+
+    async def test_cache_mode_does_not_inject_sse_checkpoint_events(self) -> None:
+        config = ProxyConfig(
+            upstream_base_url="https://upstream.test/v1",
+            upstream_api_key="test-key",
+            checkpoint_mode="cache",
+        )
+        app = create_app(
+            Compact(compact_threshold=100),
+            config,
+            upstream_transport=self.transport,
+            management_responses=FakeManagementResponses(token_count=500),
+            checkpoint_cache=PrefixCheckpointCache(secret=b"test-secret"),
+        )
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://proxy.test"
+            ) as client:
+                text = (
+                    await client.post(
+                        "/v1/responses",
+                        headers={"authorization": "Bearer tenant-a"},
+                        json={
+                            "model": "test",
+                            "input": [message("user", "long")],
+                            "stream": True,
+                        },
+                    )
+                ).text
+
+        events = parse_sse(text)
+        self.assertFalse(
+            any(event.get("item", {}).get("type") == "compaction" for event in events)
+        )
+        self.assertFalse(
+            any(
+                item.get("type") == "compaction"
+                for item in events[-1]["response"]["output"]
+            )
+        )
+
+    async def test_pre_compaction_rewrites_sse_indices_and_completed_output(
+        self,
+    ) -> None:
         management = FakeManagementResponses(token_count=500)
         app = create_app(
             Compact(compact_threshold=100),

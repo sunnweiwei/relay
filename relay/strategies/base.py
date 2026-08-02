@@ -6,10 +6,17 @@ from typing import Any, Protocol
 
 
 @dataclass(frozen=True)
+class GeneratedCheckpoint:
+    covered_items: int
+    input: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
 class PreparedInput:
     input: list[dict[str, Any]]
     overrides: dict[str, Any] = field(default_factory=dict)
     compacted: bool = False
+    checkpoints: tuple[GeneratedCheckpoint, ...] = ()
 
 
 class ContextStrategy(Protocol):

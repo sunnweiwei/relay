@@ -1,18 +1,33 @@
 from __future__ import annotations
 
 import base64
-from copy import deepcopy
-from dataclasses import asdict, dataclass
 import hashlib
 import json
 import time
-from typing import Any, Callable, Iterator, Mapping, Sequence
 import zlib
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field
+from typing import Any
 
+from .checkpoint_cache import PrefixCheckpointCache
 from .strategies import ContextStrategy, PreparedInput
 
-
 LOCAL_COMPACTION_PREFIX = "relay:v1:"
+_CHECKPOINT_MODES = {"inline", "cache"}
+_CACHE_SCOPE_KEYS = (
+    "include",
+    "instructions",
+    "model",
+    "parallel_tool_calls",
+    "prompt",
+    "reasoning",
+    "store",
+    "text",
+    "tool_choice",
+    "tools",
+    "truncation",
+)
 
 
 @dataclass(frozen=True)
@@ -47,7 +62,9 @@ def item_dict(item: Any) -> dict[str, Any]:
 
 def item_list(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
-        raise TypeError("context-managed Responses calls require append-only list input")
+        raise TypeError(
+            "context-managed Responses calls require append-only list input"
+        )
     return [item_dict(item) for item in value]
 
 
@@ -169,7 +186,9 @@ class ManagedStream(Iterator[Any]):
 
 
 class ManagedStreamManager:
-    def __init__(self, manager: Any, finalize: Callable[[Any], ManagedResponse]) -> None:
+    def __init__(
+        self, manager: Any, finalize: Callable[[Any], ManagedResponse]
+    ) -> None:
         self._manager = manager
         self._finalize = finalize
         self.stream: ManagedStream | None = None
@@ -193,13 +212,42 @@ class _CompletedEvent:
         return getattr(self._event, name)
 
 
+@dataclass(frozen=True)
+class PreparedContext(PreparedInput):
+    raw_input: list[dict[str, Any]] = field(default_factory=list)
+    cache_partition: bytes | None = None
+
+
 class ContextEngine:
     """Transport-neutral request/response context transformation."""
 
-    def __init__(self, strategy: ContextStrategy) -> None:
+    def __init__(
+        self,
+        strategy: ContextStrategy,
+        *,
+        checkpoint_mode: str = "inline",
+        checkpoint_cache: PrefixCheckpointCache | None = None,
+    ) -> None:
+        if checkpoint_mode not in _CHECKPOINT_MODES:
+            raise ValueError("checkpoint_mode must be 'inline' or 'cache'")
         self.strategy = strategy
+        self.checkpoint_mode = checkpoint_mode
+        self.checkpoint_cache = (
+            PrefixCheckpointCache.from_env()
+            if checkpoint_mode == "cache" and checkpoint_cache is None
+            else checkpoint_cache
+        )
 
-    def prepare(self, responses: Any, request: dict[str, Any]) -> PreparedInput:
+    @property
+    def emits_checkpoints(self) -> bool:
+        return self.checkpoint_mode == "inline"
+
+    def prepare(
+        self,
+        responses: Any,
+        request: dict[str, Any],
+        cache_namespace: str = "local",
+    ) -> PreparedContext:
         if (
             request.get("previous_response_id") is not None
             or request.get("conversation") is not None
@@ -209,20 +257,78 @@ class ContextEngine:
                 "previous_response_id or conversation"
             )
         raw = item_list(request.get("input"))
-        active = self.restore(raw)
-        return self.strategy.prepare(responses, dict(request), active)
+        active, has_inline_checkpoint = self._restore_inline(raw)
+        active_is_raw = not has_inline_checkpoint
+        partition: bytes | None = None
+        if self.checkpoint_cache is not None:
+            partition = self.checkpoint_cache.partition(
+                cache_namespace, self._cache_scope(request)
+            )
+            if not has_inline_checkpoint:
+                match = self.checkpoint_cache.match(partition, raw)
+                if match is not None:
+                    active_is_raw = False
+                    active = [
+                        *match.checkpoint,
+                        *deepcopy(raw[match.matched_items :]),
+                    ]
+
+        prepared = self.strategy.prepare(responses, dict(request), active)
+        managed = PreparedContext(
+            input=prepared.input,
+            overrides=prepared.overrides,
+            compacted=prepared.compacted,
+            checkpoints=prepared.checkpoints,
+            raw_input=raw,
+            cache_partition=partition,
+        )
+        if (
+            managed.compacted
+            and self.checkpoint_cache is not None
+            and partition is not None
+        ):
+            prefixes = (
+                [
+                    (checkpoint.covered_items, checkpoint.input)
+                    for checkpoint in managed.checkpoints
+                ]
+                if active_is_raw
+                else []
+            )
+            self.checkpoint_cache.put_prefixes(
+                partition,
+                raw,
+                [*prefixes, (len(raw), managed.input)],
+            )
+        return managed
 
     def restore(self, raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return self._restore_inline(raw)[0]
+
+    def _restore_inline(
+        self, raw: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], bool]:
         for index in range(len(raw) - 1, -1, -1):
             item = raw[index]
             if item.get("type") != "compaction":
                 continue
             local = decode_local_compaction(item, self.strategy.name)
             if local is not None:
-                return [*local, *deepcopy(raw[index + 1 :])]
+                return [*local, *deepcopy(raw[index + 1 :])], True
             # Official encrypted compaction items are already canonical model input.
-            return deepcopy(raw[index:])
-        return deepcopy(raw)
+            return deepcopy(raw[index:]), True
+        return deepcopy(raw), False
+
+    def _cache_scope(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "version": 1,
+            "strategy": self.strategy.name,
+            "request": {
+                key: deepcopy(request[key])
+                for key in _CACHE_SCOPE_KEYS
+                if key in request
+            },
+        }
 
     def upstream_request(
         self, request: dict[str, Any], prepared: PreparedInput
@@ -245,7 +351,7 @@ class ContextEngine:
         self,
         responses: Any,
         request: dict[str, Any],
-        prepared: PreparedInput,
+        prepared: PreparedContext,
         raw_output: Sequence[Any],
     ) -> list[Any]:
         output = item_list(raw_output)
@@ -259,18 +365,34 @@ class ContextEngine:
         has_official_compaction = any(
             item.get("type") == "compaction" for item in output
         )
-        if prepared.compacted and not has_official_compaction:
+        if (
+            self.checkpoint_cache is not None
+            and prepared.cache_partition is not None
+            and active != [*prepared.input, *output]
+        ):
+            self.checkpoint_cache.put(
+                prepared.cache_partition,
+                [*prepared.raw_input, *output],
+                active,
+            )
+        if (
+            self.emits_checkpoints
+            and prepared.compacted
+            and not has_official_compaction
+        ):
             visible_output = [
                 local_compaction_item(self.strategy.name, prepared.input),
                 *visible_output,
             ]
-        elif active != [*prepared.input, *output] and not has_official_compaction:
+        elif (
+            self.emits_checkpoints
+            and active != [*prepared.input, *output]
+            and not has_official_compaction
+        ):
             visible_output.append(local_compaction_item(self.strategy.name, active))
         return visible_output
 
-    def compact(
-        self, responses: Any, request: dict[str, Any]
-    ) -> CompactResponse:
+    def compact(self, responses: Any, request: dict[str, Any]) -> CompactResponse:
         if (
             request.get("previous_response_id") is not None
             or request.get("conversation") is not None
@@ -284,13 +406,26 @@ class ContextEngine:
 class ManagedResponses:
     """Drop-in wrapper for the synchronous OpenAI `client.responses` resource."""
 
-    def __init__(self, responses: Any, strategy: ContextStrategy) -> None:
+    def __init__(
+        self,
+        responses: Any,
+        strategy: ContextStrategy,
+        *,
+        checkpoint_mode: str = "inline",
+        checkpoint_cache: PrefixCheckpointCache | None = None,
+        cache_namespace: str = "local",
+    ) -> None:
         self._responses = responses
-        self.engine = ContextEngine(strategy)
+        self.engine = ContextEngine(
+            strategy,
+            checkpoint_mode=checkpoint_mode,
+            checkpoint_cache=checkpoint_cache,
+        )
         self.strategy = strategy
+        self.cache_namespace = cache_namespace
 
     def create(self, **request: Any) -> Any:
-        prepared = self.engine.prepare(self._responses, request)
+        prepared = self.engine.prepare(self._responses, request, self.cache_namespace)
         forwarded = self.engine.upstream_request(request, prepared)
         response = self._responses.create(**forwarded)
         finalize = self._finalizer(request, prepared)
@@ -299,7 +434,7 @@ class ManagedResponses:
         return finalize(response)
 
     def stream(self, **request: Any) -> ManagedStreamManager:
-        prepared = self.engine.prepare(self._responses, request)
+        prepared = self.engine.prepare(self._responses, request, self.cache_namespace)
         forwarded = self.engine.upstream_request(request, prepared)
         manager = self._responses.stream(**forwarded)
         return ManagedStreamManager(manager, self._finalizer(request, prepared))
@@ -311,7 +446,7 @@ class ManagedResponses:
         return getattr(self._responses, name)
 
     def _finalizer(
-        self, request: dict[str, Any], prepared: PreparedInput
+        self, request: dict[str, Any], prepared: PreparedContext
     ) -> Callable[[Any], ManagedResponse]:
         def finalize(response: Any) -> ManagedResponse:
             visible = self.engine.finalize(
@@ -328,13 +463,27 @@ class ManagedResponses:
 class ContextManagingOpenAI:
     """Wrap an existing synchronous `OpenAI` client without changing other APIs."""
 
-    def __init__(self, client: Any, strategy: ContextStrategy | None = None) -> None:
+    def __init__(
+        self,
+        client: Any,
+        strategy: ContextStrategy | None = None,
+        *,
+        checkpoint_mode: str = "inline",
+        checkpoint_cache: PrefixCheckpointCache | None = None,
+        cache_namespace: str = "local",
+    ) -> None:
         if strategy is None:
             from .strategies import Compact
 
             strategy = Compact()
         self._client = client
-        self.responses = ManagedResponses(client.responses, strategy)
+        self.responses = ManagedResponses(
+            client.responses,
+            strategy,
+            checkpoint_mode=checkpoint_mode,
+            checkpoint_cache=checkpoint_cache,
+            cache_namespace=cache_namespace,
+        )
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._client, name)

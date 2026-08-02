@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
 import json
 import os
-from typing import Any, AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Any
 
 import httpx
 from starlette.applications import Starlette
@@ -14,9 +15,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
+from .checkpoint_cache import PrefixCheckpointCache
 from .middleware import ContextEngine, item_dict, item_list, local_compaction_item
 from .strategies import Compact, ContextStrategy
-
 
 _HOP_HEADERS = {"connection", "content-length", "host", "transfer-encoding"}
 _TRANSFORMED_HEADERS = _HOP_HEADERS | {"content-encoding", "content-md5", "etag"}
@@ -28,6 +29,7 @@ class ProxyConfig:
     upstream_api_key: str | None = None
     host: str = "127.0.0.1"
     port: int = 8787
+    checkpoint_mode: str = "inline"
 
     @classmethod
     def from_env(cls) -> ProxyConfig:
@@ -38,14 +40,13 @@ class ProxyConfig:
             upstream_api_key=os.getenv("RELAY_UPSTREAM_API_KEY"),
             host=os.getenv("RELAY_HOST", "127.0.0.1"),
             port=int(os.getenv("RELAY_PORT", "8787")),
+            checkpoint_mode=os.getenv("RELAY_CHECKPOINT_MODE", "inline"),
         )
 
 
 def _headers(headers: Mapping[str, str], api_key: str | None) -> dict[str, str]:
     forwarded = {
-        key: value
-        for key, value in headers.items()
-        if key.lower() not in _HOP_HEADERS
+        key: value for key, value in headers.items() if key.lower() not in _HOP_HEADERS
     }
     if api_key:
         forwarded["authorization"] = f"Bearer {api_key}"
@@ -62,6 +63,23 @@ def _api_key(headers: Mapping[str, str], configured: str | None) -> str:
     return token
 
 
+def _cache_namespace(request: Request) -> str:
+    authorization = request.headers.get("authorization")
+    if not authorization:
+        raise ValueError(
+            "checkpoint cache mode requires per-tenant Bearer authentication"
+        )
+    return json.dumps(
+        {
+            "authorization": authorization,
+            "organization": request.headers.get("openai-organization"),
+            "project": request.headers.get("openai-project"),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def _upstream_url(base_url: str, request: Request) -> str:
     path = request.url.path
     if base_url.rstrip("/").endswith("/v1") and path.startswith("/v1/"):
@@ -74,14 +92,12 @@ def _response_headers(
     headers: Mapping[str, str], *, transformed: bool = False
 ) -> dict[str, str]:
     removed = _TRANSFORMED_HEADERS if transformed else _HOP_HEADERS
-    return {
-        key: value
-        for key, value in headers.items()
-        if key.lower() not in removed
-    }
+    return {key: value for key, value in headers.items() if key.lower() not in removed}
 
 
-def _management_responses(config: ProxyConfig, request: Request) -> tuple[Any, Callable[[], None]]:
+def _management_responses(
+    config: ProxyConfig, request: Request
+) -> tuple[Any, Callable[[], None]]:
     from openai import OpenAI
 
     client = OpenAI(
@@ -99,7 +115,9 @@ def _sse(event: str | None, data: str) -> bytes:
     return ("\n".join(lines) + "\n\n").encode()
 
 
-async def _sse_events(response: httpx.Response) -> AsyncIterator[tuple[str | None, str]]:
+async def _sse_events(
+    response: httpx.Response,
+) -> AsyncIterator[tuple[str | None, str]]:
     event: str | None = None
     data: list[str] = []
     async for line in response.aiter_lines():
@@ -144,7 +162,7 @@ async def _managed_sse(
 ) -> AsyncIterator[bytes]:
     pre_marker = (
         item_dict(local_compaction_item(engine.strategy.name, prepared.input))
-        if prepared.compacted
+        if engine.emits_checkpoints and prepared.compacted
         else None
     )
     inserted_pre = False
@@ -161,15 +179,22 @@ async def _managed_sse(
                 continue
 
             event_type = payload.get("type")
-            if pre_marker is not None and not inserted_pre and event_type in {
-                "response.output_item.added",
-                "response.completed",
-            }:
+            if (
+                pre_marker is not None
+                and not inserted_pre
+                and event_type
+                in {
+                    "response.output_item.added",
+                    "response.completed",
+                }
+            ):
                 sequence = int(payload.get("sequence_number", 0))
                 for offset, kind in enumerate(
                     ("response.output_item.added", "response.output_item.done")
                 ):
-                    marker_event = _event_payload(kind, pre_marker, 0, sequence + offset)
+                    marker_event = _event_payload(
+                        kind, pre_marker, 0, sequence + offset
+                    )
                     yield _sse(kind, json.dumps(marker_event, separators=(",", ":")))
                 sequence_offset += 2
                 inserted_pre = True
@@ -217,9 +242,14 @@ def create_app(
     *,
     upstream_transport: httpx.AsyncBaseTransport | None = None,
     management_responses: Any | None = None,
+    checkpoint_cache: PrefixCheckpointCache | None = None,
 ) -> Starlette:
     config = config or ProxyConfig.from_env()
-    engine = ContextEngine(strategy or Compact.from_env())
+    engine = ContextEngine(
+        strategy or Compact.from_env(),
+        checkpoint_mode=config.checkpoint_mode,
+        checkpoint_cache=checkpoint_cache,
+    )
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
@@ -259,7 +289,14 @@ def create_app(
                 )
             else:
                 responses, close_management = management_responses, lambda: None
-            prepared = await run_in_threadpool(engine.prepare, responses, body)
+            namespace = (
+                _cache_namespace(request)
+                if engine.checkpoint_cache is not None
+                else "local"
+            )
+            prepared = await run_in_threadpool(
+                engine.prepare, responses, body, namespace
+            )
             forwarded = engine.upstream_request(body, prepared)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             await run_in_threadpool(close_management)
@@ -275,9 +312,7 @@ def create_app(
             )
 
         upstream = await upstream_client.send(
-            upstream_client.build_request(
-                "POST", url, headers=headers, json=forwarded
-            ),
+            upstream_client.build_request("POST", url, headers=headers, json=forwarded),
             stream=bool(body.get("stream")),
         )
         if upstream.status_code >= 400:
@@ -325,7 +360,13 @@ def create_app(
             await run_in_threadpool(close_management)
 
     return Starlette(
-        routes=[Route("/{path:path}", dispatch, methods=["GET", "POST", "PUT", "PATCH", "DELETE"])],
+        routes=[
+            Route(
+                "/{path:path}",
+                dispatch,
+                methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+            )
+        ],
         lifespan=lifespan,
     )
 
