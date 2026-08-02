@@ -5,7 +5,13 @@ from types import SimpleNamespace
 
 import relay
 import relay.strategies
-from relay import Checkpoint, Compact, ContextManagingOpenAI, PrefixCheckpointCache
+from relay import (
+    Checkpoint,
+    Compact,
+    ContextManagingOpenAI,
+    PrefixCheckpointCache,
+    wrap,
+)
 from relay.middleware import decode_local_checkpoint, local_compaction_item
 from relay.strategies.compact import (
     CODEX_COMPACTION_PROMPT,
@@ -109,6 +115,26 @@ class FakeClient:
 
 
 class CompactTests(unittest.TestCase):
+    def test_wrap_returns_a_client_view_without_mutating_the_original(self) -> None:
+        api = FakeResponses(task_outputs=[[message("assistant", "result")]])
+        client = FakeClient(api)
+        client.models = object()
+        original = client.responses
+        models = client.models
+
+        managed = wrap(client, Compact())
+        result = managed.responses.create(
+            model="task", input=[message("user", "request")]
+        )
+
+        self.assertIsNot(managed, client)
+        self.assertIs(client.responses, original)
+        self.assertIs(managed.models, models)
+        self.assertIs(client.models, models)
+        self.assertIs(managed.responses._responses, original)
+        self.assertEqual(result.output[-1]["content"], "result")
+        self.assertEqual(api.create_calls[-1]["input"][0]["content"], "request")
+
     def test_public_strategy_surface_contains_finalized_strategies(self) -> None:
         self.assertEqual(relay.strategies.__all__, ["Checkpoint", "Compact"])
         self.assertEqual(

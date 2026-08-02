@@ -1,24 +1,65 @@
 # Relay
 
-Relay is a transparent middleware for LLM context management. It intercepts model requests and responses to optimize context while remaining invisible to both the agent and the model provider.
+Relay is transparent context management for append-only OpenAI Responses API
+agent loops. Use it as a Python client wrapper or an OpenAI-compatible proxy.
 
-Agents keep their normal append-only loop while Relay applies Codex-compatible context compaction behind an OpenAI-compatible `/v1/responses` endpoint.
+## Install
 
 ```bash
 pip install -e .
+```
+
+## Python
+
+Wrap a synchronous OpenAI client and keep the rest of the agent loop unchanged:
+
+```python
+from openai import OpenAI
+from relay import Checkpoint, wrap
+
+client = wrap(
+    OpenAI(),
+    Checkpoint(),
+    checkpoint_mode="cache",
+)
+
+trajectory = [{"role": "user", "content": "Build the project"}]
+response = client.responses.create(model="your-model", input=trajectory)
+trajectory.extend(response.output)
+```
+
+`wrap()` returns a client-compatible view and does not modify the original
+client. Only `client.responses` is context-managed.
+
+## Proxy
+
+For agents that cannot accept a wrapped client, run Relay as a server:
+
+```bash
+export RELAY_STRATEGY=checkpoint
+export RELAY_CHECKPOINT_MODE=cache
 relay
 ```
 
-Point the agent's OpenAI base URL to `http://127.0.0.1:8787/v1`.
+Point the agent at Relay without changing its loop:
 
-Relay checkpoints use the Responses compaction-item shape but are Relay-specific; keep Relay in the request path when replaying them.
+```bash
+export OPENAI_API_KEY=...
+export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
+your-agent
+```
 
-Set `RELAY_CHECKPOINT_MODE=cache` to keep checkpoints in Relay's process-local,
-tenant-partitioned prefix cache instead of returning compaction items. Cache mode
-requires a distinct Bearer credential for each tenant; cache misses rebuild from
-the full append-only trajectory.
+## Configuration
 
-Set `RELAY_STRATEGY=checkpoint` for delayed hierarchical compaction. It creates
-chunk checkpoints at `RELAY_CHECKPOINT_THRESHOLD` without changing the active
-context, replaces oldest chunks after `RELAY_CONTEXT_THRESHOLD`, and recursively
-merges checkpoint chunks when they reach the checkpoint threshold.
+- `Compact()` / `RELAY_STRATEGY=compact`: replace the active context with one
+  compacted checkpoint at `RELAY_COMPACT_THRESHOLD` (default `120000`).
+- `Checkpoint()` / `RELAY_STRATEGY=checkpoint`: create chunk checkpoints at
+  `RELAY_CHECKPOINT_THRESHOLD` (default `30000`) and replace old chunks after
+  `RELAY_CONTEXT_THRESHOLD` (default `120000`).
+- `checkpoint_mode="cache"` / `RELAY_CHECKPOINT_MODE=cache`: keep artifacts in
+  Relay's exact-prefix cache and leave agent responses unchanged.
+- `checkpoint_mode="inline"` / `RELAY_CHECKPOINT_MODE=inline`: return Relay
+  checkpoint items for the agent to append to its trajectory.
+
+Cache mode is recommended for transparent integration. Inline checkpoints are
+Relay-specific and require Relay to remain in the request path when replayed.

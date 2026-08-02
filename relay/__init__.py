@@ -5,6 +5,7 @@ from .middleware import (
     ContextManagingOpenAI,
     ManagedResponse,
     ManagedResponses,
+    wrap,
 )
 from .strategies import Checkpoint, Compact
 
@@ -19,4 +20,5 @@ __all__ = [
     "ManagedResponses",
     "PrefixCheckpointCache",
     "PrefixMatch",
+    "wrap",
 ]

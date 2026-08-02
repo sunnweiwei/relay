@@ -563,6 +563,27 @@ class ManagedResponses:
         return finalize
 
 
+def wrap(
+    client: Any,
+    strategy: ContextStrategy | None = None,
+    *,
+    checkpoint_mode: str = "inline",
+    checkpoint_cache: PrefixCheckpointCache | None = None,
+    cache_namespace: str = "local",
+) -> ContextManagingOpenAI:
+    """Return a context-managing view of a synchronous OpenAI client."""
+
+    if isinstance(client, ContextManagingOpenAI):
+        raise ValueError("Relay already wraps this client")
+    return ContextManagingOpenAI(
+        client,
+        strategy,
+        checkpoint_mode=checkpoint_mode,
+        checkpoint_cache=checkpoint_cache,
+        cache_namespace=cache_namespace,
+    )
+
+
 class ContextManagingOpenAI:
     """Wrap an existing synchronous `OpenAI` client without changing other APIs."""
 
