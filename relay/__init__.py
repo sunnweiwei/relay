@@ -5,13 +5,13 @@ from .middleware import (
     ManagedResponse,
     ManagedResponses,
 )
-from .rlm import OfficialRLMAdapter
 from .strategies import (
     AgentFold,
     CODEX_COMPACTION_PROMPT,
     CodexPromptCompaction,
     FullHistory,
     NativeCompaction,
+    OfficialRLMAdapter,
     OpenAITruncation,
     RollbackFolding,
     RollingMemory,

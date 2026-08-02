@@ -15,18 +15,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from .middleware import ContextEngine, item_dict, item_list, local_compaction_item
-from .strategies import (
-    AgentFold,
-    ContextStrategy,
-    FullHistory,
-    NativeCompaction,
-    OpenAITruncation,
-    RollbackFolding,
-    RollingMemory,
-    SlidingWindow,
-    StandaloneCompaction,
-    ThresholdCompaction,
-)
+from .strategies import ContextStrategy, strategy_from_env
 
 
 _HOP_HEADERS = {"connection", "content-length", "host", "transfer-encoding"}
@@ -44,36 +33,12 @@ class ProxyConfig:
     def from_env(cls) -> ProxyConfig:
         return cls(
             upstream_base_url=os.getenv(
-                "CONTEXTLAB_UPSTREAM_BASE_URL", "https://api.openai.com/v1"
+                "RELAY_UPSTREAM_BASE_URL", "https://api.openai.com/v1"
             ),
-            upstream_api_key=os.getenv("CONTEXTLAB_UPSTREAM_API_KEY"),
-            host=os.getenv("CONTEXTLAB_HOST", "127.0.0.1"),
-            port=int(os.getenv("CONTEXTLAB_PORT", "8787")),
+            upstream_api_key=os.getenv("RELAY_UPSTREAM_API_KEY"),
+            host=os.getenv("RELAY_HOST", "127.0.0.1"),
+            port=int(os.getenv("RELAY_PORT", "8787")),
         )
-
-
-def strategy_from_env() -> ContextStrategy:
-    name = os.getenv("CONTEXTLAB_STRATEGY", "threshold").lower()
-    threshold = int(os.getenv("CONTEXTLAB_COMPACT_THRESHOLD", "120000"))
-    manager = os.getenv("CONTEXTLAB_MANAGER_MODEL") or None
-    strategies: dict[str, Callable[[], ContextStrategy]] = {
-        "threshold": lambda: ThresholdCompaction(threshold, manager),
-        "sliding": lambda: SlidingWindow(
-            max_items=int(os.getenv("CONTEXTLAB_SLIDING_ITEMS", "64")),
-            compact_threshold=threshold,
-        ),
-        "folding": lambda: RollbackFolding(threshold, manager),
-        "agent_fold": lambda: AgentFold(threshold, manager),
-        "rolling_memory": lambda: RollingMemory(manager),
-        "native": lambda: NativeCompaction(threshold),
-        "standalone": lambda: StandaloneCompaction(threshold),
-        "truncation": OpenAITruncation,
-        "full_history": FullHistory,
-    }
-    try:
-        return strategies[name]()
-    except KeyError as exc:
-        raise ValueError(f"unknown CONTEXTLAB_STRATEGY: {name}") from exc
 
 
 def _headers(headers: Mapping[str, str], api_key: str | None) -> dict[str, str]:
@@ -303,7 +268,7 @@ def create_app(
                     "error": {
                         "message": str(exc),
                         "type": "invalid_request_error",
-                        "code": "context_proxy_error",
+                        "code": "relay_error",
                     }
                 },
                 status_code=400,

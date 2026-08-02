@@ -6,7 +6,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from contextlab import (
+from relay import (
     AgentFold,
     CODEX_COMPACTION_PROMPT,
     CodexPromptCompaction,
@@ -122,7 +122,7 @@ class MiddlewareTests(unittest.TestCase):
         first = client.responses.create(model="task", input=trajectory)
         self.assertEqual(first.output[0]["type"], "compaction")
         self.assertTrue(
-            first.output[0]["encrypted_content"].startswith("contextlab:v1:")
+            first.output[0]["encrypted_content"].startswith("relay:v1:")
         )
         trajectory.extend(first.output)
         trajectory.append(message("user", "continue"))

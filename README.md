@@ -1,11 +1,12 @@
-# relay
+# Relay
 
-An OpenAI-compatible reverse proxy for context management in append-only Responses API agent loops.
+Relay is a transparent middleware for LLM context management. It intercepts model requests and responses to optimize context while remaining invisible to both the agent and the model provider.
 
-It intercepts `/v1/responses`, applies a configurable context policy, and forwards the transformed request to OpenAI while keeping the agent loop unchanged.
+Agents keep their normal append-only loop while Relay applies a pluggable strategy—such as compaction, context folding, sliding windows, or rolling memory—behind an OpenAI-compatible `/v1/responses` endpoint.
 
 ```bash
 pip install -e .
 relay
-export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
 ```
+
+Point the agent's OpenAI base URL to `http://127.0.0.1:8787/v1`.

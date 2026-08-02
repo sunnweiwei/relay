@@ -7,9 +7,9 @@ import unittest
 import httpx
 from openai import AsyncOpenAI
 
-from contextlab import RollingMemory, ThresholdCompaction
-from contextlab.proxy import ProxyConfig, create_app
-from contextlab.strategies import CODEX_COMPACTION_PROMPT
+from relay import RollingMemory, ThresholdCompaction
+from relay.proxy import ProxyConfig, create_app
+from relay.strategies import CODEX_COMPACTION_PROMPT
 
 
 def message(role: str, text: str) -> dict:

@@ -12,7 +12,7 @@ import zlib
 from .strategies import ContextStrategy, PreparedInput
 
 
-LOCAL_COMPACTION_PREFIX = "contextlab:v1:"
+LOCAL_COMPACTION_PREFIX = "relay:v1:"
 
 
 @dataclass(frozen=True)
@@ -22,7 +22,7 @@ class LocalCompactionItem:
     id: str
     encrypted_content: str
     type: str = "compaction"
-    created_by: str = "contextlab"
+    created_by: str = "relay"
 
     def model_dump(self, **_: Any) -> dict[str, Any]:
         return asdict(self)
