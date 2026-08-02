@@ -230,16 +230,15 @@ class ContextEngine:
         forwarded = dict(request)
         forwarded["input"] = deepcopy(prepared.input)
         forwarded.update(deepcopy(prepared.overrides))
-        if self.strategy.name != "native_compaction":
-            management = [
-                deepcopy(item)
-                for item in forwarded.get("context_management") or []
-                if item.get("type") != "compaction"
-            ]
-            if management:
-                forwarded["context_management"] = management
-            else:
-                forwarded.pop("context_management", None)
+        management = [
+            deepcopy(item)
+            for item in forwarded.get("context_management") or []
+            if item.get("type") != "compaction"
+        ]
+        if management:
+            forwarded["context_management"] = management
+        else:
+            forwarded.pop("context_management", None)
         return forwarded
 
     def finalize(
@@ -331,9 +330,9 @@ class ContextManagingOpenAI:
 
     def __init__(self, client: Any, strategy: ContextStrategy | None = None) -> None:
         if strategy is None:
-            from .strategies import ThresholdCompaction
+            from .strategies import Compact
 
-            strategy = ThresholdCompaction()
+            strategy = Compact()
         self._client = client
         self.responses = ManagedResponses(client.responses, strategy)
 

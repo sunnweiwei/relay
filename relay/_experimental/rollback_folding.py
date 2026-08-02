@@ -1,3 +1,5 @@
+"""Experimental rollback-folding operator."""
+
 from .folding_base import ModelFold
 
 

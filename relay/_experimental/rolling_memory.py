@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .base import BaseStrategy
+from ..strategies.base import BaseStrategy
 from .shared import protected_prefix, summary_call, summary_item
 
 

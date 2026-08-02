@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
-from .base import BaseStrategy, PreparedInput
+from ..strategies.base import BaseStrategy, PreparedInput
 from .shared import compact_threshold, over_threshold, pending_call_boundaries, protected_prefix
 
 

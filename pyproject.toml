@@ -17,8 +17,5 @@ dependencies = [
 [project.scripts]
 relay = "relay.proxy:main"
 
-[project.optional-dependencies]
-rlm = ["rlms==0.1.3"]
-
 [tool.hatch.build.targets.wheel]
 packages = ["relay"]

@@ -34,7 +34,9 @@ class OfficialRLMAdapter:
         try:
             from rlm import RLM
         except ImportError as exc:
-            raise RuntimeError("install with: pip install -e '.[rlm]'") from exc
+            raise RuntimeError(
+                "install the experimental dependency: pip install rlms==0.1.3"
+            ) from exc
         self._runtime = RLM(
             backend="openai",
             backend_kwargs={"model_name": model},

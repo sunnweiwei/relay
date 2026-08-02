@@ -7,9 +7,9 @@ import unittest
 import httpx
 from openai import AsyncOpenAI
 
-from relay import RollingMemory, ThresholdCompaction
+from relay import Compact
 from relay.proxy import ProxyConfig, create_app
-from relay.strategies import CODEX_COMPACTION_PROMPT
+from relay.strategies.compact import CODEX_COMPACTION_PROMPT
 
 
 def message(role: str, text: str) -> dict:
@@ -142,7 +142,7 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
     async def test_json_create_is_intercepted_and_checkpoint_replays(self) -> None:
         management = FakeManagementResponses(token_count=500)
         app = create_app(
-            ThresholdCompaction(compact_threshold=100),
+            Compact(compact_threshold=100),
             self.config,
             upstream_transport=self.transport,
             management_responses=management,
@@ -188,7 +188,7 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
     async def test_pre_compaction_rewrites_sse_indices_and_completed_output(self) -> None:
         management = FakeManagementResponses(token_count=500)
         app = create_app(
-            ThresholdCompaction(compact_threshold=100),
+            Compact(compact_threshold=100),
             self.config,
             upstream_transport=self.transport,
             management_responses=management,
@@ -230,38 +230,9 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
             list(range(len(events))),
         )
 
-    async def test_rolling_memory_appends_checkpoint_at_end_of_stream(self) -> None:
-        management = FakeManagementResponses(token_count=1)
-        app = create_app(
-            RollingMemory(manager_model="manager"),
-            self.config,
-            upstream_transport=self.transport,
-            management_responses=management,
-        )
-        async with app.router.lifespan_context(app):
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=app), base_url="http://proxy.test"
-            ) as client:
-                text = (
-                    await client.post(
-                        "/v1/responses",
-                        json={
-                            "model": "test",
-                            "input": [message("user", "work")],
-                            "stream": True,
-                        },
-                    )
-                ).text
-        events = parse_sse(text)
-        completed = events[-1]
-        self.assertEqual(completed["response"]["output"][0]["type"], "message")
-        self.assertEqual(completed["response"]["output"][1]["type"], "compaction")
-        self.assertEqual(events[-3]["item"]["type"], "compaction")
-        self.assertEqual(events[-2]["item"]["type"], "compaction")
-
     async def test_non_responses_endpoint_is_passed_through(self) -> None:
         app = create_app(
-            ThresholdCompaction(),
+            Compact(),
             self.config,
             upstream_transport=self.transport,
             management_responses=FakeManagementResponses(),
@@ -278,7 +249,7 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
     async def test_openai_sdk_only_needs_a_proxy_base_url(self) -> None:
         management = FakeManagementResponses(token_count=500)
         app = create_app(
-            ThresholdCompaction(compact_threshold=100),
+            Compact(compact_threshold=100),
             self.config,
             upstream_transport=self.transport,
             management_responses=management,

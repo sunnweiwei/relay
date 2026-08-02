@@ -15,7 +15,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from .middleware import ContextEngine, item_dict, item_list, local_compaction_item
-from .strategies import ContextStrategy, strategy_from_env
+from .strategies import Compact, ContextStrategy
 
 
 _HOP_HEADERS = {"connection", "content-length", "host", "transfer-encoding"}
@@ -219,7 +219,7 @@ def create_app(
     management_responses: Any | None = None,
 ) -> Starlette:
     config = config or ProxyConfig.from_env()
-    engine = ContextEngine(strategy or strategy_from_env())
+    engine = ContextEngine(strategy or Compact.from_env())
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:

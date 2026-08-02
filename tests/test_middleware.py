@@ -1,28 +1,30 @@
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
-import types
 import unittest
-from unittest.mock import patch
 
-from relay import (
-    AgentFold,
+import relay
+from relay import Compact, ContextManagingOpenAI
+import relay.strategies
+from relay.strategies.compact import (
     CODEX_COMPACTION_PROMPT,
-    CodexPromptCompaction,
-    ContextManagingOpenAI,
-    NativeCompaction,
-    OfficialRLMAdapter,
-    RollbackFolding,
-    RollingMemory,
-    SlidingWindow,
-    StandaloneCompaction,
-    ThresholdCompaction,
+    CODEX_SUMMARY_PREFIX,
+    _retain_user_messages,
 )
 
 
 def message(role: str, text: str) -> dict:
     return {"type": "message", "role": role, "content": text}
+
+
+class FakeContextWindowError(Exception):
+    status_code = 400
+    body = {
+        "error": {
+            "code": "context_length_exceeded",
+            "message": "maximum context length exceeded",
+        }
+    }
 
 
 class FakeInputTokens:
@@ -35,30 +37,27 @@ class FakeInputTokens:
 
 
 class FakeResponses:
-    def __init__(self, *, token_count: int = 1, task_outputs=None, fold_start: int = 1) -> None:
+    def __init__(
+        self,
+        *,
+        token_count: int = 1,
+        task_outputs=None,
+        summary_failures: int = 0,
+    ) -> None:
         self.token_count = token_count
         self.task_outputs = list(task_outputs or [[message("assistant", "task result")]])
-        self.fold_start = fold_start
+        self.summary_failures = summary_failures
         self.create_calls: list[dict] = []
-        self.compact_calls: list[dict] = []
         self.count_calls: list[dict] = []
         self.input_tokens = FakeInputTokens(self)
 
     def create(self, **request):
         self.create_calls.append(request)
-        if request.get("text", {}).get("format", {}).get("name") == "context_fold":
-            return SimpleNamespace(
-                output=[],
-                output_text=json.dumps(
-                    {
-                        "start_index": self.fold_start,
-                        "summary": "folded coding state",
-                        "reason": "completed branch",
-                    }
-                ),
-            )
         last = request.get("input", [{}])[-1]
         if last.get("content") == CODEX_COMPACTION_PROMPT:
+            if self.summary_failures:
+                self.summary_failures -= 1
+                raise FakeContextWindowError()
             return SimpleNamespace(output=[], output_text="durable coding handoff")
         output = self.task_outputs.pop(0)
         response = SimpleNamespace(output=output, output_text="")
@@ -70,15 +69,6 @@ class FakeResponses:
                 ]
             )
         return response
-
-    def compact(self, **request):
-        self.compact_calls.append(request)
-        return SimpleNamespace(
-            output=[
-                message("user", "retained user state"),
-                {"type": "compaction", "encrypted_content": "opaque"},
-            ]
-        )
 
     def stream(self, **request):
         self.create_calls.append(request)
@@ -105,8 +95,14 @@ class FakeClient:
         self.responses = responses
 
 
-class MiddlewareTests(unittest.TestCase):
-    def test_local_compaction_item_is_the_checkpoint_for_append_only_replay(self) -> None:
+class CompactTests(unittest.TestCase):
+    def test_public_strategy_surface_only_contains_compact(self) -> None:
+        self.assertEqual(relay.strategies.__all__, ["Compact"])
+        self.assertEqual(
+            [name for name in relay.__all__ if name.endswith("Compaction")], []
+        )
+
+    def test_checkpoint_replays_in_an_append_only_loop(self) -> None:
         api = FakeResponses(
             token_count=500,
             task_outputs=[
@@ -114,16 +110,12 @@ class MiddlewareTests(unittest.TestCase):
                 [message("assistant", "second result")],
             ],
         )
-        client = ContextManagingOpenAI(
-            FakeClient(api), ThresholdCompaction(compact_threshold=100)
-        )
+        client = ContextManagingOpenAI(FakeClient(api), Compact(compact_threshold=100))
         trajectory = [message("user", "old request")]
 
         first = client.responses.create(model="task", input=trajectory)
         self.assertEqual(first.output[0]["type"], "compaction")
-        self.assertTrue(
-            first.output[0]["encrypted_content"].startswith("relay:v1:")
-        )
+        self.assertTrue(first.output[0]["encrypted_content"].startswith("relay:v1:"))
         trajectory.extend(first.output)
         trajectory.append(message("user", "continue"))
 
@@ -136,11 +128,9 @@ class MiddlewareTests(unittest.TestCase):
         self.assertEqual(sent[-2]["content"], "first result")
         self.assertEqual(sent[-1]["content"], "continue")
 
-    def test_official_context_management_shape_selects_local_threshold(self) -> None:
+    def test_official_context_management_shape_sets_the_local_threshold(self) -> None:
         api = FakeResponses(token_count=500)
-        client = ContextManagingOpenAI(
-            FakeClient(api), ThresholdCompaction(compact_threshold=10_000)
-        )
+        client = ContextManagingOpenAI(FakeClient(api), Compact(compact_threshold=10_000))
         response = client.responses.create(
             model="task",
             input=[message("user", "long")],
@@ -150,14 +140,10 @@ class MiddlewareTests(unittest.TestCase):
         self.assertNotIn("context_management", api.create_calls[-1])
         self.assertEqual(response.output[0]["type"], "compaction")
 
-    def test_local_compaction_item_detects_corruption(self) -> None:
+    def test_checkpoint_detects_corruption(self) -> None:
         api = FakeResponses(token_count=500)
-        client = ContextManagingOpenAI(
-            FakeClient(api), ThresholdCompaction(compact_threshold=100)
-        )
-        first = client.responses.create(
-            model="task", input=[message("user", "long")]
-        )
+        client = ContextManagingOpenAI(FakeClient(api), Compact(compact_threshold=100))
+        first = client.responses.create(model="task", input=[message("user", "long")])
         marker = first.output[0].model_dump()
         marker["id"] = "cmp_local_corrupted"
         with self.assertRaisesRegex(ValueError, "integrity"):
@@ -166,11 +152,9 @@ class MiddlewareTests(unittest.TestCase):
                 input=[message("user", "long"), marker, *first.output[1:]],
             )
 
-    def test_responses_compact_uses_selected_operator_and_returns_canonical_window(self) -> None:
-        api = FakeResponses(token_count=1)
-        client = ContextManagingOpenAI(
-            FakeClient(api), ThresholdCompaction(compact_threshold=10_000)
-        )
+    def test_responses_compact_returns_the_canonical_compact_window(self) -> None:
+        api = FakeResponses()
+        client = ContextManagingOpenAI(FakeClient(api), Compact())
         compacted = client.responses.compact(
             model="task", input=[message("user", "full trajectory")]
         )
@@ -178,60 +162,13 @@ class MiddlewareTests(unittest.TestCase):
         self.assertIn("durable coding handoff", compacted.output[-1]["content"])
         self.assertEqual(len(api.create_calls), 1)
 
-    def test_sliding_window_is_available_through_responses_compact(self) -> None:
-        api = FakeResponses()
-        client = ContextManagingOpenAI(
-            FakeClient(api), SlidingWindow(max_items=2)
-        )
-        compacted = client.responses.compact(
-            model="task",
-            input=[
-                message("developer", "rules"),
-                message("user", "one"),
-                message("assistant", "two"),
-                message("user", "three"),
-                message("assistant", "four"),
-            ],
-        )
-        self.assertEqual(
-            [item["content"] for item in compacted.output],
-            ["rules", "three", "four"],
-        )
-
-    def test_native_compaction_round_trips_the_official_output_item(self) -> None:
-        first_output = [
-            {"type": "compaction", "encrypted_content": "opaque"},
-            message("assistant", "result one"),
-        ]
-        api = FakeResponses(task_outputs=[first_output, [message("assistant", "result two")]])
-        client = ContextManagingOpenAI(FakeClient(api), NativeCompaction(1000))
-        trajectory = [message("user", "start")]
-
-        first = client.responses.create(model="test", input=trajectory, store=False)
-        trajectory.extend(first.output)
-        trajectory.append(message("user", "continue"))
-        second = client.responses.create(
-            model="test",
-            input=trajectory,
-            store=False,
-        )
-
-        sent = api.create_calls[-1]["input"]
-        self.assertEqual(sent[0]["type"], "compaction")
-        self.assertEqual(sent[-1]["content"], "continue")
-        self.assertFalse(any(item.get("content") == "start" for item in sent))
-        self.assertIn("context_management", api.create_calls[-1])
-        self.assertEqual(second.output[-1]["content"], "result two")
-
-    def test_codex_prompt_replaces_the_old_window_and_preserves_request_fields(self) -> None:
+    def test_compaction_uses_the_codex_prompt_and_task_model(self) -> None:
         api = FakeResponses(token_count=500)
-        client = ContextManagingOpenAI(
-            FakeClient(api),
-            ThresholdCompaction(compact_threshold=100, manager_model="manager"),
-        )
+        client = ContextManagingOpenAI(FakeClient(api), Compact(compact_threshold=100))
         response = client.responses.create(
             model="task",
             instructions="coding instructions",
+            reasoning={"effort": "high"},
             tools=[{"type": "function", "name": "shell"}],
             input=[
                 message("developer", "repo rules"),
@@ -242,121 +179,73 @@ class MiddlewareTests(unittest.TestCase):
         )
 
         summary_call, task_call = api.create_calls
-        self.assertEqual(summary_call["model"], "manager")
+        self.assertEqual(summary_call["model"], "task")
+        self.assertEqual(summary_call["reasoning"], {"effort": "high"})
         self.assertEqual(summary_call["input"][-1]["content"], CODEX_COMPACTION_PROMPT)
         self.assertEqual(task_call["tools"][0]["name"], "shell")
         self.assertEqual(task_call["input"][0]["content"], "repo rules")
         self.assertIn("durable coding handoff", task_call["input"][-1]["content"])
         self.assertEqual(response.output[0]["type"], "compaction")
 
-    def test_default_is_our_threshold_compaction_not_provider_compaction(self) -> None:
-        api = FakeResponses(token_count=1)
+    def test_retains_real_user_messages_with_the_codex_token_budget(self) -> None:
+        previous_summary = message(
+            "user", f"{CODEX_SUMMARY_PREFIX}\nold compacted state"
+        )
+        compacted = _retain_user_messages(
+            [
+                message("developer", "rules"),
+                message("user", "one"),
+                previous_summary,
+                message("user", "two"),
+                message("user", "abcdefghijklmnop"),
+            ],
+            max_tokens=5,
+        )
+        self.assertEqual(
+            [item["content"] for item in compacted],
+            ["two", "abcdefghijklmnop"],
+        )
+        self.assertNotIn("old compacted state", str(compacted))
+
+    def test_truncates_one_large_retained_user_message_like_codex(self) -> None:
+        compacted = _retain_user_messages(
+            [message("user", "abcdefghijklmnopqrstuvwxyz")],
+            max_tokens=2,
+        )
+        self.assertIn("tokens truncated", compacted[0]["content"])
+
+    def test_retries_summary_after_trimming_oldest_history_on_context_overflow(self) -> None:
+        api = FakeResponses(token_count=500, summary_failures=1)
+        client = ContextManagingOpenAI(FakeClient(api), Compact(compact_threshold=100))
+        client.responses.create(
+            model="task",
+            input=[
+                message("developer", "rules"),
+                message("user", "oldest"),
+                message("assistant", "work"),
+                message("user", "current"),
+            ],
+        )
+        summary_calls = [
+            call
+            for call in api.create_calls
+            if call["input"][-1].get("content") == CODEX_COMPACTION_PROMPT
+        ]
+        self.assertEqual(len(summary_calls), 2)
+        self.assertFalse(
+            any(item.get("content") == "oldest" for item in summary_calls[1]["input"])
+        )
+
+    def test_default_is_compact(self) -> None:
+        api = FakeResponses()
         client = ContextManagingOpenAI(FakeClient(api))
         client.responses.create(model="task", input=[message("user", "short")])
         self.assertNotIn("context_management", api.create_calls[-1])
-        self.assertEqual(client.responses.strategy.name, "threshold_compaction")
-
-    def test_rollback_folding_is_a_real_model_selected_suffix_return(self) -> None:
-        api = FakeResponses(token_count=500, fold_start=1)
-        client = ContextManagingOpenAI(
-            FakeClient(api), RollbackFolding(compact_threshold=100, manager_model="manager")
-        )
-        client.responses.create(
-            model="task",
-            input=[
-                message("developer", "rules"),
-                message("user", "branch start"),
-                message("assistant", "branch work"),
-            ],
-        )
-        task_input = api.create_calls[-1]["input"]
-        self.assertEqual(len(task_input), 2)
-        self.assertEqual(task_input[0]["content"], "rules")
-        self.assertIn("folded coding state", task_input[1]["content"])
-
-    def test_agentfold_preserves_the_latest_observation(self) -> None:
-        api = FakeResponses(token_count=500, fold_start=1)
-        client = ContextManagingOpenAI(
-            FakeClient(api), AgentFold(compact_threshold=100, manager_model="manager")
-        )
-        client.responses.create(
-            model="task",
-            input=[
-                message("developer", "rules"),
-                message("assistant", "old step"),
-                message("user", "new observation"),
-            ],
-        )
-        task_input = api.create_calls[-1]["input"]
-        self.assertEqual(task_input[-1]["content"], "new observation")
-        self.assertIn("folded coding state", task_input[-2]["content"])
-
-    def test_agentfold_keeps_a_tool_observation_with_its_function_call(self) -> None:
-        api = FakeResponses(token_count=500, fold_start=1)
-        client = ContextManagingOpenAI(
-            FakeClient(api), AgentFold(compact_threshold=100, manager_model="manager")
-        )
-        client.responses.create(
-            model="task",
-            input=[
-                message("developer", "rules"),
-                message("user", "old task"),
-                message("assistant", "old result"),
-                {
-                    "type": "function_call",
-                    "name": "shell",
-                    "call_id": "call_1",
-                    "arguments": "{}",
-                },
-                {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
-            ],
-        )
-        task_input = api.create_calls[-1]["input"]
-        self.assertEqual(task_input[-2]["type"], "function_call")
-        self.assertEqual(task_input[-1]["type"], "function_call_output")
-        self.assertEqual(task_input[-2]["call_id"], task_input[-1]["call_id"])
-
-    def test_rolling_memory_updates_after_the_task_response(self) -> None:
-        api = FakeResponses(
-            task_outputs=[
-                [message("assistant", "first task")],
-                [message("assistant", "second task")],
-            ]
-        )
-        client = ContextManagingOpenAI(
-            FakeClient(api), RollingMemory(manager_model="manager")
-        )
-        response = client.responses.create(
-            model="task",
-            input=[message("developer", "rules"), message("user", "do work")],
-        )
-        self.assertEqual(api.create_calls[0]["model"], "task")
-        self.assertEqual(api.create_calls[1]["model"], "manager")
-        self.assertEqual(response.output[-1]["type"], "compaction")
-        trajectory = [
-            message("developer", "rules"),
-            message("user", "do work"),
-            *response.output,
-            message("user", "continue"),
-        ]
-        client.responses.create(model="task", input=trajectory)
-        active = api.create_calls[2]["input"]
-        self.assertEqual(active[0]["content"], "rules")
-        self.assertIn("durable coding handoff", active[-2]["content"])
-        self.assertEqual(active[-1]["content"], "continue")
-
-    def test_standalone_compaction_uses_official_compact_output_as_is(self) -> None:
-        api = FakeResponses(token_count=500)
-        client = ContextManagingOpenAI(
-            FakeClient(api), StandaloneCompaction(compact_threshold=100)
-        )
-        client.responses.create(model="task", input=[message("user", "long history")])
-        self.assertEqual(len(api.compact_calls), 1)
-        self.assertEqual(api.create_calls[-1]["input"][1]["type"], "compaction")
+        self.assertEqual(client.responses.strategy.name, "compact")
 
     def test_stream_final_response_is_available_after_completion(self) -> None:
         api = FakeResponses(task_outputs=[[message("assistant", "streamed")]])
-        client = ContextManagingOpenAI(FakeClient(api), NativeCompaction())
+        client = ContextManagingOpenAI(FakeClient(api), Compact())
         stream = client.responses.create(
             model="test", input=[message("user", "stream")], stream=True
         )
@@ -364,13 +253,11 @@ class MiddlewareTests(unittest.TestCase):
         self.assertIsNotNone(stream.final_response)
         self.assertEqual(stream.final_response.output[-1]["content"], "streamed")
 
-    def test_stream_completed_event_contains_the_local_compaction_item(self) -> None:
+    def test_stream_completed_event_contains_the_checkpoint(self) -> None:
         api = FakeResponses(
             token_count=500, task_outputs=[[message("assistant", "streamed")]]
         )
-        client = ContextManagingOpenAI(
-            FakeClient(api), ThresholdCompaction(compact_threshold=100)
-        )
+        client = ContextManagingOpenAI(FakeClient(api), Compact(compact_threshold=100))
         events = list(
             client.responses.create(
                 model="test", input=[message("user", "stream")], stream=True
@@ -382,42 +269,13 @@ class MiddlewareTests(unittest.TestCase):
 
     def test_stream_manager_final_response_is_available_after_completion(self) -> None:
         api = FakeResponses(task_outputs=[[message("assistant", "streamed")]])
-        client = ContextManagingOpenAI(FakeClient(api), NativeCompaction())
+        client = ContextManagingOpenAI(FakeClient(api), Compact())
         with client.responses.stream(
             model="test", input=[message("user", "stream manager")]
         ) as stream:
             list(stream)
             self.assertIsNotNone(stream.final_response)
             self.assertEqual(stream.final_response.output[-1]["content"], "streamed")
-
-
-class RLMTests(unittest.TestCase):
-    def test_official_adapter_defaults_to_current_persistent_compacted_mode(self) -> None:
-        captured = {}
-        closed = []
-
-        class FakeRLM:
-            def __init__(self, **kwargs):
-                captured.update(kwargs)
-
-            def completion(self, prompt, root_prompt=None):
-                return {"prompt": prompt, "root_prompt": root_prompt}
-
-            def cleanup(self):
-                closed.append(True)
-
-        fake_module = types.ModuleType("rlm")
-        fake_module.RLM = FakeRLM
-        with patch.dict("sys.modules", {"rlm": fake_module}):
-            adapter = OfficialRLMAdapter(model="test-model")
-            result = adapter.completion(
-                {"input": [message("user", "hello")]}, root_prompt="continue"
-            )
-            adapter.close()
-        self.assertTrue(captured["persistent"])
-        self.assertTrue(captured["compaction"])
-        self.assertEqual(result["root_prompt"], "continue")
-        self.assertTrue(closed)
 
 
 if __name__ == "__main__":

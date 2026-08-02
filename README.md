@@ -2,7 +2,7 @@
 
 Relay is a transparent middleware for LLM context management. It intercepts model requests and responses to optimize context while remaining invisible to both the agent and the model provider.
 
-Agents keep their normal append-only loop while Relay applies a pluggable strategy—such as compaction, context folding, sliding windows, or rolling memory—behind an OpenAI-compatible `/v1/responses` endpoint.
+Agents keep their normal append-only loop while Relay applies Codex-compatible context compaction behind an OpenAI-compatible `/v1/responses` endpoint.
 
 ```bash
 pip install -e .

@@ -5,37 +5,13 @@ from .middleware import (
     ManagedResponse,
     ManagedResponses,
 )
-from .strategies import (
-    AgentFold,
-    CODEX_COMPACTION_PROMPT,
-    CodexPromptCompaction,
-    FullHistory,
-    NativeCompaction,
-    OfficialRLMAdapter,
-    OpenAITruncation,
-    RollbackFolding,
-    RollingMemory,
-    SlidingWindow,
-    StandaloneCompaction,
-    ThresholdCompaction,
-)
+from .strategies import Compact
 
 __all__ = [
-    "AgentFold",
-    "CODEX_COMPACTION_PROMPT",
-    "CodexPromptCompaction",
+    "Compact",
     "CompactResponse",
     "ContextEngine",
     "ContextManagingOpenAI",
-    "FullHistory",
     "ManagedResponse",
     "ManagedResponses",
-    "NativeCompaction",
-    "OfficialRLMAdapter",
-    "OpenAITruncation",
-    "RollbackFolding",
-    "RollingMemory",
-    "SlidingWindow",
-    "StandaloneCompaction",
-    "ThresholdCompaction",
 ]

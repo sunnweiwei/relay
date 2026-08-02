@@ -1,4 +1,4 @@
-from .base import BaseStrategy
+from ..strategies.base import BaseStrategy
 
 
 class FullHistory(BaseStrategy):

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import json
 from typing import Any, Sequence
 
-from .base import BaseStrategy, PreparedInput
+from ..strategies.base import BaseStrategy, PreparedInput
 from .shared import (
     CODEX_COMPACTION_PROMPT,
     compact_threshold,
