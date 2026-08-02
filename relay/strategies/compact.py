@@ -46,16 +46,27 @@ class Compact(BaseStrategy):
         )
 
     def prepare(
-        self, responses: Any, request: dict[str, Any], active: list[dict[str, Any]]
+        self,
+        responses: Any,
+        request: dict[str, Any],
+        trajectory: list[dict[str, Any]],
+        checkpoint: GeneratedCheckpoint | None = None,
     ) -> PreparedInput:
+        active = self.materialize(trajectory, checkpoint)
         threshold = _request_threshold(request, self.compact_threshold)
         if not _over_threshold(responses, request, active, threshold):
             return PreparedInput(deepcopy(active))
         compacted, checkpoints = self._compact(responses, request, active, threshold)
+        generated = GeneratedCheckpoint(
+            covered_items=len(trajectory),
+            artifact=_artifact(compacted),
+        )
+        intermediate = checkpoints if checkpoint is None else ()
         return PreparedInput(
             compacted,
             compacted=True,
-            checkpoints=checkpoints,
+            checkpoints=intermediate,
+            checkpoint=generated,
         )
 
     def compact(
@@ -76,11 +87,42 @@ class Compact(BaseStrategy):
         checkpoints = tuple(
             GeneratedCheckpoint(
                 covered_items=end,
-                input=_compacted_input(active[:end], summary),
+                artifact=_artifact(_compacted_input(active[:end], summary)),
             )
             for end, summary in summaries
         )
-        return checkpoints[-1].input, checkpoints
+        return deepcopy(checkpoints[-1].artifact["input"]), checkpoints
+
+    def materialize(
+        self,
+        trajectory: list[dict[str, Any]],
+        checkpoint: GeneratedCheckpoint | None,
+    ) -> list[dict[str, Any]]:
+        if checkpoint is None:
+            return deepcopy(trajectory)
+        artifact = checkpoint.artifact
+        if artifact.get("version") != 1 or artifact.get("kind") != "compact":
+            raise ValueError("invalid compact checkpoint artifact")
+        base = artifact.get("input")
+        if not isinstance(base, list):
+            raise TypeError("invalid compact checkpoint input")
+        if checkpoint.covered_items > len(trajectory):
+            raise ValueError("compact checkpoint exceeds the trajectory")
+        return [
+            *deepcopy(base),
+            *deepcopy(trajectory[checkpoint.covered_items :]),
+        ]
+
+    def cache_scope(self) -> dict[str, int]:
+        return {"compact_threshold": self.compact_threshold}
+
+
+def _artifact(compacted: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "kind": "compact",
+        "input": deepcopy(list(compacted)),
+    }
 
 
 def _compacted_input(

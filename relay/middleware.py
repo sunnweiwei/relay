@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .checkpoint_cache import PrefixCheckpointCache
-from .strategies import ContextStrategy, PreparedInput
+from .strategies import ContextStrategy, GeneratedCheckpoint, PreparedInput
 
 LOCAL_COMPACTION_PREFIX = "relay:v1:"
 _CHECKPOINT_MODES = {"inline", "cache"}
@@ -76,15 +76,36 @@ def trajectory_digest(items: Sequence[dict[str, Any]]) -> str:
 
 
 def local_compaction_item(
-    strategy: str, active_input: Sequence[dict[str, Any]]
+    strategy: str,
+    artifact: Mapping[str, Any] | Sequence[dict[str, Any]],
+    *,
+    trajectory_prefix: Sequence[dict[str, Any]] | None = None,
 ) -> LocalCompactionItem:
     """Encode a Relay-local checkpoint in the Responses compaction-item shape."""
 
-    payload = json.dumps(
+    canonical_artifact = (
         {
             "version": 1,
+            "kind": "compact",
+            "input": item_list(artifact),
+        }
+        if isinstance(artifact, Sequence)
+        and not isinstance(artifact, (str, bytes, bytearray))
+        else deepcopy(dict(artifact))
+    )
+    payload = json.dumps(
+        {
+            "version": 2,
             "strategy": strategy,
-            "active_input": item_list(active_input),
+            "artifact": canonical_artifact,
+            **(
+                {
+                    "covered_items": len(trajectory_prefix),
+                    "prefix_digest": trajectory_digest(trajectory_prefix),
+                }
+                if trajectory_prefix is not None
+                else {}
+            ),
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -98,9 +119,16 @@ def local_compaction_item(
     )
 
 
-def decode_local_compaction(
+@dataclass(frozen=True)
+class DecodedLocalCheckpoint:
+    artifact: dict[str, Any]
+    covered_items: int | None = None
+    prefix_digest: str | None = None
+
+
+def decode_local_checkpoint(
     item: Mapping[str, Any], expected_strategy: str
-) -> list[dict[str, Any]] | None:
+) -> DecodedLocalCheckpoint | None:
     content = item.get("encrypted_content")
     if not isinstance(content, str) or not content.startswith(LOCAL_COMPACTION_PREFIX):
         return None
@@ -113,11 +141,45 @@ def decode_local_compaction(
     expected_id = f"cmp_local_{hashlib.sha256(payload_bytes).hexdigest()[:24]}"
     if item.get("id") != expected_id:
         raise ValueError("local compaction checkpoint failed its integrity check")
-    if payload.get("version") != 1:
+    version = payload.get("version")
+    if version not in {1, 2}:
         raise ValueError("unsupported local compaction checkpoint version")
     if payload.get("strategy") != expected_strategy:
         raise ValueError("local compaction checkpoint belongs to another strategy")
-    return item_list(payload.get("active_input"))
+    artifact = (
+        {
+            "version": 1,
+            "kind": "compact",
+            "input": item_list(payload.get("active_input")),
+        }
+        if version == 1
+        else payload.get("artifact")
+    )
+    if not isinstance(artifact, dict):
+        raise TypeError("invalid local checkpoint artifact")
+    covered_items = payload.get("covered_items") if version == 2 else None
+    prefix_digest = payload.get("prefix_digest") if version == 2 else None
+    if covered_items is not None and (
+        not isinstance(covered_items, int) or covered_items < 0
+    ):
+        raise ValueError("invalid local checkpoint prefix depth")
+    if prefix_digest is not None and not isinstance(prefix_digest, str):
+        raise TypeError("invalid local checkpoint prefix digest")
+    return DecodedLocalCheckpoint(
+        deepcopy(artifact), covered_items, prefix_digest
+    )
+
+
+def decode_local_compaction(
+    item: Mapping[str, Any], expected_strategy: str
+) -> list[dict[str, Any]] | None:
+    """Backward-compatible decoder for input-replacing checkpoints."""
+
+    checkpoint = decode_local_checkpoint(item, expected_strategy)
+    if checkpoint is None:
+        return None
+    value = checkpoint.artifact.get("input")
+    return item_list(value) if isinstance(value, list) else None
 
 
 @dataclass
@@ -257,72 +319,119 @@ class ContextEngine:
                 "previous_response_id or conversation"
             )
         raw = item_list(request.get("input"))
-        active, has_inline_checkpoint = self._restore_inline(raw)
-        active_is_raw = not has_inline_checkpoint
+        trajectory, checkpoint, has_inline_checkpoint = self._restore_inline(raw)
         partition: bytes | None = None
         if self.checkpoint_cache is not None:
             partition = self.checkpoint_cache.partition(
                 cache_namespace, self._cache_scope(request)
             )
             if not has_inline_checkpoint:
-                match = self.checkpoint_cache.match(partition, raw)
+                match = self.checkpoint_cache.match(partition, trajectory)
                 if match is not None:
-                    active_is_raw = False
-                    active = [
-                        *match.checkpoint,
-                        *deepcopy(raw[match.matched_items :]),
-                    ]
+                    checkpoint = GeneratedCheckpoint(
+                        covered_items=match.matched_items,
+                        artifact=match.artifact,
+                    )
 
-        prepared = self.strategy.prepare(responses, dict(request), active)
+        prepared = self.strategy.prepare(
+            responses, dict(request), trajectory, checkpoint
+        )
         managed = PreparedContext(
             input=prepared.input,
             overrides=prepared.overrides,
             compacted=prepared.compacted,
             checkpoints=prepared.checkpoints,
-            raw_input=raw,
+            checkpoint=prepared.checkpoint,
+            raw_input=trajectory,
             cache_partition=partition,
         )
         if (
-            managed.compacted
+            managed.checkpoint is not None
             and self.checkpoint_cache is not None
             and partition is not None
         ):
-            prefixes = (
-                [
-                    (checkpoint.covered_items, checkpoint.input)
-                    for checkpoint in managed.checkpoints
-                ]
-                if active_is_raw
-                else []
+            artifacts = {
+                value.covered_items: value.artifact
+                for value in managed.checkpoints
+            }
+            artifacts[managed.checkpoint.covered_items] = (
+                managed.checkpoint.artifact
             )
             self.checkpoint_cache.put_prefixes(
                 partition,
-                raw,
-                [*prefixes, (len(raw), managed.input)],
+                trajectory,
+                list(artifacts.items()),
             )
         return managed
 
     def restore(self, raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return self._restore_inline(raw)[0]
+        trajectory, checkpoint, _ = self._restore_inline(raw)
+        return self.strategy.materialize(trajectory, checkpoint)
 
     def _restore_inline(
         self, raw: list[dict[str, Any]]
-    ) -> tuple[list[dict[str, Any]], bool]:
-        for index in range(len(raw) - 1, -1, -1):
-            item = raw[index]
+    ) -> tuple[list[dict[str, Any]], GeneratedCheckpoint | None, bool]:
+        trajectory: list[dict[str, Any]] = []
+        checkpoint: GeneratedCheckpoint | None = None
+        found = False
+        for item in raw:
             if item.get("type") != "compaction":
+                trajectory.append(deepcopy(item))
                 continue
-            local = decode_local_compaction(item, self.strategy.name)
-            if local is not None:
-                return [*local, *deepcopy(raw[index + 1 :])], True
-            # Official encrypted compaction items are already canonical model input.
-            return deepcopy(raw[index:]), True
-        return deepcopy(raw), False
+            local = decode_local_checkpoint(item, self.strategy.name)
+            if local is None:
+                # Official encrypted compaction items are canonical model input and
+                # replace everything that preceded them.
+                trajectory = [deepcopy(item)]
+                checkpoint = None
+            else:
+                covered_items = (
+                    len(trajectory)
+                    if local.covered_items is None
+                    else local.covered_items
+                )
+                if covered_items > len(trajectory):
+                    raise ValueError("local checkpoint exceeds the trajectory")
+                if (
+                    local.prefix_digest is not None
+                    and trajectory_digest(trajectory[:covered_items])
+                    != local.prefix_digest
+                ):
+                    raise ValueError(
+                        "local checkpoint does not match its trajectory prefix"
+                    )
+                checkpoint = GeneratedCheckpoint(
+                    covered_items=covered_items,
+                    artifact=local.artifact,
+                )
+            found = True
+        return trajectory, checkpoint, found
+
+    def checkpoint_item(self, prepared: PreparedInput) -> LocalCompactionItem | None:
+        if not self.emits_checkpoints or prepared.checkpoint is None:
+            return None
+        trajectory = getattr(prepared, "raw_input", None)
+        covered = prepared.checkpoint.covered_items
+        prefix = (
+            deepcopy(trajectory[:covered])
+            if isinstance(trajectory, list) and covered <= len(trajectory)
+            else None
+        )
+        return local_compaction_item(
+            self.strategy.name,
+            prepared.checkpoint.artifact,
+            trajectory_prefix=prefix,
+        )
 
     def _cache_scope(self, request: Mapping[str, Any]) -> dict[str, Any]:
         return {
             "version": 1,
             "strategy": self.strategy.name,
+            "strategy_configuration": (
+                self.strategy.cache_scope()
+                if hasattr(self.strategy, "cache_scope")
+                else None
+            ),
             "request": {
                 key: deepcopy(request[key])
                 for key in _CACHE_SCOPE_KEYS
@@ -366,22 +475,11 @@ class ContextEngine:
             item.get("type") == "compaction" for item in output
         )
         if (
-            self.checkpoint_cache is not None
-            and prepared.cache_partition is not None
-            and active != [*prepared.input, *output]
-        ):
-            self.checkpoint_cache.put(
-                prepared.cache_partition,
-                [*prepared.raw_input, *output],
-                active,
-            )
-        if (
-            self.emits_checkpoints
-            and prepared.compacted
+            (marker := self.checkpoint_item(prepared)) is not None
             and not has_official_compaction
         ):
             visible_output = [
-                local_compaction_item(self.strategy.name, prepared.input),
+                marker,
                 *visible_output,
             ]
         elif (
@@ -389,7 +487,12 @@ class ContextEngine:
             and active != [*prepared.input, *output]
             and not has_official_compaction
         ):
-            visible_output.append(local_compaction_item(self.strategy.name, active))
+            visible_output.append(
+                local_compaction_item(
+                    self.strategy.name,
+                    {"version": 1, "kind": "compact", "input": active},
+                )
+            )
         return visible_output
 
     def compact(self, responses: Any, request: dict[str, Any]) -> CompactResponse:

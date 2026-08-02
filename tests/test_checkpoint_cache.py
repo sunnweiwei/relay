@@ -9,6 +9,10 @@ def message(text: str) -> dict:
     return {"type": "message", "role": "user", "content": text}
 
 
+def artifact(text: str) -> dict:
+    return {"kind": "test", "value": text}
+
+
 class PrefixCheckpointCacheTests(unittest.TestCase):
     def setUp(self) -> None:
         self.cache = PrefixCheckpointCache(
@@ -23,11 +27,11 @@ class PrefixCheckpointCacheTests(unittest.TestCase):
     def test_longest_exact_prefix_survives_branching(self) -> None:
         root = message("root")
         branch_a = message("branch-a")
-        self.cache.put(self.partition, [root], [message("root checkpoint")])
+        self.cache.put(self.partition, [root], artifact("root checkpoint"))
         self.cache.put(
             self.partition,
             [root, branch_a],
-            [message("branch-a checkpoint")],
+            artifact("branch-a checkpoint"),
         )
 
         exact_branch = self.cache.match(
@@ -38,14 +42,14 @@ class PrefixCheckpointCacheTests(unittest.TestCase):
 
         assert exact_branch is not None and sibling_branch is not None
         self.assertEqual(exact_branch.matched_items, 2)
-        self.assertEqual(exact_branch.checkpoint, [message("branch-a checkpoint")])
+        self.assertEqual(exact_branch.artifact, artifact("branch-a checkpoint"))
         self.assertEqual(sibling_branch.matched_items, 1)
-        self.assertEqual(sibling_branch.checkpoint, [message("root checkpoint")])
+        self.assertEqual(sibling_branch.artifact, artifact("root checkpoint"))
         self.assertIsNone(changed_root)
 
     def test_object_key_order_is_canonical_but_content_is_exact(self) -> None:
         reordered = {"content": "root", "role": "user", "type": "message"}
-        self.cache.put(self.partition, [message("root")], [message("checkpoint")])
+        self.cache.put(self.partition, [message("root")], artifact("checkpoint"))
 
         self.assertIsNotNone(self.cache.match(self.partition, [reordered]))
         self.assertIsNone(self.cache.match(self.partition, [message("Root")]))
@@ -54,7 +58,7 @@ class PrefixCheckpointCacheTests(unittest.TestCase):
         tenant_b = self.cache.partition("tenant-b", {"model": "test"})
         other_model = self.cache.partition("tenant-a", {"model": "other"})
         trajectory = [message("private")]
-        self.cache.put(self.partition, trajectory, [message("secret checkpoint")])
+        self.cache.put(self.partition, trajectory, artifact("secret checkpoint"))
 
         self.assertIsNone(self.cache.match(tenant_b, trajectory))
         self.assertIsNone(self.cache.match(other_model, trajectory))
@@ -68,10 +72,10 @@ class PrefixCheckpointCacheTests(unittest.TestCase):
             secret=b"test-secret",
         )
         partition = cache.partition("tenant", {"model": "test"})
-        cache.put(partition, [message("a")], [message("checkpoint-a")])
-        cache.put(partition, [message("b")], [message("checkpoint-b")])
+        cache.put(partition, [message("a")], artifact("checkpoint-a"))
+        cache.put(partition, [message("b")], artifact("checkpoint-b"))
         self.assertIsNotNone(cache.match(partition, [message("a")]))
-        cache.put(partition, [message("c")], [message("checkpoint-c")])
+        cache.put(partition, [message("c")], artifact("checkpoint-c"))
 
         self.assertIsNotNone(cache.match(partition, [message("a")]))
         self.assertIsNone(cache.match(partition, [message("b")]))
@@ -90,7 +94,7 @@ class PrefixCheckpointCacheTests(unittest.TestCase):
             clock=lambda: now[0],
         )
         partition = cache.partition("tenant", {"model": "test"})
-        cache.put(partition, [message("a")], [message("checkpoint")])
+        cache.put(partition, [message("a")], artifact("checkpoint"))
         self.assertIsNotNone(cache.match(partition, [message("a")]))
 
         now[0] = 11

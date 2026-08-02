@@ -28,7 +28,7 @@ def _canonical(value: Any) -> bytes:
 
 @dataclass(frozen=True)
 class PrefixMatch:
-    checkpoint: list[dict[str, Any]]
+    artifact: dict[str, Any]
     matched_items: int
 
 
@@ -49,7 +49,7 @@ class _Node:
     depth: int
     parent: _Node | None = None
     children: dict[bytes, _Node] = field(default_factory=dict)
-    checkpoint: list[dict[str, Any]] | None = None
+    artifact: dict[str, Any] | None = None
     checkpoint_bytes: int = 0
     expires_at: float | None = None
 
@@ -58,9 +58,9 @@ class PrefixCheckpointCache:
     """Tenant-partitioned exact-prefix checkpoint cache.
 
     A keyed hash trie gives each canonical trajectory prefix one node. Only
-    prefixes that produced a compaction carry a checkpoint; sibling branches
-    share their ancestor nodes. Checkpoints are soft state: a miss must always
-    be recoverable by replaying the supplied trajectory.
+    checkpointed prefixes carry an opaque strategy artifact; sibling branches
+    share their ancestor nodes. Artifacts are soft state: a miss must always be
+    recoverable by replaying the supplied trajectory.
     """
 
     def __init__(
@@ -139,40 +139,45 @@ class PrefixCheckpointCache:
                 if candidate is not None:
                     best = candidate
 
-            if best is None or best.checkpoint is None:
+            if best is None or best.artifact is None:
                 self._misses += 1
                 return None
             self._hits += 1
             self._lru.move_to_end(best.digest)
-            return PrefixMatch(deepcopy(best.checkpoint), best.depth)
+            return PrefixMatch(
+                deepcopy(best.artifact),
+                best.depth,
+            )
 
     def put(
         self,
         partition: bytes,
         trajectory: Sequence[Mapping[str, Any]],
-        checkpoint: Sequence[Mapping[str, Any]],
+        artifact: Mapping[str, Any],
     ) -> None:
         """Attach a checkpoint to the node for an exact trajectory prefix."""
 
         self.put_prefixes(
             partition,
             trajectory,
-            [(len(trajectory), checkpoint)],
+            [(len(trajectory), artifact)],
         )
 
     def put_prefixes(
         self,
         partition: bytes,
         trajectory: Sequence[Mapping[str, Any]],
-        checkpoints: Sequence[tuple[int, Sequence[Mapping[str, Any]]]],
+        checkpoints: Sequence[
+            tuple[int, Mapping[str, Any]]
+        ],
     ) -> None:
         """Attach several checkpoints while traversing one trajectory once."""
 
-        prepared: dict[int, tuple[list[dict[str, Any]], int]] = {}
-        for depth, checkpoint in checkpoints:
+        prepared: dict[int, tuple[dict[str, Any], int]] = {}
+        for depth, artifact in checkpoints:
             if depth < 0 or depth > len(trajectory):
                 raise ValueError("checkpoint prefix depth is outside the trajectory")
-            stored = deepcopy([dict(item) for item in checkpoint])
+            stored = deepcopy(dict(artifact))
             stored_bytes = len(_canonical(stored))
             if stored_bytes <= self.max_bytes:
                 prepared[depth] = (stored, stored_bytes)
@@ -211,16 +216,16 @@ class PrefixCheckpointCache:
     def _attach_checkpoint(
         self,
         node: _Node,
-        stored: list[dict[str, Any]],
+        stored: dict[str, Any],
         stored_bytes: int,
         now: float,
     ) -> None:
-        if node.checkpoint is None:
+        if node.artifact is None:
             self._entries += 1
         else:
             self._bytes -= node.checkpoint_bytes
             self._lru.pop(node.digest, None)
-        node.checkpoint = stored
+        node.artifact = stored
         node.checkpoint_bytes = stored_bytes
         node.expires_at = None if self.ttl_seconds is None else now + self.ttl_seconds
         self._bytes += stored_bytes
@@ -256,7 +261,7 @@ class PrefixCheckpointCache:
         return self._digest(b"item\0", parent, b"\0", _canonical(dict(item)))
 
     def _valid_checkpoint(self, node: _Node, now: float) -> _Node | None:
-        if node.checkpoint is None:
+        if node.artifact is None:
             return None
         if node.expires_at is not None and node.expires_at <= now:
             self._drop_checkpoint(node)
@@ -278,23 +283,23 @@ class PrefixCheckpointCache:
             self._drop_checkpoint(node)
 
     def _drop_checkpoint(self, node: _Node) -> None:
-        if node.checkpoint is None:
+        if node.artifact is None:
             return
         self._lru.pop(node.digest, None)
         self._entries -= 1
         self._bytes -= node.checkpoint_bytes
-        node.checkpoint = None
+        node.artifact = None
         node.checkpoint_bytes = 0
         node.expires_at = None
         self._evictions += 1
         self._prune(node)
 
     def _prune(self, node: _Node) -> None:
-        while node.parent is not None and not node.children and node.checkpoint is None:
+        while node.parent is not None and not node.children and node.artifact is None:
             parent = node.parent
             parent.children.pop(node.digest, None)
             self._nodes -= 1
             node = parent
-        if node.parent is None and not node.children and node.checkpoint is None:
+        if node.parent is None and not node.children and node.artifact is None:
             self._roots.pop(node.digest, None)
             self._nodes -= 1

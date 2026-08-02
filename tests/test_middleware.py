@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import relay
 import relay.strategies
-from relay import Compact, ContextManagingOpenAI, PrefixCheckpointCache
-from relay.middleware import local_compaction_item
+from relay import Checkpoint, Compact, ContextManagingOpenAI, PrefixCheckpointCache
+from relay.middleware import decode_local_checkpoint, local_compaction_item
 from relay.strategies.compact import (
     CODEX_COMPACTION_PROMPT,
     CODEX_SUMMARY_PREFIX,
@@ -32,6 +32,8 @@ class FakeInputTokens:
             tokens = self.owner.summary_token_counter(request)
         elif is_summary:
             tokens = 1
+        elif self.owner.input_token_counter is not None:
+            tokens = self.owner.input_token_counter(request)
         else:
             tokens = self.owner.token_count
         return SimpleNamespace(input_tokens=tokens)
@@ -45,6 +47,7 @@ class FakeResponses:
         task_outputs=None,
         summary_outputs=None,
         summary_token_counter=None,
+        input_token_counter=None,
     ) -> None:
         self.token_count = token_count
         self.task_outputs = list(
@@ -52,6 +55,7 @@ class FakeResponses:
         )
         self.summary_outputs = list(summary_outputs or [])
         self.summary_token_counter = summary_token_counter
+        self.input_token_counter = input_token_counter
         self.create_calls: list[dict] = []
         self.count_calls: list[dict] = []
         self.input_tokens = FakeInputTokens(self)
@@ -105,8 +109,8 @@ class FakeClient:
 
 
 class CompactTests(unittest.TestCase):
-    def test_public_strategy_surface_only_contains_compact(self) -> None:
-        self.assertEqual(relay.strategies.__all__, ["Compact"])
+    def test_public_strategy_surface_contains_finalized_strategies(self) -> None:
+        self.assertEqual(relay.strategies.__all__, ["Checkpoint", "Compact"])
         self.assertEqual(
             [name for name in relay.__all__ if name.endswith("Compaction")], []
         )
@@ -187,7 +191,15 @@ class CompactTests(unittest.TestCase):
         partition = cache.partition(
             "tenant-a", client.responses.engine._cache_scope({"model": "task"})
         )
-        cache.put(partition, raw, [message("user", "cached checkpoint")])
+        cache.put(
+            partition,
+            raw,
+            {
+                "version": 1,
+                "kind": "compact",
+                "input": [message("user", "cached checkpoint")],
+            },
+        )
 
         client.responses.create(model="task", input=raw)
         sent = api.create_calls[-1]["input"]
@@ -229,7 +241,7 @@ class CompactTests(unittest.TestCase):
 
         assert match is not None
         self.assertEqual(match.matched_items, 4)
-        self.assertIn("summary 3", match.checkpoint[-1]["content"])
+        self.assertIn("summary 3", match.artifact["input"][-1]["content"])
 
     def test_official_context_management_shape_sets_the_local_threshold(self) -> None:
         api = FakeResponses(token_count=500)
@@ -255,6 +267,21 @@ class CompactTests(unittest.TestCase):
             client.responses.create(
                 model="task",
                 input=[message("user", "long"), marker, *first.output[1:]],
+            )
+
+    def test_inline_checkpoint_is_bound_to_its_exact_prefix(self) -> None:
+        api = FakeResponses(token_count=500)
+        client = ContextManagingOpenAI(FakeClient(api), Compact(compact_threshold=100))
+        first = client.responses.create(model="task", input=[message("user", "long")])
+
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            client.responses.create(
+                model="task",
+                input=[
+                    message("user", "changed"),
+                    first.output[0],
+                    *first.output[1:],
+                ],
             )
 
     def test_responses_compact_returns_the_canonical_compact_window(self) -> None:
@@ -401,6 +428,161 @@ class CompactTests(unittest.TestCase):
             self.assertIsNotNone(stream.final_response)
             self.assertEqual(stream.final_response.output[-1]["content"], "streamed")
 
+
+class CheckpointTests(unittest.TestCase):
+    @staticmethod
+    def token_counter(request: dict) -> int:
+        return len(request.get("input", [])) * 10
+
+    def test_first_threshold_creates_checkpoint_without_changing_context(self) -> None:
+        original = [message("user", "one"), message("assistant", "two")]
+        api = FakeResponses(
+            task_outputs=[
+                [message("assistant", "first result")],
+                [message("assistant", "second result")],
+            ],
+            summary_outputs=["chunk one", "chunk two"],
+            input_token_counter=self.token_counter,
+        )
+        client = ContextManagingOpenAI(
+            FakeClient(api),
+            Checkpoint(checkpoint_threshold=20, context_threshold=100),
+        )
+
+        first = client.responses.create(model="task", input=original)
+        self.assertEqual(api.create_calls[-1]["input"], original)
+        self.assertEqual(first.output[0]["type"], "compaction")
+        self.assertFalse(
+            any(
+                str(item.get("content", "")).startswith(CODEX_SUMMARY_PREFIX)
+                for item in api.create_calls[-1]["input"]
+            )
+        )
+
+        trajectory = [*original, *first.output, message("user", "continue")]
+        client.responses.create(model="task", input=trajectory)
+        sent = api.create_calls[-1]["input"]
+        self.assertEqual(
+            [item["content"] for item in sent],
+            ["one", "two", "first result", "continue"],
+        )
+
+    def test_second_threshold_replaces_only_the_oldest_checkpointed_chunk(self) -> None:
+        original = [message("user", str(index)) for index in range(5)]
+        api = FakeResponses(
+            summary_outputs=["oldest chunk", "second chunk"],
+            input_token_counter=self.token_counter,
+        )
+        client = ContextManagingOpenAI(
+            FakeClient(api),
+            Checkpoint(checkpoint_threshold=20, context_threshold=50),
+        )
+
+        response = client.responses.create(model="task", input=original)
+        sent = api.create_calls[-1]["input"]
+        self.assertEqual(len(sent), 4)
+        self.assertIn("oldest chunk", sent[0]["content"])
+        self.assertEqual([item["content"] for item in sent[1:]], ["2", "3", "4"])
+
+        marker = decode_local_checkpoint(response.output[0], "checkpoint")
+        assert marker is not None
+        chunks = marker.artifact["chunks"]
+        self.assertTrue(chunks[0]["evicted"])
+        self.assertFalse(chunks[1]["evicted"])
+
+    def test_checkpoint_summaries_merge_recursively(self) -> None:
+        original = [message("user", str(index)) for index in range(9)]
+        api = FakeResponses(
+            summary_outputs=[
+                "chunk 1",
+                "chunk 2",
+                "chunk 3",
+                "chunk 4",
+                "left parent",
+                "right parent",
+                "root checkpoint",
+            ],
+            input_token_counter=self.token_counter,
+        )
+        client = ContextManagingOpenAI(
+            FakeClient(api),
+            Checkpoint(checkpoint_threshold=20, context_threshold=50),
+        )
+
+        response = client.responses.create(model="task", input=original)
+        sent = api.create_calls[-1]["input"]
+        self.assertEqual(len(sent), 2)
+        self.assertIn("root checkpoint", sent[0]["content"])
+        self.assertEqual(sent[1]["content"], "8")
+
+        marker = decode_local_checkpoint(response.output[0], "checkpoint")
+        assert marker is not None
+        self.assertEqual(
+            marker.artifact["chunks"],
+            [
+                {
+                    "start": 0,
+                    "end": 8,
+                    "summary": "root checkpoint",
+                    "level": 2,
+                    "evicted": True,
+                }
+            ],
+        )
+
+    def test_cache_mode_reuses_checkpoint_artifact_transparently(self) -> None:
+        original = [message("user", "one"), message("assistant", "two")]
+        api = FakeResponses(
+            task_outputs=[
+                [message("assistant", "first result")],
+                [message("assistant", "second result")],
+            ],
+            summary_outputs=["chunk one", "chunk two"],
+            input_token_counter=self.token_counter,
+        )
+        cache = PrefixCheckpointCache(secret=b"test-secret")
+        client = ContextManagingOpenAI(
+            FakeClient(api),
+            Checkpoint(checkpoint_threshold=20, context_threshold=100),
+            checkpoint_mode="cache",
+            checkpoint_cache=cache,
+            cache_namespace="tenant-a",
+        )
+
+        first = client.responses.create(model="task", input=original)
+        self.assertFalse(any(item.get("type") == "compaction" for item in first.output))
+        trajectory = [*original, *first.output, message("user", "continue")]
+        client.responses.create(model="task", input=trajectory)
+
+        self.assertEqual(cache.stats().hits, 1)
+        self.assertEqual(
+            [item["content"] for item in api.create_calls[-1]["input"]],
+            ["one", "two", "first result", "continue"],
+        )
+
+    def test_cache_keeps_the_final_plan_when_eviction_shares_a_boundary(self) -> None:
+        original = [message("user", str(index)) for index in range(4)]
+        api = FakeResponses(
+            summary_outputs=["chunk one", "chunk two"],
+            input_token_counter=self.token_counter,
+        )
+        cache = PrefixCheckpointCache(secret=b"test-secret")
+        client = ContextManagingOpenAI(
+            FakeClient(api),
+            Checkpoint(checkpoint_threshold=20, context_threshold=40),
+            checkpoint_mode="cache",
+            checkpoint_cache=cache,
+            cache_namespace="tenant-a",
+        )
+
+        client.responses.create(model="task", input=original)
+        partition = cache.partition(
+            "tenant-a", client.responses.engine._cache_scope({"model": "task"})
+        )
+        match = cache.match(partition, original)
+
+        assert match is not None
+        self.assertTrue(match.artifact["chunks"][0]["evicted"])
 
 if __name__ == "__main__":
     unittest.main()

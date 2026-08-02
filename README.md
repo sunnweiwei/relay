@@ -17,3 +17,8 @@ Set `RELAY_CHECKPOINT_MODE=cache` to keep checkpoints in Relay's process-local,
 tenant-partitioned prefix cache instead of returning compaction items. Cache mode
 requires a distinct Bearer credential for each tenant; cache misses rebuild from
 the full append-only trajectory.
+
+Set `RELAY_STRATEGY=checkpoint` for delayed hierarchical compaction. It creates
+chunk checkpoints at `RELAY_CHECKPOINT_THRESHOLD` without changing the active
+context, replaces oldest chunks after `RELAY_CONTEXT_THRESHOLD`, and recursively
+merges checkpoint chunks when they reach the checkpoint threshold.

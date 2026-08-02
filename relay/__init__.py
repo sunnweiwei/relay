@@ -6,10 +6,11 @@ from .middleware import (
     ManagedResponse,
     ManagedResponses,
 )
-from .strategies import Compact
+from .strategies import Checkpoint, Compact
 
 __all__ = [
     "CacheStats",
+    "Checkpoint",
     "Compact",
     "CompactResponse",
     "ContextEngine",

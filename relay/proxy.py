@@ -16,8 +16,8 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from .checkpoint_cache import PrefixCheckpointCache
-from .middleware import ContextEngine, item_dict, item_list, local_compaction_item
-from .strategies import Compact, ContextStrategy
+from .middleware import ContextEngine, item_dict, item_list
+from .strategies import ContextStrategy, strategy_from_env
 
 _HOP_HEADERS = {"connection", "content-length", "host", "transfer-encoding"}
 _TRANSFORMED_HEADERS = _HOP_HEADERS | {"content-encoding", "content-md5", "etag"}
@@ -161,9 +161,7 @@ async def _managed_sse(
     close_management: Callable[[], None],
 ) -> AsyncIterator[bytes]:
     pre_marker = (
-        item_dict(local_compaction_item(engine.strategy.name, prepared.input))
-        if engine.emits_checkpoints and prepared.compacted
-        else None
+        item_dict(marker) if (marker := engine.checkpoint_item(prepared)) else None
     )
     inserted_pre = False
     sequence_offset = 0
@@ -246,7 +244,7 @@ def create_app(
 ) -> Starlette:
     config = config or ProxyConfig.from_env()
     engine = ContextEngine(
-        strategy or Compact.from_env(),
+        strategy or strategy_from_env(),
         checkpoint_mode=config.checkpoint_mode,
         checkpoint_cache=checkpoint_cache,
     )

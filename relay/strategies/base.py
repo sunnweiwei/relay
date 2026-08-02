@@ -8,7 +8,7 @@ from typing import Any, Protocol
 @dataclass(frozen=True)
 class GeneratedCheckpoint:
     covered_items: int
-    input: list[dict[str, Any]]
+    artifact: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -17,13 +17,24 @@ class PreparedInput:
     overrides: dict[str, Any] = field(default_factory=dict)
     compacted: bool = False
     checkpoints: tuple[GeneratedCheckpoint, ...] = ()
+    checkpoint: GeneratedCheckpoint | None = None
 
 
 class ContextStrategy(Protocol):
     name: str
 
+    def materialize(
+        self,
+        trajectory: list[dict[str, Any]],
+        checkpoint: GeneratedCheckpoint | None = None,
+    ) -> list[dict[str, Any]]: ...
+
     def prepare(
-        self, responses: Any, request: dict[str, Any], active: list[dict[str, Any]]
+        self,
+        responses: Any,
+        request: dict[str, Any],
+        trajectory: list[dict[str, Any]],
+        checkpoint: GeneratedCheckpoint | None = None,
     ) -> PreparedInput: ...
 
     def compact(
@@ -42,10 +53,21 @@ class ContextStrategy(Protocol):
 class BaseStrategy:
     name = "full_history"
 
+    def materialize(
+        self,
+        trajectory: list[dict[str, Any]],
+        checkpoint: GeneratedCheckpoint | None = None,
+    ) -> list[dict[str, Any]]:
+        return deepcopy(trajectory)
+
     def prepare(
-        self, responses: Any, request: dict[str, Any], active: list[dict[str, Any]]
+        self,
+        responses: Any,
+        request: dict[str, Any],
+        trajectory: list[dict[str, Any]],
+        checkpoint: GeneratedCheckpoint | None = None,
     ) -> PreparedInput:
-        return PreparedInput(deepcopy(active))
+        return PreparedInput(deepcopy(trajectory))
 
     def finish(
         self,
