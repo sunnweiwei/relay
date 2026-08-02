@@ -147,6 +147,14 @@ def _over_threshold(
     active: list[dict[str, Any]],
     threshold: int,
 ) -> bool:
+    return _input_tokens(responses, request, active) >= threshold
+
+
+def _input_tokens(
+    responses: Any,
+    request: dict[str, Any],
+    active: Sequence[dict[str, Any]],
+) -> int:
     allowed = {
         "instructions",
         "model",
@@ -158,11 +166,11 @@ def _over_threshold(
         "truncation",
     }
     count_request = {
-        "input": active,
+        "input": deepcopy(list(active)),
         **{key: request[key] for key in allowed if key in request},
     }
     counted = responses.input_tokens.count(**count_request)
-    return int(counted.input_tokens) >= threshold
+    return int(counted.input_tokens)
 
 
 def _summarize(

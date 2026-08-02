@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import relay
 import relay.strategies
@@ -10,6 +11,8 @@ from relay import (
     Compact,
     ContextManagingOpenAI,
     PrefixCheckpointCache,
+    RollingMemory,
+    SlidingWindow,
     wrap,
 )
 from relay.middleware import decode_local_checkpoint, local_compaction_item
@@ -17,6 +20,10 @@ from relay.strategies.compact import (
     CODEX_COMPACTION_PROMPT,
     CODEX_SUMMARY_PREFIX,
     _retain_user_messages,
+)
+from relay.strategies.rolling_memory import (
+    ROLLING_MEMORY_PREFIX,
+    ROLLING_MEMORY_PROMPT,
 )
 
 
@@ -32,7 +39,9 @@ class FakeInputTokens:
         self.owner.count_calls.append(request)
         input_items = request.get("input", [])
         is_summary = bool(
-            input_items and input_items[-1].get("content") == CODEX_COMPACTION_PROMPT
+            input_items
+            and input_items[-1].get("content")
+            in {CODEX_COMPACTION_PROMPT, ROLLING_MEMORY_PROMPT}
         )
         if is_summary and self.owner.summary_token_counter is not None:
             tokens = self.owner.summary_token_counter(request)
@@ -69,7 +78,10 @@ class FakeResponses:
     def create(self, **request):
         self.create_calls.append(request)
         last = request.get("input", [{}])[-1]
-        if last.get("content") == CODEX_COMPACTION_PROMPT:
+        if last.get("content") in {
+            CODEX_COMPACTION_PROMPT,
+            ROLLING_MEMORY_PROMPT,
+        }:
             output_text = (
                 self.summary_outputs.pop(0)
                 if self.summary_outputs
@@ -136,7 +148,10 @@ class CompactTests(unittest.TestCase):
         self.assertEqual(api.create_calls[-1]["input"][0]["content"], "request")
 
     def test_public_strategy_surface_contains_finalized_strategies(self) -> None:
-        self.assertEqual(relay.strategies.__all__, ["Checkpoint", "Compact"])
+        self.assertEqual(
+            relay.strategies.__all__,
+            ["Checkpoint", "Compact", "RollingMemory", "SlidingWindow"],
+        )
         self.assertEqual(
             [name for name in relay.__all__ if name.endswith("Compaction")], []
         )
@@ -609,6 +624,297 @@ class CheckpointTests(unittest.TestCase):
 
         assert match is not None
         self.assertTrue(match.artifact["chunks"][0]["evicted"])
+
+
+class RollingMemoryTests(unittest.TestCase):
+    @staticmethod
+    def token_counter(request: dict) -> int:
+        return len(request.get("input", [])) * 10
+
+    def test_updates_memory_and_keeps_the_newest_segment_verbatim(self) -> None:
+        api = FakeResponses(
+            task_outputs=[
+                [message("assistant", "first result")],
+                [message("assistant", "second result")],
+            ],
+            summary_outputs=["memory one", "memory two"],
+            summary_token_counter=self.token_counter,
+        )
+        cache = PrefixCheckpointCache(secret=b"test-secret")
+        client = ContextManagingOpenAI(
+            FakeClient(api),
+            RollingMemory(),
+            checkpoint_mode="cache",
+            checkpoint_cache=cache,
+            cache_namespace="tenant-a",
+        )
+        trajectory = [
+            message("developer", "repo rules"),
+            message("user", "old request"),
+            message("user", "current request"),
+        ]
+
+        first = client.responses.create(model="task", input=trajectory)
+        first_update, first_task = api.create_calls
+        self.assertEqual(first_update["input"][-2]["content"], "old request")
+        self.assertEqual(first_update["input"][-1]["content"], ROLLING_MEMORY_PROMPT)
+        self.assertEqual(
+            [item["content"] for item in first_task["input"]],
+            [
+                "repo rules",
+                f"{ROLLING_MEMORY_PREFIX}memory one",
+                "current request",
+            ],
+        )
+        self.assertFalse(any(item.get("type") == "compaction" for item in first.output))
+
+        trajectory.extend(first.output)
+        trajectory.append(message("user", "next request"))
+        client.responses.create(model="task", input=trajectory)
+        second_update, second_task = api.create_calls[-2:]
+        self.assertEqual(
+            [item["content"] for item in second_update["input"][:-1]],
+            [
+                f"{ROLLING_MEMORY_PREFIX}memory one",
+                "current request",
+                "first result",
+            ],
+        )
+        self.assertEqual(
+            [item["content"] for item in second_task["input"]],
+            [
+                "repo rules",
+                f"{ROLLING_MEMORY_PREFIX}memory two",
+                "next request",
+            ],
+        )
+        self.assertEqual(cache.stats().hits, 1)
+
+    def test_rebuild_rolls_long_history_and_caches_intermediate_prefixes(self) -> None:
+        api = FakeResponses(
+            summary_outputs=["memory one", "memory two", "memory three"],
+            summary_token_counter=self.token_counter,
+        )
+        cache = PrefixCheckpointCache(secret=b"test-secret")
+        strategy = RollingMemory(update_input_tokens=30)
+        client = ContextManagingOpenAI(
+            FakeClient(api),
+            strategy,
+            checkpoint_mode="cache",
+            checkpoint_cache=cache,
+            cache_namespace="tenant-a",
+        )
+        original = [message("user", str(index)) for index in range(5)]
+
+        client.responses.create(model="task", input=original)
+
+        task_input = api.create_calls[-1]["input"]
+        self.assertEqual(
+            [item["content"] for item in task_input],
+            [f"{ROLLING_MEMORY_PREFIX}memory three", "4"],
+        )
+        partition = cache.partition(
+            "tenant-a", client.responses.engine._cache_scope({"model": "task"})
+        )
+        branch = [*original[:3], message("user", "different branch")]
+        match = cache.match(partition, branch)
+        assert match is not None
+        self.assertEqual(match.matched_items, 3)
+        self.assertEqual(match.artifact["memory"], "memory two")
+
+    def test_keeps_a_function_call_and_output_together_as_the_current_segment(
+        self,
+    ) -> None:
+        api = FakeResponses(summary_outputs=["task memory"])
+        client = ContextManagingOpenAI(FakeClient(api), RollingMemory())
+        trajectory = [
+            message("user", "run a command"),
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "shell",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "observation",
+            },
+        ]
+
+        client.responses.create(model="task", input=trajectory)
+
+        task_input = api.create_calls[-1]["input"]
+        self.assertEqual(
+            task_input[0]["content"], f"{ROLLING_MEMORY_PREFIX}task memory"
+        )
+        self.assertEqual(task_input[1:], trajectory[1:])
+
+    def test_inline_checkpoint_replays_in_an_append_only_loop(self) -> None:
+        api = FakeResponses(
+            task_outputs=[
+                [message("assistant", "first result")],
+                [message("assistant", "second result")],
+            ],
+            summary_outputs=["memory one", "memory two"],
+        )
+        client = ContextManagingOpenAI(FakeClient(api), RollingMemory())
+        trajectory = [message("user", "old"), message("user", "current")]
+
+        first = client.responses.create(model="task", input=trajectory)
+        self.assertEqual(first.output[0]["type"], "compaction")
+        trajectory.extend(first.output)
+        trajectory.append(message("user", "next"))
+        client.responses.create(model="task", input=trajectory)
+
+        task_input = api.create_calls[-1]["input"]
+        self.assertEqual(
+            [item["content"] for item in task_input],
+            [f"{ROLLING_MEMORY_PREFIX}memory two", "next"],
+        )
+
+    def test_uses_the_configured_updater_model_and_output_limit(self) -> None:
+        api = FakeResponses(summary_outputs=["memory"])
+        client = ContextManagingOpenAI(
+            FakeClient(api),
+            RollingMemory(manager_model="memory-model", max_memory_output_tokens=42),
+        )
+        client.responses.create(
+            model="task",
+            input=[message("user", "old"), message("user", "current")],
+        )
+        update, task = api.create_calls
+        self.assertEqual(update["model"], "memory-model")
+        self.assertEqual(update["max_output_tokens"], 42)
+        self.assertEqual(task["model"], "task")
+
+    def test_environment_selects_the_public_strategy(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "RELAY_STRATEGY": "rolling_memory",
+                "RELAY_MEMORY_MODEL": "memory-model",
+                "RELAY_MEMORY_MAX_OUTPUT_TOKENS": "123",
+                "RELAY_MEMORY_UPDATE_INPUT_TOKENS": "456",
+            },
+        ):
+            selected = relay.strategies.strategy_from_env()
+        self.assertIsInstance(selected, RollingMemory)
+        self.assertEqual(selected.manager_model, "memory-model")
+        self.assertEqual(selected.max_memory_output_tokens, 123)
+        self.assertEqual(selected.update_input_tokens, 456)
+
+
+class SlidingWindowTests(unittest.TestCase):
+    @staticmethod
+    def token_counter(request: dict) -> int:
+        return len(request.get("input", [])) * 10
+
+    def test_keeps_the_longest_tool_safe_suffix_with_protected_prefix(self) -> None:
+        original = [
+            message("developer", "rules"),
+            message("user", "old request"),
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "shell",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "observation",
+            },
+            message("user", "latest request"),
+        ]
+        api = FakeResponses(input_token_counter=self.token_counter)
+        client = ContextManagingOpenAI(
+            FakeClient(api), SlidingWindow(max_input_tokens=40)
+        )
+
+        response = client.responses.create(model="task", input=original)
+
+        sent = api.create_calls[-1]["input"]
+        self.assertEqual(
+            [item.get("content", item.get("type")) for item in sent],
+            ["rules", "function_call", "function_call_output", "latest request"],
+        )
+        self.assertFalse(
+            any(item.get("type") == "compaction" for item in response.output)
+        )
+
+    def test_does_not_split_an_atomic_tool_transaction(self) -> None:
+        api = FakeResponses(input_token_counter=self.token_counter)
+        client = ContextManagingOpenAI(
+            FakeClient(api), SlidingWindow(max_input_tokens=10)
+        )
+        with self.assertRaisesRegex(ValueError, "atomic trajectory segment"):
+            client.responses.create(
+                model="task",
+                input=[
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "shell",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "observation",
+                    },
+                ],
+            )
+
+    def test_is_a_stateless_rebuild_without_checkpoint_artifacts(self) -> None:
+        original = [message("user", str(index)) for index in range(4)]
+        api = FakeResponses(
+            task_outputs=[
+                [message("assistant", "first")],
+                [message("assistant", "second")],
+            ],
+            input_token_counter=self.token_counter,
+        )
+        client = ContextManagingOpenAI(
+            FakeClient(api), SlidingWindow(max_input_tokens=30)
+        )
+
+        first = client.responses.create(model="task", input=original)
+        second = client.responses.create(model="task", input=original)
+
+        self.assertEqual(api.create_calls[0]["input"], original[-3:])
+        self.assertEqual(api.create_calls[1]["input"], original[-3:])
+        self.assertFalse(any(item.get("type") == "compaction" for item in first.output))
+        self.assertFalse(
+            any(item.get("type") == "compaction" for item in second.output)
+        )
+
+    def test_honors_the_context_management_threshold_override(self) -> None:
+        api = FakeResponses(input_token_counter=self.token_counter)
+        client = ContextManagingOpenAI(
+            FakeClient(api), SlidingWindow(max_input_tokens=100)
+        )
+        client.responses.create(
+            model="task",
+            input=[message("user", str(index)) for index in range(3)],
+            context_management=[{"type": "compaction", "compact_threshold": 20}],
+        )
+        self.assertEqual(
+            api.create_calls[-1]["input"],
+            [message("user", "1"), message("user", "2")],
+        )
+
+    def test_environment_selects_the_public_strategy(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "RELAY_STRATEGY": "sliding_window",
+                "RELAY_SLIDING_WINDOW_TOKENS": "321",
+            },
+        ):
+            selected = relay.strategies.strategy_from_env()
+        self.assertIsInstance(selected, SlidingWindow)
+        self.assertEqual(selected.max_input_tokens, 321)
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,7 @@ from .middleware import (
     ManagedResponses,
     wrap,
 )
-from .strategies import Checkpoint, Compact
+from .strategies import Checkpoint, Compact, RollingMemory, SlidingWindow
 
 __all__ = [
     "CacheStats",
@@ -20,5 +20,7 @@ __all__ = [
     "ManagedResponses",
     "PrefixCheckpointCache",
     "PrefixMatch",
+    "RollingMemory",
+    "SlidingWindow",
     "wrap",
 ]
