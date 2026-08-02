@@ -61,7 +61,7 @@ def trajectory_digest(items: Sequence[dict[str, Any]]) -> str:
 def local_compaction_item(
     strategy: str, active_input: Sequence[dict[str, Any]]
 ) -> LocalCompactionItem:
-    """Encode a portable local checkpoint in the official compaction-item shape."""
+    """Encode a Relay-local checkpoint in the Responses compaction-item shape."""
 
     payload = json.dumps(
         {

@@ -10,3 +10,5 @@ relay
 ```
 
 Point the agent's OpenAI base URL to `http://127.0.0.1:8787/v1`.
+
+Relay checkpoints use the Responses compaction-item shape but are Relay-specific; keep Relay in the request path when replaying them.

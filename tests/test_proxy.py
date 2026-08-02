@@ -22,7 +22,13 @@ class FakeInputTokens:
 
     def count(self, **request):
         self.owner.count_calls.append(request)
-        return SimpleNamespace(input_tokens=self.owner.token_count)
+        input_items = request.get("input", [])
+        is_summary = bool(
+            input_items and input_items[-1].get("content") == CODEX_COMPACTION_PROMPT
+        )
+        return SimpleNamespace(
+            input_tokens=1 if is_summary else self.owner.token_count
+        )
 
 
 class FakeManagementResponses:

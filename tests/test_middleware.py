@@ -17,23 +17,23 @@ def message(role: str, text: str) -> dict:
     return {"type": "message", "role": role, "content": text}
 
 
-class FakeContextWindowError(Exception):
-    status_code = 400
-    body = {
-        "error": {
-            "code": "context_length_exceeded",
-            "message": "maximum context length exceeded",
-        }
-    }
-
-
 class FakeInputTokens:
     def __init__(self, owner: "FakeResponses") -> None:
         self.owner = owner
 
     def count(self, **request):
         self.owner.count_calls.append(request)
-        return SimpleNamespace(input_tokens=self.owner.token_count)
+        input_items = request.get("input", [])
+        is_summary = bool(
+            input_items and input_items[-1].get("content") == CODEX_COMPACTION_PROMPT
+        )
+        if is_summary and self.owner.summary_token_counter is not None:
+            tokens = self.owner.summary_token_counter(request)
+        elif is_summary:
+            tokens = 1
+        else:
+            tokens = self.owner.token_count
+        return SimpleNamespace(input_tokens=tokens)
 
 
 class FakeResponses:
@@ -42,11 +42,13 @@ class FakeResponses:
         *,
         token_count: int = 1,
         task_outputs=None,
-        summary_failures: int = 0,
+        summary_outputs=None,
+        summary_token_counter=None,
     ) -> None:
         self.token_count = token_count
         self.task_outputs = list(task_outputs or [[message("assistant", "task result")]])
-        self.summary_failures = summary_failures
+        self.summary_outputs = list(summary_outputs or [])
+        self.summary_token_counter = summary_token_counter
         self.create_calls: list[dict] = []
         self.count_calls: list[dict] = []
         self.input_tokens = FakeInputTokens(self)
@@ -55,10 +57,12 @@ class FakeResponses:
         self.create_calls.append(request)
         last = request.get("input", [{}])[-1]
         if last.get("content") == CODEX_COMPACTION_PROMPT:
-            if self.summary_failures:
-                self.summary_failures -= 1
-                raise FakeContextWindowError()
-            return SimpleNamespace(output=[], output_text="durable coding handoff")
+            output_text = (
+                self.summary_outputs.pop(0)
+                if self.summary_outputs
+                else "durable coding handoff"
+            )
+            return SimpleNamespace(output=[], output_text=output_text)
         output = self.task_outputs.pop(0)
         response = SimpleNamespace(output=output, output_text="")
         if request.get("stream") is True:
@@ -214,26 +218,45 @@ class CompactTests(unittest.TestCase):
         )
         self.assertIn("tokens truncated", compacted[0]["content"])
 
-    def test_retries_summary_after_trimming_oldest_history_on_context_overflow(self) -> None:
-        api = FakeResponses(token_count=500, summary_failures=1)
-        client = ContextManagingOpenAI(FakeClient(api), Compact(compact_threshold=100))
+    def test_rebuild_folds_every_history_chunk_in_order(self) -> None:
+        def summary_tokens(request: dict) -> int:
+            return len(request["input"]) * 10
+
+        api = FakeResponses(
+            token_count=500,
+            summary_outputs=["summary 1", "summary 2", "summary 3", "summary 4"],
+            summary_token_counter=summary_tokens,
+        )
+        client = ContextManagingOpenAI(FakeClient(api), Compact(compact_threshold=35))
+        original = [
+            message("user", "one"),
+            message("assistant", "two"),
+            message("user", "three"),
+            message("assistant", "four"),
+            message("user", "five"),
+        ]
         client.responses.create(
             model="task",
-            input=[
-                message("developer", "rules"),
-                message("user", "oldest"),
-                message("assistant", "work"),
-                message("user", "current"),
-            ],
+            input=original,
         )
         summary_calls = [
             call
             for call in api.create_calls
             if call["input"][-1].get("content") == CODEX_COMPACTION_PROMPT
         ]
-        self.assertEqual(len(summary_calls), 2)
-        self.assertFalse(
-            any(item.get("content") == "oldest" for item in summary_calls[1]["input"])
+        consumed = [
+            item["content"]
+            for call in summary_calls
+            for item in call["input"][:-1]
+            if not str(item.get("content", "")).startswith(CODEX_SUMMARY_PREFIX)
+        ]
+        self.assertEqual(consumed, [item["content"] for item in original])
+        self.assertEqual(len(summary_calls), 4)
+        self.assertTrue(
+            all(
+                call["input"][0]["content"].startswith(CODEX_SUMMARY_PREFIX)
+                for call in summary_calls[1:]
+            )
         )
 
     def test_default_is_compact(self) -> None:
