@@ -51,22 +51,17 @@ your-agent
 
 ## Configuration
 
-- `Compact()` / `RELAY_STRATEGY=compact`: replace the active context with one
-  compacted checkpoint at `RELAY_COMPACT_THRESHOLD` (default `120000`).
-- `Checkpoint()` / `RELAY_STRATEGY=checkpoint`: create chunk checkpoints at
-  `RELAY_CHECKPOINT_THRESHOLD` (default `30000`) and replace old chunks after
-  `RELAY_CONTEXT_THRESHOLD` (default `120000`).
-- `SlidingWindow()` / `RELAY_STRATEGY=sliding_window`: keep the longest
-  tool-safe suffix within `RELAY_SLIDING_WINDOW_TOKENS` (default `120000`).
-- `RollingMemory()` / `RELAY_STRATEGY=rolling_memory`: recursively update a
-  compact working memory and keep the newest tool-safe segment verbatim.
-  Configure its updater with `RELAY_MEMORY_MODEL`,
-  `RELAY_MEMORY_MAX_OUTPUT_TOKENS` (default `4000`), and
-  `RELAY_MEMORY_UPDATE_INPUT_TOKENS` (default `120000`).
-- `checkpoint_mode="cache"` / `RELAY_CHECKPOINT_MODE=cache`: keep artifacts in
-  Relay's exact-prefix cache and leave agent responses unchanged.
-- `checkpoint_mode="inline"` / `RELAY_CHECKPOINT_MODE=inline`: return Relay
-  checkpoint items for the agent to append to its trajectory.
+| Strategy | Python | `RELAY_STRATEGY` | Behavior | Configuration |
+| --- | --- | --- | --- | --- |
+| Compact | `Compact()` | `compact` | Replace active context with a compacted checkpoint. | `RELAY_COMPACT_THRESHOLD=120000` |
+| Checkpoint | `Checkpoint()` | `checkpoint` | Create chunk checkpoints, then replace old chunks as context grows. | `RELAY_CHECKPOINT_THRESHOLD=30000`<br>`RELAY_CONTEXT_THRESHOLD=120000` |
+| Sliding window | `SlidingWindow()` | `sliding_window` | Keep the longest tool-safe suffix. | `RELAY_SLIDING_WINDOW_TOKENS=120000` |
+| Rolling memory | `RollingMemory()` | `rolling_memory` | Recursively update working memory while keeping the newest tool-safe segment verbatim. | `RELAY_MEMORY_MODEL`<br>`RELAY_MEMORY_MAX_OUTPUT_TOKENS=4000`<br>`RELAY_MEMORY_UPDATE_INPUT_TOKENS=120000` |
+
+| Checkpoint mode | Python | Environment | Behavior |
+| --- | --- | --- | --- |
+| Cache | `checkpoint_mode="cache"` | `RELAY_CHECKPOINT_MODE=cache` | Store artifacts in Relay's exact-prefix cache without changing agent responses. |
+| Inline | `checkpoint_mode="inline"` | `RELAY_CHECKPOINT_MODE=inline` | Return Relay checkpoint items for the agent to append to its trajectory. |
 
 Cache mode is recommended for transparent integration. Inline checkpoints are
 Relay-specific and require Relay to remain in the request path when replayed.
