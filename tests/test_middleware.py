@@ -174,7 +174,16 @@ class CompactTests(unittest.TestCase):
     def test_public_strategy_surface_contains_finalized_strategies(self) -> None:
         self.assertEqual(
             relay.strategies.__all__,
-            ["RLM", "Checkpoint", "Compact", "RollingMemory", "SlidingWindow"],
+            [
+                "RLM",
+                "AgentFold",
+                "AutoCompact",
+                "Checkpoint",
+                "Compact",
+                "ContextFolding",
+                "RollingMemory",
+                "SlidingWindow",
+            ],
         )
         self.assertEqual(
             [name for name in relay.__all__ if name.endswith("Compaction")], []

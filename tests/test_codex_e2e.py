@@ -24,14 +24,19 @@ from starlette.routing import Route
 
 from relay import (
     RLM,
+    AgentFold,
+    AutoCompact,
     Checkpoint,
     Compact,
+    ContextFolding,
     PrefixCheckpointCache,
     RollingMemory,
     SlidingWindow,
 )
 from relay.proxy import ProxyConfig, create_app
+from relay.strategies.auto_compact import AUTO_CONTEXT_SUMMARY
 from relay.strategies.compact import CODEX_COMPACTION_PROMPT, CODEX_SUMMARY_PREFIX
+from relay.strategies.context_folding import CONTEXT_FOLDING_RETURN_PREFIX
 from relay.strategies.rlm import RLM_HANDOFF_PREFIX
 from relay.strategies.rolling_memory import (
     ROLLING_MEMORY_PREFIX,
@@ -281,13 +286,15 @@ def _tool_sse(body: dict[str, Any], response_id: str) -> bytes:
 
 
 class _FakeResponsesUpstream:
-    def __init__(self, *, tool_first: bool = False) -> None:
+    def __init__(self, *, tool_first: bool = False, mini_mode: bool = False) -> None:
         self.tool_first = tool_first
+        self.mini_mode = mini_mode
         self.lock = threading.Lock()
         self.main_requests: list[dict[str, Any]] = []
         self.summary_requests: list[dict[str, Any]] = []
         self.count_requests: list[dict[str, Any]] = []
         self.rlm_requests: list[dict[str, Any]] = []
+        self.manager_requests: list[dict[str, Any]] = []
         self.app = Starlette(
             routes=[Route("/{path:path}", self.dispatch, methods=["POST"])]
         )
@@ -355,6 +362,48 @@ class _FakeResponsesUpstream:
         if request.url.path != "/v1/responses":
             return JSONResponse({"error": "not found"}, status_code=404)
 
+        schema_name = body.get("text", {}).get("format", {}).get("name")
+        if isinstance(schema_name, str) and schema_name.startswith("relay_"):
+            with self.lock:
+                self.manager_requests.append(body)
+                same_kind = [
+                    value
+                    for value in self.manager_requests
+                    if value.get("text", {}).get("format", {}).get("name")
+                    == schema_name
+                ]
+                number = len(same_kind)
+            if schema_name == "relay_context_folding_decision":
+                value = (
+                    {"action": "open", "objective": "resume subtask", "summary": ""}
+                    if number == 1
+                    else {
+                        "action": "return",
+                        "objective": "",
+                        "summary": "hidden branch completed",
+                    }
+                )
+            elif schema_name == "relay_agent_fold_directive":
+                value = {
+                    "compress_range": [1, number],
+                    "compress_text": f"agent fold state {number}",
+                }
+            elif schema_name == "relay_auto_compact_decision":
+                value = (
+                    {
+                        "action": "compact",
+                        "summary": "auto compact working state",
+                        "reason": "phase boundary",
+                    }
+                    if number == 1
+                    else {"action": "keep", "summary": "", "reason": "continue"}
+                )
+            else:
+                return JSONResponse({"error": "unknown manager schema"}, status_code=400)
+            return JSONResponse(
+                _response(body, json.dumps(value), f"resp_manager_{len(self.manager_requests)}")
+            )
+
         if _is_summary_request(body):
             with self.lock:
                 self.summary_requests.append(body)
@@ -371,6 +420,18 @@ class _FakeResponsesUpstream:
             self.main_requests.append(body)
             number = len(self.main_requests)
         if body.get("stream") is not True:
+            if self.mini_mode:
+                command = (
+                    "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && echo relay-mini-ok"
+                    if number == 3
+                    else "pwd"
+                )
+                response = _tool_response(body, f"resp_mini_{number}")
+                response["output"][1]["name"] = "bash"
+                response["output"][1]["arguments"] = json.dumps(
+                    {"command": command}, separators=(",", ":")
+                )
+                return JSONResponse(response)
             return JSONResponse({"error": "Codex did not request SSE"}, status_code=400)
         if self.tool_first and number == 1:
             return Response(
@@ -576,8 +637,104 @@ def _resume_case(
     return upstream, cache, first, second
 
 
+def _adaptive_resume_case(
+    codex: str, strategy: Any, cache_secret: bytes
+) -> tuple[
+    _FakeResponsesUpstream,
+    PrefixCheckpointCache,
+    list[subprocess.CompletedProcess[str]],
+]:
+    upstream = _FakeResponsesUpstream()
+    cache = PrefixCheckpointCache(secret=cache_secret)
+    with _serve(upstream.app) as upstream_url:
+        relay = create_app(
+            strategy,
+            ProxyConfig(
+                upstream_base_url=f"{upstream_url}/v1",
+                upstream_api_key="upstream-test-key",
+                checkpoint_mode="cache",
+            ),
+            checkpoint_cache=cache,
+        )
+        with _serve(relay) as relay_url, tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            codex_home = root_path / "codex-home"
+            workspace = root_path / "workspace"
+            codex_home.mkdir()
+            workspace.mkdir()
+            _write_codex_config(codex_home, relay_url)
+            results = [
+                _run_codex(
+                    codex,
+                    codex_home,
+                    workspace,
+                    [
+                        "exec",
+                        "--json",
+                        "--skip-git-repo-check",
+                        "--sandbox",
+                        "read-only",
+                        "--cd",
+                        str(workspace),
+                        "Reply with the model result and do not use tools.",
+                    ],
+                )
+            ]
+            for prompt in ("Continue once.", "Continue twice."):
+                results.append(
+                    _run_codex(
+                        codex,
+                        codex_home,
+                        workspace,
+                        [
+                            "exec",
+                            "resume",
+                            "--last",
+                            "--json",
+                            "--skip-git-repo-check",
+                            prompt,
+                        ],
+                    )
+                )
+    return upstream, cache, results
+
+
 @unittest.skipUnless(shutil.which("codex"), "Codex CLI is not installed")
 class CodexEndToEndTests(unittest.TestCase):
+    def _assert_adaptive_strategy(
+        self,
+        strategy: Any,
+        secret: bytes,
+        schema_name: str,
+        expected_third_input: str,
+        min_cache_hits: int = 2,
+    ) -> None:
+        codex = shutil.which("codex")
+        assert codex is not None
+        upstream, cache, results = _adaptive_resume_case(codex, strategy, secret)
+        for index, result in enumerate(results, start=1):
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(f"RELAY_CODEX_TURN_{index}_OK", result.stdout)
+        self.assertEqual(len(upstream.main_requests), 3)
+        self.assertEqual(len(upstream.manager_requests), 2)
+        self.assertEqual(
+            {
+                body["text"]["format"]["name"]
+                for body in upstream.manager_requests
+            },
+            {schema_name},
+        )
+        self.assertGreaterEqual(cache.stats().hits, min_cache_hits)
+        self.assertIn(expected_third_input, str(upstream.main_requests[2]["input"]))
+        for body in upstream.main_requests:
+            self.assertTrue(body["stream"])
+            self.assertFalse(
+                any(item.get("type") == "compaction" for item in body["input"])
+            )
+            self.assertFalse(
+                any(item.get("name") in {"branch", "return", "compact"} for item in body["input"])
+            )
+
     def _assert_resume_compatibility(
         self,
         strategy: Any,
@@ -636,6 +793,31 @@ class CodexEndToEndTests(unittest.TestCase):
             b"codex-rolling-memory-e2e-test",
             first_is_compacted=True,
             context_prefix=ROLLING_MEMORY_PREFIX,
+        )
+
+    def test_context_folding_runs_through_real_codex_resumes(self) -> None:
+        self._assert_adaptive_strategy(
+            ContextFolding(),
+            b"codex-context-folding-e2e-test",
+            "relay_context_folding_decision",
+            CONTEXT_FOLDING_RETURN_PREFIX,
+        )
+
+    def test_agent_fold_runs_through_real_codex_resumes(self) -> None:
+        self._assert_adaptive_strategy(
+            AgentFold(),
+            b"codex-agent-fold-e2e-test",
+            "relay_agent_fold_directive",
+            "Multi-Scale State Summaries",
+        )
+
+    def test_auto_compact_runs_through_real_codex_resumes(self) -> None:
+        self._assert_adaptive_strategy(
+            AutoCompact(fallback_threshold=1_000_000),
+            b"codex-auto-compact-e2e-test",
+            "relay_auto_compact_decision",
+            AUTO_CONTEXT_SUMMARY,
+            min_cache_hits=1,
         )
 
     @unittest.skipUnless(find_spec("rlm"), "official RLM package is not installed")

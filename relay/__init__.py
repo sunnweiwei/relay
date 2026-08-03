@@ -7,15 +7,27 @@ from .middleware import (
     ManagedResponses,
     wrap,
 )
-from .strategies import RLM, Checkpoint, Compact, RollingMemory, SlidingWindow
+from .strategies import (
+    RLM,
+    AgentFold,
+    AutoCompact,
+    Checkpoint,
+    Compact,
+    ContextFolding,
+    RollingMemory,
+    SlidingWindow,
+)
 
 __all__ = [
     "RLM",
+    "AgentFold",
+    "AutoCompact",
     "CacheStats",
     "Checkpoint",
     "Compact",
     "CompactResponse",
     "ContextEngine",
+    "ContextFolding",
     "ContextManagingOpenAI",
     "ManagedResponse",
     "ManagedResponses",
