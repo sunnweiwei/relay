@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/relay.gif" alt="Relay" width="1000">
+</p>
+
 # Relay
 
 Relay is transparent context management for append-only OpenAI Responses API
