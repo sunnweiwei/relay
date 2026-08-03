@@ -7,9 +7,10 @@ from .middleware import (
     ManagedResponses,
     wrap,
 )
-from .strategies import Checkpoint, Compact, RollingMemory, SlidingWindow
+from .strategies import RLM, Checkpoint, Compact, RollingMemory, SlidingWindow
 
 __all__ = [
+    "RLM",
     "CacheStats",
     "Checkpoint",
     "Compact",

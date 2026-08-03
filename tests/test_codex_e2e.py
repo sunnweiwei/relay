@@ -12,6 +12,7 @@ import time
 import unittest
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from relay import (
+    RLM,
     Checkpoint,
     Compact,
     PrefixCheckpointCache,
@@ -30,6 +32,7 @@ from relay import (
 )
 from relay.proxy import ProxyConfig, create_app
 from relay.strategies.compact import CODEX_COMPACTION_PROMPT, CODEX_SUMMARY_PREFIX
+from relay.strategies.rlm import RLM_HANDOFF_PREFIX
 from relay.strategies.rolling_memory import (
     ROLLING_MEMORY_PREFIX,
     ROLLING_MEMORY_PROMPT,
@@ -284,12 +287,54 @@ class _FakeResponsesUpstream:
         self.main_requests: list[dict[str, Any]] = []
         self.summary_requests: list[dict[str, Any]] = []
         self.count_requests: list[dict[str, Any]] = []
+        self.rlm_requests: list[dict[str, Any]] = []
         self.app = Starlette(
             routes=[Route("/{path:path}", self.dispatch, methods=["POST"])]
         )
 
     async def dispatch(self, request: Request) -> Response:
         body = await request.json()
+        if request.url.path == "/v1/chat/completions":
+            with self.lock:
+                self.rlm_requests.append(body)
+                number = len(self.rlm_requests)
+            if number % 2:
+                content = (
+                    "```repl\n"
+                    "print(len(context['input']), sorted(context.keys()))\n"
+                    "```"
+                )
+            else:
+                content = (
+                    "```repl\n"
+                    "answer['content'] = "
+                    "'Return the requested result without using tools.'\n"
+                    "answer['ready'] = True\n"
+                    "```"
+                )
+            return JSONResponse(
+                {
+                    "id": f"chat_rlm_{number}",
+                    "object": "chat.completion",
+                    "created": 1,
+                    "model": body.get("model", "relay-rlm-test-model"),
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": content,
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 10,
+                        "total_tokens": 20,
+                    },
+                }
+            )
         if request.url.path == "/v1/responses/input_tokens":
             with self.lock:
                 self.count_requests.append(body)
@@ -592,6 +637,38 @@ class CodexEndToEndTests(unittest.TestCase):
             first_is_compacted=True,
             context_prefix=ROLLING_MEMORY_PREFIX,
         )
+
+    @unittest.skipUnless(find_spec("rlm"), "official RLM package is not installed")
+    def test_rlm_streams_and_resumes_with_a_fresh_official_query(self) -> None:
+        codex = shutil.which("codex")
+        assert codex is not None
+        upstream, cache, first, second = _resume_case(
+            codex,
+            RLM(manager_model="relay-rlm-test-model", max_iterations=3),
+            b"codex-rlm-e2e-test",
+        )
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertIn("RELAY_CODEX_TURN_1_OK", first.stdout)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn("RELAY_CODEX_TURN_2_OK", second.stdout)
+        self.assertEqual(len(upstream.rlm_requests), 4)
+        self.assertEqual(
+            [len(body["messages"]) for body in upstream.rlm_requests],
+            [3, 6, 3, 6],
+        )
+        self.assertEqual(len(upstream.main_requests), 2)
+        self.assertEqual(upstream.summary_requests, [])
+        self.assertEqual(cache.stats().entries, 0)
+        self.assertEqual(cache.stats().hits, 0)
+        for body in upstream.main_requests:
+            self.assertTrue(body["stream"])
+            self.assertTrue(
+                _text(body["input"][-1]).startswith(RLM_HANDOFF_PREFIX)
+            )
+            self.assertFalse(
+                any(item.get("type") == "compaction" for item in body["input"])
+            )
 
     def test_readme_console_command_and_codex_provider_config(self) -> None:
         codex = shutil.which("codex")

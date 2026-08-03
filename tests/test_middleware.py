@@ -7,6 +7,7 @@ from unittest.mock import patch
 import relay
 import relay.strategies
 from relay import (
+    RLM,
     Checkpoint,
     Compact,
     ContextManagingOpenAI,
@@ -21,6 +22,7 @@ from relay.strategies.compact import (
     CODEX_SUMMARY_PREFIX,
     _retain_user_messages,
 )
+from relay.strategies.rlm import RLM_HANDOFF_PREFIX, RLM_ROOT_PROMPT
 from relay.strategies.rolling_memory import (
     ROLLING_MEMORY_PREFIX,
     ROLLING_MEMORY_PROMPT,
@@ -126,6 +128,28 @@ class FakeClient:
         self.responses = responses
 
 
+class RecordingRLMFactory:
+    def __init__(self, *proposals: str) -> None:
+        self.proposals = list(proposals or ["Return the requested result."])
+        self.configs: list[dict] = []
+        self.completion_calls: list[tuple[dict, str | None]] = []
+        self.closed = 0
+
+    def __call__(self, **config):
+        self.configs.append(config)
+        owner = self
+
+        class Runtime:
+            def completion(self, context, root_prompt=None):
+                owner.completion_calls.append((context, root_prompt))
+                return SimpleNamespace(response=owner.proposals.pop(0))
+
+            def close(self):
+                owner.closed += 1
+
+        return Runtime()
+
+
 class CompactTests(unittest.TestCase):
     def test_wrap_returns_a_client_view_without_mutating_the_original(self) -> None:
         api = FakeResponses(task_outputs=[[message("assistant", "result")]])
@@ -150,7 +174,7 @@ class CompactTests(unittest.TestCase):
     def test_public_strategy_surface_contains_finalized_strategies(self) -> None:
         self.assertEqual(
             relay.strategies.__all__,
-            ["Checkpoint", "Compact", "RollingMemory", "SlidingWindow"],
+            ["RLM", "Checkpoint", "Compact", "RollingMemory", "SlidingWindow"],
         )
         self.assertEqual(
             [name for name in relay.__all__ if name.endswith("Compaction")], []
@@ -624,6 +648,147 @@ class CheckpointTests(unittest.TestCase):
 
         assert match is not None
         self.assertTrue(match.artifact["chunks"][0]["evicted"])
+
+
+class RLMTests(unittest.TestCase):
+    def test_runs_the_official_fresh_query_contract_and_renders_one_turn(
+        self,
+    ) -> None:
+        factory = RecordingRLMFactory(
+            "Call the shell tool with command `git status --short`."
+        )
+        api = FakeResponses(task_outputs=[[message("assistant", "task result")]])
+        api._client = SimpleNamespace(
+            api_key="test-key",
+            base_url="https://upstream.test/v1/",
+            organization="org-test",
+            project="project-test",
+        )
+        cache = PrefixCheckpointCache(secret=b"test-secret")
+        client = ContextManagingOpenAI(
+            FakeClient(api),
+            RLM(
+                manager_model="manager-model",
+                max_depth=2,
+                max_iterations=7,
+                environment="local",
+            ),
+            checkpoint_mode="cache",
+            checkpoint_cache=cache,
+            cache_namespace="tenant-a",
+        )
+        trajectory = [
+            message("developer", "repo rules"),
+            message("user", "inspect the repository"),
+            {
+                "type": "function_call_output",
+                "call_id": "call_old",
+                "output": "old observation",
+            },
+        ]
+        tools = [
+            {
+                "type": "function",
+                "name": "shell",
+                "parameters": {"type": "object"},
+            }
+        ]
+
+        with patch("relay.strategies.rlm._official_runtime", factory):
+            response = client.responses.create(
+                model="task-model",
+                instructions="Act as a coding agent.",
+                tools=tools,
+                input=trajectory,
+            )
+
+        self.assertEqual(len(factory.configs), 1)
+        config = factory.configs[0]
+        self.assertEqual(config["backend"], "openai")
+        self.assertEqual(config["backend_kwargs"]["model_name"], "manager-model")
+        self.assertEqual(config["backend_kwargs"]["api_key"], "test-key")
+        self.assertEqual(
+            config["backend_kwargs"]["base_url"], "https://upstream.test/v1/"
+        )
+        self.assertEqual(config["max_depth"], 2)
+        self.assertEqual(config["max_iterations"], 7)
+        self.assertFalse(config["persistent"])
+        self.assertFalse(config["compaction"])
+        context, root_prompt = factory.completion_calls[0]
+        self.assertEqual(context["input"], trajectory)
+        self.assertEqual(context["instructions"], "Act as a coding agent.")
+        self.assertEqual(context["tools"], tools)
+        self.assertNotIn("stream", context)
+        self.assertEqual(root_prompt, RLM_ROOT_PROMPT)
+
+        task_call = api.create_calls[-1]
+        self.assertEqual(task_call["model"], "task-model")
+        self.assertEqual(task_call["input"][0], trajectory[0])
+        self.assertEqual(len(task_call["input"]), 2)
+        self.assertTrue(
+            task_call["input"][1]["content"].startswith(RLM_HANDOFF_PREFIX)
+        )
+        self.assertIn("git status --short", task_call["input"][1]["content"])
+        self.assertFalse(
+            any(item.get("type") == "compaction" for item in response.output)
+        )
+        self.assertEqual(factory.closed, 1)
+        self.assertEqual(cache.stats().entries, 0)
+
+    def test_reruns_the_complete_trajectory_without_checkpoint_reuse(self) -> None:
+        factory = RecordingRLMFactory("first proposal", "second proposal")
+        api = FakeResponses(
+            task_outputs=[
+                [message("assistant", "first result")],
+                [message("assistant", "second result")],
+            ]
+        )
+        cache = PrefixCheckpointCache(secret=b"test-secret")
+        client = ContextManagingOpenAI(
+            FakeClient(api),
+            RLM(),
+            checkpoint_mode="cache",
+            checkpoint_cache=cache,
+            cache_namespace="tenant-a",
+        )
+        trajectory = [message("user", "initial task")]
+
+        with patch("relay.strategies.rlm._official_runtime", factory):
+            first = client.responses.create(model="task", input=trajectory)
+            trajectory.extend(first.output)
+            trajectory.append(message("user", "continue"))
+            client.responses.create(model="task", input=trajectory)
+
+        self.assertEqual(len(factory.completion_calls), 2)
+        self.assertEqual(factory.completion_calls[0][0]["input"], trajectory[:1])
+        self.assertEqual(factory.completion_calls[1][0]["input"], trajectory)
+        self.assertEqual(factory.closed, 2)
+        self.assertEqual(cache.stats().entries, 0)
+        self.assertEqual(cache.stats().hits, 0)
+
+    def test_environment_selects_the_public_strategy(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "RELAY_STRATEGY": "rlm",
+                "RELAY_RLM_MODEL": "manager-model",
+                "RELAY_RLM_MAX_DEPTH": "2",
+                "RELAY_RLM_MAX_ITERATIONS": "8",
+                "RELAY_RLM_ENVIRONMENT": "docker",
+                "RELAY_RLM_MAX_TIMEOUT": "30.5",
+                "RELAY_RLM_MAX_TOKENS": "9000",
+                "RELAY_RLM_ORCHESTRATOR": "false",
+            },
+        ):
+            selected = relay.strategies.strategy_from_env()
+        self.assertIsInstance(selected, RLM)
+        self.assertEqual(selected.manager_model, "manager-model")
+        self.assertEqual(selected.max_depth, 2)
+        self.assertEqual(selected.max_iterations, 8)
+        self.assertEqual(selected.environment, "docker")
+        self.assertEqual(selected.max_timeout, 30.5)
+        self.assertEqual(selected.max_tokens, 9000)
+        self.assertFalse(selected.orchestrator)
 
 
 class RollingMemoryTests(unittest.TestCase):

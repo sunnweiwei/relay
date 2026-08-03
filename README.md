@@ -9,6 +9,12 @@ agent loops. Use it as a Python client wrapper or an OpenAI-compatible proxy.
 pip install -e .
 ```
 
+RLM support uses the authors' official package:
+
+```bash
+pip install -e '.[rlm]'
+```
+
 ## Python
 
 Wrap a synchronous OpenAI client and keep the rest of the agent loop unchanged:
@@ -57,6 +63,7 @@ your-agent
 | Checkpoint | `Checkpoint()` | `checkpoint` | Create chunk checkpoints, then replace old chunks as context grows. | `RELAY_CHECKPOINT_THRESHOLD=30000`<br>`RELAY_CONTEXT_THRESHOLD=120000` |
 | Sliding window | `SlidingWindow()` | `sliding_window` | Keep the longest tool-safe suffix. | `RELAY_SLIDING_WINDOW_TOKENS=120000` |
 | Rolling memory | `RollingMemory()` | `rolling_memory` | Recursively update working memory while keeping the newest tool-safe segment verbatim. | `RELAY_MEMORY_MODEL`<br>`RELAY_MEMORY_MAX_OUTPUT_TOKENS=4000`<br>`RELAY_MEMORY_UPDATE_INPUT_TOKENS=120000` |
+| RLM | `RLM()` | `rlm` | Run the official Recursive Language Model over the full request, then render its result as one Responses turn. | `RELAY_RLM_MODEL`<br>`RELAY_RLM_MAX_DEPTH=1`<br>`RELAY_RLM_MAX_ITERATIONS=30`<br>`RELAY_RLM_ENVIRONMENT=local`<br>`RELAY_RLM_MAX_TIMEOUT`<br>`RELAY_RLM_MAX_TOKENS` |
 
 | Checkpoint mode | Python | Environment | Behavior |
 | --- | --- | --- | --- |
@@ -65,6 +72,13 @@ your-agent
 
 Cache mode is recommended for transparent integration. Inline checkpoints are
 Relay-specific and require Relay to remain in the request path when replayed.
+
+RLM follows the official fresh-query behavior: every request processes the full
+trajectory with `persistent=False` and `compaction=False`. It does not create or
+reuse Relay checkpoints. Its manager model uses Chat Completions; the original
+request model remains the Responses renderer. The default `local` RLM environment
+executes model-generated Python in the Relay process; use an isolated official
+RLM environment for untrusted workloads.
 
 ## Codex
 
