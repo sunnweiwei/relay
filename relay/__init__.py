@@ -14,6 +14,7 @@ from .strategies import (
     Checkpoint,
     Compact,
     ContextFolding,
+    ProLong,
     RollingMemory,
     SlidingWindow,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "ManagedResponses",
     "PrefixCheckpointCache",
     "PrefixMatch",
+    "ProLong",
     "RollingMemory",
     "SlidingWindow",
     "wrap",

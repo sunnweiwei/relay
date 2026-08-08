@@ -380,6 +380,9 @@ class ContextEngine:
                 continue
             local = decode_local_checkpoint(item, self.strategy.name)
             if local is None:
+                if getattr(self.strategy, "preserve_full_trajectory", False):
+                    trajectory.append(deepcopy(item))
+                    continue
                 # Official encrypted compaction items are canonical model input and
                 # replace everything that preceded them.
                 trajectory = [deepcopy(item)]
@@ -445,6 +448,8 @@ class ContextEngine:
         forwarded = dict(request)
         forwarded["input"] = deepcopy(prepared.input)
         forwarded.update(deepcopy(prepared.overrides))
+        if getattr(self.strategy, "preserve_native_compaction", False):
+            return forwarded
         management = [
             deepcopy(item)
             for item in forwarded.get("context_management") or []
@@ -474,6 +479,40 @@ class ContextEngine:
         has_official_compaction = any(
             item.get("type") == "compaction" for item in output
         )
+        if has_official_compaction and hasattr(
+            self.strategy, "checkpoint_after_native_compaction"
+        ):
+            compaction_index = max(
+                index
+                for index, item in enumerate(output)
+                if item.get("type") == "compaction"
+            )
+            compaction_item = output[compaction_index]
+            alias = self.strategy.checkpoint_after_native_compaction(
+                deepcopy(prepared.raw_input),
+                prepared.checkpoint,
+                deepcopy(output[: compaction_index + 1]),
+            )
+            if (
+                self.checkpoint_cache is not None
+                and prepared.cache_partition is not None
+            ):
+                self.checkpoint_cache.put(
+                    prepared.cache_partition,
+                    [compaction_item],
+                    alias.artifact,
+                )
+            elif self.emits_checkpoints:
+                inline_prefix = [
+                    *deepcopy(prepared.raw_input),
+                    *deepcopy(output[: compaction_index + 1]),
+                ]
+                alias_marker = local_compaction_item(
+                    self.strategy.name,
+                    alias.artifact,
+                    trajectory_prefix=inline_prefix,
+                )
+                visible_output.insert(compaction_index + 1, alias_marker)
         if (
             (marker := self.checkpoint_item(prepared)) is not None
             and not has_official_compaction

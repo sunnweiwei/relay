@@ -30,6 +30,7 @@ from relay import (
     Compact,
     ContextFolding,
     PrefixCheckpointCache,
+    ProLong,
     RollingMemory,
     SlidingWindow,
 )
@@ -37,6 +38,7 @@ from relay.proxy import ProxyConfig, create_app
 from relay.strategies.auto_compact import AUTO_CONTEXT_SUMMARY
 from relay.strategies.compact import CODEX_COMPACTION_PROMPT, CODEX_SUMMARY_PREFIX
 from relay.strategies.context_folding import CONTEXT_FOLDING_RETURN_PREFIX
+from relay.strategies.prolong import PROLONG_CONTEXT_PREFIX
 from relay.strategies.rlm import RLM_HANDOFF_PREFIX
 from relay.strategies.rolling_memory import (
     ROLLING_MEMORY_PREFIX,
@@ -351,7 +353,11 @@ class _FakeResponsesUpstream:
                 5
                 if isinstance(item, dict)
                 and _text(item).startswith(
-                    (CODEX_SUMMARY_PREFIX, ROLLING_MEMORY_PREFIX)
+                    (
+                        CODEX_SUMMARY_PREFIX,
+                        ROLLING_MEMORY_PREFIX,
+                        PROLONG_CONTEXT_PREFIX,
+                    )
                 )
                 else 30
                 for item in body.get("input") or []
@@ -398,6 +404,31 @@ class _FakeResponsesUpstream:
                     if number == 1
                     else {"action": "keep", "summary": "", "reason": "continue"}
                 )
+            elif schema_name == "relay_prolong_context":
+                if body.get("tool_choice") == "required":
+                    response = _response(
+                        body,
+                        "",
+                        f"resp_manager_{len(self.manager_requests)}",
+                    )
+                    response["output"] = [
+                        _reasoning_item(
+                            f"resp_manager_{len(self.manager_requests)}"
+                        ),
+                        {
+                            "id": f"fc_manager_{len(self.manager_requests)}",
+                            "type": "function_call",
+                            "call_id": f"call_manager_{len(self.manager_requests)}",
+                            "name": "log_read",
+                            "arguments": json.dumps(
+                                {"start_line": 1, "end_line": 20},
+                                separators=(",", ":"),
+                            ),
+                            "status": "completed",
+                        },
+                    ]
+                    return JSONResponse(response)
+                value = {"context": "PRO-LONG working context"}
             else:
                 return JSONResponse({"error": "unknown manager schema"}, status_code=400)
             return JSONResponse(
@@ -708,6 +739,7 @@ class CodexEndToEndTests(unittest.TestCase):
         schema_name: str,
         expected_third_input: str,
         min_cache_hits: int = 2,
+        expected_manager_requests: int = 2,
     ) -> None:
         codex = shutil.which("codex")
         assert codex is not None
@@ -716,7 +748,9 @@ class CodexEndToEndTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(f"RELAY_CODEX_TURN_{index}_OK", result.stdout)
         self.assertEqual(len(upstream.main_requests), 3)
-        self.assertEqual(len(upstream.manager_requests), 2)
+        self.assertEqual(
+            len(upstream.manager_requests), expected_manager_requests
+        )
         self.assertEqual(
             {
                 body["text"]["format"]["name"]
@@ -724,6 +758,17 @@ class CodexEndToEndTests(unittest.TestCase):
             },
             {schema_name},
         )
+        if schema_name == "relay_prolong_context":
+            self.assertTrue(
+                any(
+                    any(
+                        item.get("type") == "function_call_output"
+                        for item in body.get("input") or []
+                        if isinstance(item, dict)
+                    )
+                    for body in upstream.manager_requests
+                )
+            )
         self.assertGreaterEqual(cache.stats().hits, min_cache_hits)
         self.assertIn(expected_third_input, str(upstream.main_requests[2]["input"]))
         for body in upstream.main_requests:
@@ -818,6 +863,18 @@ class CodexEndToEndTests(unittest.TestCase):
             "relay_auto_compact_decision",
             AUTO_CONTEXT_SUMMARY,
             min_cache_hits=1,
+        )
+
+    def test_prolong_runs_privately_through_real_codex_resumes(self) -> None:
+        self._assert_adaptive_strategy(
+            ProLong(
+                context_threshold=140,
+            ),
+            b"codex-prolong-e2e-test",
+            "relay_prolong_context",
+            PROLONG_CONTEXT_PREFIX,
+            min_cache_hits=1,
+            expected_manager_requests=6,
         )
 
     @unittest.skipUnless(find_spec("rlm"), "official RLM package is not installed")

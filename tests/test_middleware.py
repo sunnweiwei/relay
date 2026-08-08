@@ -181,6 +181,7 @@ class CompactTests(unittest.TestCase):
                 "Checkpoint",
                 "Compact",
                 "ContextFolding",
+                "ProLong",
                 "RollingMemory",
                 "SlidingWindow",
             ],

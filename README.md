@@ -71,6 +71,7 @@ your-agent
 | Context Folding | `ContextFolding()` | `context_folding` | Hide branch control, then replace a completed branch with its return report. | `RELAY_CONTEXT_FOLDING_MODEL`<br>`RELAY_CONTEXT_FOLDING_MAX_OUTPUT_TOKENS=2000`<br>`RELAY_CONTEXT_FOLDING_MAX_BRANCH_STEPS=200`<br>`RELAY_CONTEXT_FOLDING_MAX_BRANCH_TOKENS=32768`<br>`RELAY_CONTEXT_FOLDING_MAX_BRANCHES=10` |
 | AgentFold | `AgentFold()` | `agent_fold` | Maintain official-style multi-scale summaries plus one raw latest interaction. | `RELAY_AGENT_FOLD_MODEL`<br>`RELAY_AGENT_FOLD_MAX_OUTPUT_TOKENS=4000` |
 | AutoCompact | `AutoCompact()` | `auto_compact` | Let a manager choose task-aware compaction points; keep the initial task and recent interactions verbatim. | `RELAY_AUTO_COMPACT_MODEL`<br>`RELAY_AUTO_COMPACT_FALLBACK_THRESHOLD=120000`<br>`RELAY_AUTO_COMPACT_KEEP_RECENT=2`<br>`RELAY_AUTO_COMPACT_MIN_INTERACTIONS=1`<br>`RELAY_AUTO_COMPACT_MAX_OUTPUT_TOKENS=4000` |
+| PRO-LONG | `ProLong()` | `prolong` | Keep a lossless structured log; a private resumable model searches it with Read/Grep/Python equivalents and supplies context to the passive task model. | `RELAY_PROLONG_MODEL`<br>`RELAY_PROLONG_CONTEXT_THRESHOLD=120000`<br>`RELAY_PROLONG_MANAGER_COMPACT_THRESHOLD=120000`<br>`RELAY_PROLONG_MAX_OUTPUT_TOKENS=4000`<br>`RELAY_PROLONG_MAX_STEPS=6`<br>`RELAY_PROLONG_ENABLE_PYTHON=true` |
 
 | Checkpoint mode | Python | Environment | Behavior |
 | --- | --- | --- | --- |
@@ -94,7 +95,17 @@ AutoCompact follows its published inference behavior; its project currently
 does not publish inference code or model weights, so Relay uses a hidden manager
 for the learned compact/keep decision.
 
-Sources: [FoldAgent](https://github.com/sunnweiwei/FoldAgent),
+PRO-LONG follows the official lossless-log design, adapted so the task model
+never performs context-management actions. A private model inherits the task
+context, keeps its own replayable Responses trajectory, and searches the full
+structured log programmatically. Relay preserves native compaction items for
+both model trajectories and stores the external log in the exact-prefix cache.
+Set `RELAY_PROLONG_MODEL` to a smaller Responses model; when unset, Relay uses
+the task model. `log_python` executes manager-generated local Python and should
+be disabled for untrusted workloads with `RELAY_PROLONG_ENABLE_PYTHON=false`.
+
+Sources: [PRO-LONG](https://github.com/alexisfox7/PRO-LONG),
+[FoldAgent](https://github.com/sunnweiwei/FoldAgent),
 [AgentFold](https://github.com/Alibaba-NLP/DeepResearch/tree/main/WebAgent/AgentFold),
 and [AutoCompact](https://autocompact.github.io/).
 

@@ -5,7 +5,13 @@ import unittest
 from importlib.util import find_spec
 from pathlib import Path
 
-from relay import AgentFold, AutoCompact, ContextFolding, PrefixCheckpointCache
+from relay import (
+    AgentFold,
+    AutoCompact,
+    ContextFolding,
+    PrefixCheckpointCache,
+    ProLong,
+)
 from relay.proxy import ProxyConfig, create_app
 from tests.test_codex_e2e import _FakeResponsesUpstream, _serve
 
@@ -21,6 +27,9 @@ class MiniSWEAgentEndToEndTests(unittest.TestCase):
             ContextFolding(),
             AgentFold(),
             AutoCompact(fallback_threshold=1_000_000),
+            ProLong(
+                context_threshold=140,
+            ),
         ]
         for strategy in strategies:
             with self.subTest(strategy=strategy.name):
@@ -60,7 +69,10 @@ class MiniSWEAgentEndToEndTests(unittest.TestCase):
                 self.assertEqual(result["exit_status"], "Submitted")
                 self.assertIn("relay-mini-ok", result["submission"])
                 self.assertEqual(len(upstream.main_requests), 3)
-                self.assertEqual(len(upstream.manager_requests), 2)
+                self.assertEqual(
+                    len(upstream.manager_requests),
+                    6 if strategy.name == "prolong" else 2,
+                )
                 self.assertGreaterEqual(cache.stats().hits, 1)
                 for body in upstream.main_requests:
                     self.assertFalse(

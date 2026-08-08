@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Any
 
 from .compact import _output_text, _protected_prefix
 
 _CALL_TYPES = {"function_call", "custom_tool_call"}
 _CALL_OUTPUT_TYPES = {"function_call_output", "custom_tool_call_output"}
+
+
+@dataclass(frozen=True)
+class ManagerToolResult:
+    value: dict[str, Any]
+    trajectory: list[dict[str, Any]]
 
 
 def manager_model(request: dict[str, Any], configured: str | None) -> str:
@@ -75,6 +82,150 @@ def manager_text(
     if "service_tier" in request:
         call["service_tier"] = request["service_tier"]
     return _output_text(responses.create(**call))
+
+
+def manager_tool_json(
+    responses: Any,
+    request: dict[str, Any],
+    initial_input: Sequence[dict[str, Any]],
+    *,
+    configured_model: str | None,
+    tools: Sequence[dict[str, Any]],
+    execute_tool: Callable[[str, dict[str, Any]], Any],
+    schema_name: str,
+    schema: dict[str, Any],
+    max_output_tokens: int,
+    max_steps: int,
+    require_first_tool: bool = True,
+) -> dict[str, Any]:
+    return manager_tool_session(
+        responses,
+        request,
+        initial_input,
+        configured_model=configured_model,
+        tools=tools,
+        execute_tool=execute_tool,
+        schema_name=schema_name,
+        schema=schema,
+        max_output_tokens=max_output_tokens,
+        max_steps=max_steps,
+        require_first_tool=require_first_tool,
+    ).value
+
+
+def manager_tool_session(
+    responses: Any,
+    request: dict[str, Any],
+    initial_input: Sequence[dict[str, Any]],
+    *,
+    configured_model: str | None,
+    tools: Sequence[dict[str, Any]],
+    execute_tool: Callable[[str, dict[str, Any]], Any],
+    schema_name: str,
+    schema: dict[str, Any],
+    max_output_tokens: int,
+    max_steps: int,
+    require_first_tool: bool = True,
+    compact_threshold: int | None = None,
+) -> ManagerToolResult:
+    """Run a replayable private Responses tool session.
+
+    The complete model output is replayed between manager calls so reasoning and
+    function-call items keep their normal Responses semantics. If server-side
+    compaction emits an encrypted compaction item, that item becomes the new
+    private-session prefix exactly as in a normal stateless Responses loop.
+    """
+
+    if max_steps < 2:
+        raise ValueError("manager tool loops require at least two steps")
+    manager_input = deepcopy(list(initial_input))
+    for step in range(max_steps):
+        call: dict[str, Any] = {
+            "model": manager_model(request, configured_model),
+            "input": deepcopy(manager_input),
+            "tools": deepcopy(list(tools)),
+            "tool_choice": "required" if require_first_tool and step == 0 else "auto",
+            "parallel_tool_calls": False,
+            "max_output_tokens": max_output_tokens,
+            "store": False,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": schema_name,
+                    "strict": True,
+                    "schema": deepcopy(schema),
+                }
+            },
+        }
+        if "service_tier" in request:
+            call["service_tier"] = request["service_tier"]
+        if compact_threshold is not None:
+            call["context_management"] = [
+                {"type": "compaction", "compact_threshold": compact_threshold}
+            ]
+        response = responses.create(**call)
+        output = [_manager_item_dict(item) for item in getattr(response, "output", ())]
+        manager_input = _append_manager_output(manager_input, output)
+        function_calls = [
+            item for item in output if item.get("type") == "function_call"
+        ]
+        if not function_calls:
+            value = json.loads(_output_text(response))
+            if not isinstance(value, dict):
+                raise TypeError(f"{schema_name} manager returned a non-object")
+            return ManagerToolResult(value=value, trajectory=manager_input)
+
+        for item in function_calls:
+            call_id = item.get("call_id")
+            name = item.get("name")
+            arguments = item.get("arguments")
+            if not isinstance(call_id, str) or not isinstance(name, str):
+                raise TypeError("manager returned an invalid function call")
+            try:
+                parsed = json.loads(arguments) if isinstance(arguments, str) else None
+                if not isinstance(parsed, dict):
+                    raise TypeError("function arguments must be a JSON object")
+                result = execute_tool(name, parsed)
+            except (TypeError, ValueError) as exc:
+                result = {"error": str(exc)}
+            manager_input.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps(
+                        result,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ),
+                }
+            )
+    raise RuntimeError("context manager exceeded its hidden tool-step limit")
+
+
+def _append_manager_output(
+    manager_input: list[dict[str, Any]], output: Sequence[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    latest_compaction = next(
+        (
+            index
+            for index in range(len(output) - 1, -1, -1)
+            if output[index].get("type") == "compaction"
+        ),
+        None,
+    )
+    if latest_compaction is not None:
+        return deepcopy(list(output[latest_compaction:]))
+    return [*manager_input, *deepcopy(list(output))]
+
+
+def _manager_item_dict(item: Any) -> dict[str, Any]:
+    if isinstance(item, Mapping):
+        return deepcopy(dict(item))
+    model_dump = getattr(item, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="json", exclude_none=True)
+    raise TypeError("manager response output contains an unsupported item")
 
 
 def task_prefix_end(items: Sequence[dict[str, Any]]) -> int:
