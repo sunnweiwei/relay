@@ -11,8 +11,7 @@ from relay.strategies import strategy_from_env
 from relay.strategies import multi_gran_compact as mgc
 from relay.strategies.base import GeneratedCheckpoint
 from relay.strategies.multi_gran_compact import (
-    FOOTER,
-    MEMORY_HEADER,
+    GENERAL_MEMORY_HEADER as MEMORY_HEADER,
     _item_text,
     _leading_prefix,
     _render_span,
@@ -153,9 +152,10 @@ class MultiGranCompactTest(unittest.TestCase):
         self.assertEqual(len(notes), 2)
         self.assertEqual(len(client.calls), 2)
         # The final (capped) note carries the commit-now footer; earlier notes do not.
+        footer = strategy._footer()
         note_items = [it for it in prepared.input if it["content"].startswith(MEMORY_HEADER)]
-        self.assertTrue(note_items[-1]["content"].endswith(FOOTER))
-        self.assertNotIn(FOOTER, note_items[0]["content"])
+        self.assertTrue(note_items[-1]["content"].endswith(footer))
+        self.assertNotIn(footer, note_items[0]["content"])
         # Beyond the cap the tail stays raw and verbatim.
         self.assertEqual(prepared.input[-1], traj[-1])
 
@@ -173,7 +173,7 @@ class MultiGranCompactTest(unittest.TestCase):
         self.assertEqual(len(client.calls), 2)  # compactor not called again
         # Still compacted (from the recovered notes) and the footer still present.
         self.assertTrue(again.compacted)
-        self.assertTrue(any(FOOTER in it.get("content", "") for it in again.input))
+        self.assertTrue(any(strategy._footer() in it.get("content", "") for it in again.input))
 
     # -------------------------------------------------------------- incremental --
     def test_incremental_reuse_only_folds_new_spans(self) -> None:
@@ -271,6 +271,45 @@ class MultiGranCompactTest(unittest.TestCase):
         self.assertGreaterEqual(cache.stats().hits, 1)
         self.assertEqual(len(client.calls), 3)  # only the new span was folded
 
+    # ---------------------------------------------------------------- profiles --
+    def test_browsecomp_profile_swaps_the_whole_prompt_bundle(self) -> None:
+        strategy, client = self._strategy(
+            compact_threshold=30, max_compaction=1, task_profile="browsecomp"
+        )
+        traj = self._trajectory(2)
+        prepared = strategy.prepare(None, {"model": "task"}, traj)
+
+        # The compactor saw the BrowseComp system prompt (docid framing), not the general one.
+        system = client.calls[0]["messages"][0]["content"]
+        self.assertIn("BrowseComp", system)
+        self.assertIn("docid", system)
+        self.assertIn("The research question:", system)
+        # Notes use the BrowseComp memory header and finish footer.
+        note = next(it for it in prepared.input if "trustworthy" in it.get("content", ""))
+        self.assertIn("open_page", note["content"])
+        self.assertIn("`finish` function", note["content"])
+
+    def test_general_profile_has_no_browsecomp_vocabulary(self) -> None:
+        strategy, client = self._strategy(compact_threshold=30, max_compaction=1)
+        strategy.prepare(None, {"model": "task"}, self._trajectory(2))
+        system = client.calls[0]["messages"][0]["content"]
+        self.assertNotIn("BrowseComp", system)
+        self.assertNotIn("docid", system)
+        self.assertIn("The task the agent is working on:", system)
+
+    def test_finish_footer_comes_from_the_profile(self) -> None:
+        general, _ = self._strategy(compact_threshold=30, max_compaction=1)
+        browse, _ = self._strategy(
+            compact_threshold=30, max_compaction=1, task_profile="browsecomp"
+        )
+        self.assertIn("finishing action", general._footer())
+        self.assertIn("`finish` function", browse._footer())
+        self.assertNotEqual(general._footer(), browse._footer())
+
+    def test_unknown_profile_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            MultiGranCompact(task_profile="nonexistent")
+
     # ---------------------------------------------------------------- from_env --
     def test_strategy_from_env(self) -> None:
         env = {
@@ -279,6 +318,7 @@ class MultiGranCompactTest(unittest.TestCase):
             "RELAY_MULTI_GRAN_MAX_COMPACTION": "7",
             "RELAY_MULTI_GRAN_MODEL": "Qwen/Qwen3.5-9B",
             "RELAY_MULTI_GRAN_BASE_URL": "http://localhost:8018/v1",
+            "RELAY_MULTI_GRAN_TASK_PROFILE": "browsecomp",
         }
         with patch.dict(os.environ, env, clear=False):
             strategy = strategy_from_env()
@@ -288,6 +328,7 @@ class MultiGranCompactTest(unittest.TestCase):
         self.assertEqual(strategy.max_compaction, 7)
         self.assertEqual(strategy.compact_model, "Qwen/Qwen3.5-9B")
         self.assertEqual(strategy.compact_base_url, "http://localhost:8018/v1")
+        self.assertEqual(strategy.task_profile, "browsecomp")
 
 
 class RenderingHelpersTest(unittest.TestCase):

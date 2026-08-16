@@ -24,8 +24,14 @@ How it maps onto relay's stateless, append-only strategy model:
   active context without any LLM call and relay's exact-prefix cache reuses folds
   across requests. Only spans BEYOND the recovered artifact are (re)folded.
 * ``max_compaction`` caps the number of folds; the final allowed note gets a
-  commit-now ``FOOTER`` so the working agent stops exploring and finishes before the
+  commit-now footer so the working agent stops exploring and finishes before the
   window overflows.
+
+The compaction prompt is domain-agnostic by default. Each task profile is a FULL
+prompt bundle (system + user template + memory header + footer); ``general`` is the
+default, ``browsecomp`` restores the search/docid-tuned prompt this strategy was
+ported from. Pick one with ``RELAY_MULTI_GRAN_TASK_PROFILE`` (or the ``task_profile``
+argument); add a new domain by registering another bundle in ``_PROFILES``.
 
 Unlike the other relay manager strategies (which reuse the task upstream via
 ``responses._client`` and only override the model NAME), the compactor here is a
@@ -53,9 +59,111 @@ _STATE_VERSION = 1
 _ARTIFACT_KIND = "multi_gran_compact"
 
 # ---------------------------------------------------------------------------
-# Prompts (ported verbatim from FoldAgent agents/pg_compaction.py)
+# Prompts. Each task profile is a FULL prompt bundle (system + user template +
+# memory header + finish hint). "general" (the default) is domain-agnostic;
+# "browsecomp" restores the search/docid-tuned prompt this strategy was ported from.
+# Add a domain by registering another bundle in _PROFILES.
 # ---------------------------------------------------------------------------
-COMPACT_SYSTEM_PROMPT = (
+GENERAL_SYSTEM_PROMPT = (
+    "You are the MEMORY of an agent working through a long, multi-step task. The agent "
+    "works by repeatedly taking actions (tool calls) and reading the observations (tool outputs) they "
+    "return. Its context has grown too long, so your job is to REWRITE one old span of "
+    "its interactions into a compact note that the agent will read back as its OWN memory "
+    "of that work.\n\n"
+    "--- Voice: write as the agent's own recollection ---\n"
+    "Write the note in the second person, narrating what the agent itself did and saw. It "
+    "must read as the agent's own memory, not as a third-party summary.\n\n"
+    "You are NOT the agent. Do NOT continue the task, decide the next action, answer the "
+    "task, or draw any conclusion the observations don't literally support. You only "
+    "condense what already happened. Earlier turns in this conversation are notes you "
+    "already wrote for previous spans — continue in the same voice and do not repeat "
+    "their content.\n\n"
+    "--- Pick one of three compaction styles for THIS span ---\n"
+    "You compact in one of three styles. Each time you are called, pick the ONE style "
+    "that fits the span you are folding now and follow the example to compact the span.\n\n"
+    "1. TRAJECTORY — replay it, step by step. Keep the SHAPE of what happened: the same "
+    "ordered sequence of actions and observations, each one condensed, one entry per step, "
+    "in order. For each action, what it did and the concrete result it returned — "
+    "preserving the specific names, numbers, identifiers, paths, quotes and claims each "
+    "result carried; keep every partial result, lead and open thread, flagging anything "
+    "seen but not yet followed up.\n"
+    "   Example: You listed the repository and saw `app/`, `tests/`, and a `Makefile`; you "
+    "opened `app/server.py` and found the request handler `handle()` at line 42 raising "
+    "`KeyError` when `payload['id']` is missing, plus a related TODO about validation on "
+    "line 40. You then grepped for `payload[` across `app/` and got three more call sites "
+    "(`router.py:88`, `auth.py:12`, `jobs.py:120`), none of which guard the key yet.\n"
+    "2. TRANSITION — compress the whole span into ONE high-level action and observation. Do "
+    "NOT replay step by step and do NOT enumerate the individual actions. Lift the span up "
+    "one level of abstraction, the way you would recall a finished sub-task: the ACTION is "
+    "the through-line of the whole span — the one thing you were really trying to do across "
+    "all those steps, stated as a single intent, not as the individual calls you made; the "
+    "OBSERVATION is what that effort established — the concrete outcome it produced. Even if the span ranged over several "
+    "threads, find the single line of work that ties them together and write ONE "
+    "action-observation for it all.\n"
+    "   Example: You set out to locate the source of the `KeyError` in the request path. "
+    "This established that every `payload['id']` access (`server.py:42`, `router.py:88`, "
+    "`auth.py:12`, `jobs.py:120`) is unguarded, and that the intended fix point is the "
+    "shared `validate_payload()` helper in `app/validation.py`, which is currently unused.\n"
+    "3. STATE — one sentence of progress. Do NOT describe what you did, what you saw, or "
+    "list evidence. In a SINGLE sentence, state where the task now stands: what has been "
+    "settled so far and what has been established.\n"
+    "   Example: You have traced the crash to unguarded `payload['id']` access at four call "
+    "sites and decided to route them all through the existing `validate_payload()` helper, "
+    "which you have not yet wired in.\n"
+    "--- Strict rules ---\n"
+    "- Record ONLY what the observations in this span literally state and what the agent "
+    "literally did. Never infer, chain facts together, or conclude beyond the span.\n"
+    "- Do NOT answer the task or decide the next action — not even a tentative or partial "
+    "one.\n"
+    "- Preserve concrete facts, numbers, names, identifiers and paths verbatim. Invent "
+    "nothing.\n"
+    "- Summarize positively. Acknowledge the work done, and avoid pointing out what remains unsolved or what didn't work.\n\n"
+    "--- Output ---\n"
+    "Do not reason first, output the note directly.\n\n"
+    "The task the agent is working on:\n{question}"
+)
+
+GENERAL_USER_TEMPLATE = (
+    "# New span of my raw interactions to compact\n{span}\n\n"
+    "# Instruction\n"
+    "Pick one of the three compaction styles and compact the span:\n"
+    "Use TRAJECTORY when: the span's work is still IN PROGRESS — you are still exploring "
+    "and do not yet know which step will matter. Replay the span step by step, preserving "
+    "the exact information.\n"
+    "Use TRANSITION when: the span REACHED a sub-goal — the individual steps no longer "
+    "matter, only the net outcome: a handful of concrete results, each with its exact "
+    "information.\n"
+    "Use STATE when: the span CLOSES OUT a whole phase and moves the task into a new stage "
+    "— consolidating what is already settled into a new position rather than producing new "
+    "detail.\n"
+    "Output the note text directly:"
+)
+
+# Prepended to every folded note when it is injected as a user turn: a trust
+# directive telling the working agent this is a faithful record of its OWN prior work.
+GENERAL_MEMORY_HEADER = (
+    "[Your own memory — trustworthy] The note below is a faithful, compacted record of "
+    "work YOU already did: the actions you took, the results you saw, and the concrete "
+    "facts you found. Treat the facts it records as "
+    "established — don't redo work just to re-confirm something the note already settled. "
+    "Build your work FORWARD from it, and rely on it when deciding your final answer.\n\n"
+)
+
+# The FINAL allowed note gets the profile's footer appended: a hard nudge to stop
+# exploring and commit before the window overflows. Each profile carries its own full
+# footer text.
+GENERAL_FOOTER = (
+    "\n\n[**Important**: Context budget nearly exhausted, finish now] Your context "
+    "window is almost full. Wrap up now and return your best final answer or result using "
+    "your finishing action (for example a finish or submit tool), even if some threads are "
+    "still open."
+)
+
+# --------------------------------------------------------------------------- #
+# BrowseComp profile: the original search/docid-tuned prompt bundle this strategy
+# was ported from. Selected with task_profile="browsecomp".
+# --------------------------------------------------------------------------- #
+BROWSECOMP_SYSTEM_PROMPT = (
     "You are the MEMORY of a deep-research agent working on a hard, multi-hop "
     "BrowseComp-Plus question — the answer is a specific entity/fact that has to be "
     "pinned down by chaining evidence from retrieved documents (each cited by a "
@@ -129,7 +237,7 @@ COMPACT_SYSTEM_PROMPT = (
     "The research question:\n{question}"
 )
 
-COMPACT_USER_TEMPLATE = (
+BROWSECOMP_USER_TEMPLATE = (
     "# New span of my raw interactions to compact\n{span}\n\n"
     "# Instruction\n"
     "Follow the guidance and pick one of three compaction styles to compact:"
@@ -145,9 +253,7 @@ COMPACT_USER_TEMPLATE = (
     "Output the note text directly:"
 )
 
-# Prepended to every folded note when it is injected as a user turn: a trust
-# directive telling the working agent this is a faithful record of its OWN prior work.
-MEMORY_HEADER = (
+BROWSECOMP_MEMORY_HEADER = (
     "[Your own memory — trustworthy] The note below is a faithful, compacted "
     "record of research YOU already did: the searches you ran, the documents you "
     "opened, and the concrete facts you found (with their exact docids). Treat the "
@@ -158,11 +264,37 @@ MEMORY_HEADER = (
     "opening that document with open_page — not by issuing more searches.\n\n"
 )
 
-# Appended to the note of the FINAL allowed compaction: a hard nudge to stop
-# exploring and commit the current best answer before the window overflows.
-FOOTER = (
-    "\n\n[**STRICT RULE**: Context budget nearly exhausted, finish now] Your context window is almost full. Call `finish` function with your single most likely answer even if some clues are still unconfirmed."
+BROWSECOMP_FOOTER = (
+    "\n\n[**STRICT RULE**: Context budget nearly exhausted, finish now] Your context "
+    "window is almost full. Call `finish` function with your single most likely answer "
+    "even if some clues are still unconfirmed."
 )
+
+
+@dataclass(frozen=True)
+class _PromptBundle:
+    """A full, self-contained prompt set for one task profile."""
+
+    system: str
+    user_template: str
+    memory_header: str
+    footer: str
+
+
+_PROFILES: dict[str, _PromptBundle] = {
+    "general": _PromptBundle(
+        GENERAL_SYSTEM_PROMPT,
+        GENERAL_USER_TEMPLATE,
+        GENERAL_MEMORY_HEADER,
+        GENERAL_FOOTER,
+    ),
+    "browsecomp": _PromptBundle(
+        BROWSECOMP_SYSTEM_PROMPT,
+        BROWSECOMP_USER_TEMPLATE,
+        BROWSECOMP_MEMORY_HEADER,
+        BROWSECOMP_FOOTER,
+    ),
+}
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.S)
 
@@ -179,6 +311,7 @@ class MultiGranCompact(BaseStrategy):
     reasoning_effort: str | None = None
     tokenizer_name: str = "Qwen/Qwen3.5-9B"
     max_note_tokens: int = 16_384
+    task_profile: str = "general"
     verbose: bool = False
     name: str = field(default="multi_gran_compact", init=False)
 
@@ -187,6 +320,8 @@ class MultiGranCompact(BaseStrategy):
             raise ValueError("compact_threshold must be positive")
         if self.max_compaction <= 0:
             raise ValueError("max_compaction must be positive")
+        if self.task_profile not in _PROFILES:
+            raise ValueError(f"task_profile must be one of {sorted(_PROFILES)}")
         # Lazily built once and reused across requests (the strategy instance is
         # shared by the engine); rebuilding the conv per call keeps the vLLM prefix
         # cache warm without any persistent client state.
@@ -205,8 +340,15 @@ class MultiGranCompact(BaseStrategy):
                 "RELAY_MULTI_GRAN_TOKENIZER", "Qwen/Qwen3.5-9B"
             ),
             max_note_tokens=int(os.getenv("RELAY_MULTI_GRAN_MAX_NOTE_TOKENS", "16384")),
+            task_profile=os.getenv("RELAY_MULTI_GRAN_TASK_PROFILE", "general"),
             verbose=_env_bool("RELAY_MULTI_GRAN_VERBOSE", False),
         )
+
+    def _bundle(self) -> _PromptBundle:
+        return _PROFILES[self.task_profile]
+
+    def _footer(self) -> str:
+        return self._bundle().footer
 
     def cache_scope(self) -> dict[str, Any]:
         return {
@@ -215,7 +357,8 @@ class MultiGranCompact(BaseStrategy):
             "compact_model": self.compact_model,
             "compact_base_url": self.compact_base_url,
             "tokenizer_name": self.tokenizer_name,
-            "prompt_version": 1,
+            "task_profile": self.task_profile,
+            "prompt_version": 2,
         }
 
     # ------------------------------------------------------------- materialize --
@@ -391,13 +534,17 @@ class MultiGranCompact(BaseStrategy):
         cache) while prior notes double as the "already-known context".
         """
         question = _question(seq)
+        bundle = self._bundle()
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": COMPACT_SYSTEM_PROMPT.format(question=question)}
+            {"role": "system", "content": bundle.system.format(question=question)}
         ]
         for note in prior_notes:
             messages.append({"role": "assistant", "content": note["text"]})
         messages.append(
-            {"role": "user", "content": COMPACT_USER_TEMPLATE.format(span=_render_span(span))}
+            {
+                "role": "user",
+                "content": bundle.user_template.format(span=_render_span(span)),
+            }
         )
         raw = self._chat(responses, request, messages).strip()
         text = _THINK_RE.sub("", raw)
@@ -483,11 +630,13 @@ class MultiGranCompact(BaseStrategy):
     # ---------------------------------------------------------------- artifacts --
     def _note_items(self, notes: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         capped = len(notes) >= self.max_compaction
+        header = self._bundle().memory_header
+        footer = self._footer()
         items: list[dict[str, Any]] = []
         for index, note in enumerate(notes):
-            content = f"{MEMORY_HEADER}{note['text']}"
+            content = f"{header}{note['text']}"
             if capped and index == len(notes) - 1:
-                content += FOOTER
+                content += footer
             items.append({"type": "message", "role": "user", "content": content})
         return items
 

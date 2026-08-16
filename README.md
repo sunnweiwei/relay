@@ -71,6 +71,7 @@ your-agent
 | Context Folding | `ContextFolding()` | `context_folding` | Hide branch control, then replace a completed branch with its return report. | `RELAY_CONTEXT_FOLDING_MODEL`<br>`RELAY_CONTEXT_FOLDING_MAX_OUTPUT_TOKENS=2000`<br>`RELAY_CONTEXT_FOLDING_MAX_BRANCH_STEPS=200`<br>`RELAY_CONTEXT_FOLDING_MAX_BRANCH_TOKENS=32768`<br>`RELAY_CONTEXT_FOLDING_MAX_BRANCHES=10` |
 | AgentFold | `AgentFold()` | `agent_fold` | Maintain official-style multi-scale summaries plus one raw latest interaction. | `RELAY_AGENT_FOLD_MODEL`<br>`RELAY_AGENT_FOLD_MAX_OUTPUT_TOKENS=4000` |
 | AutoCompact | `AutoCompact()` | `auto_compact` | Let a manager choose task-aware compaction points; keep the initial task and recent interactions verbatim. | `RELAY_AUTO_COMPACT_MODEL`<br>`RELAY_AUTO_COMPACT_FALLBACK_THRESHOLD=120000`<br>`RELAY_AUTO_COMPACT_KEEP_RECENT=2`<br>`RELAY_AUTO_COMPACT_MIN_INTERACTIONS=1`<br>`RELAY_AUTO_COMPACT_MAX_OUTPUT_TOKENS=4000` |
+| Multi-gran Compact | `MultiGranCompact()` | `multi_gran_compact` | Fold raw context on a fixed token cadence into accumulating memory notes; a dedicated compactor picks trajectory/transition/state granularity per span. | `RELAY_MULTI_GRAN_THRESHOLD=30000`<br>`RELAY_MULTI_GRAN_MAX_COMPACTION=10`<br>`RELAY_MULTI_GRAN_MODEL`<br>`RELAY_MULTI_GRAN_BASE_URL`<br>`RELAY_MULTI_GRAN_API_KEY`<br>`RELAY_MULTI_GRAN_REASONING_EFFORT`<br>`RELAY_MULTI_GRAN_TOKENIZER=Qwen/Qwen3.5-9B`<br>`RELAY_MULTI_GRAN_TASK_PROFILE=general` |
 | PRO-LONG | `ProLong()` | `prolong` | Keep a lossless structured log; a private resumable model searches it with Read/Grep/Python equivalents and supplies context to the passive task model. | `RELAY_PROLONG_MODEL`<br>`RELAY_PROLONG_CONTEXT_THRESHOLD=120000`<br>`RELAY_PROLONG_MANAGER_COMPACT_THRESHOLD=120000`<br>`RELAY_PROLONG_MAX_OUTPUT_TOKENS=4000`<br>`RELAY_PROLONG_MAX_STEPS=6`<br>`RELAY_PROLONG_ENABLE_PYTHON=true` |
 
 | Checkpoint mode | Python | Environment | Behavior |
@@ -94,6 +95,26 @@ official multi-scale summary update and applies each fold to the next turn.
 AutoCompact follows its published inference behavior; its project currently
 does not publish inference code or model weights, so Relay uses a hidden manager
 for the learned compact/keep decision.
+
+Multi-gran Compact is a port of FoldAgent's prompt-based (`pg_compaction`)
+scheme. Compaction fires on a fixed token cadence: from the last sealed note,
+raw interactions accumulate until a tool-safe boundary first crosses
+`RELAY_MULTI_GRAN_THRESHOLD`, and that span is folded into one memory note (a
+user turn written in the agent's own voice). Notes accumulate and are never
+re-summarized, so the active context is `[protected prefix, note_1, ..., note_k,
+raw tail]`; `RELAY_MULTI_GRAN_MAX_COMPACTION` caps the fold count and the final
+note carries a commit-now footer. Unlike the other manager strategies, the
+compactor is a genuinely separate endpoint speaking Chat Completions —
+configured with `RELAY_MULTI_GRAN_BASE_URL` / `RELAY_MULTI_GRAN_API_KEY` /
+`RELAY_MULTI_GRAN_MODEL` (mirroring FoldAgent's `--compact_base_url` /
+`--compact_model_name`). When `RELAY_MULTI_GRAN_BASE_URL` is unset it inherits
+the task upstream, so a model-name-only override still works. Cadence tokens are
+counted with the compactor's own tokenizer (`RELAY_MULTI_GRAN_TOKENIZER`,
+default Qwen3.5-9B), falling back to a length estimate when it cannot be loaded.
+The compaction prompt is domain-agnostic by default; `RELAY_MULTI_GRAN_TASK_PROFILE`
+selects a full built-in prompt bundle (`general` or `browsecomp`, the original
+search/docid-tuned prompt) — each bundle carries its own system prompt, memory
+header and commit-now footer.
 
 PRO-LONG follows the official lossless-log design, adapted so the task model
 never performs context-management actions. A private model inherits the task
