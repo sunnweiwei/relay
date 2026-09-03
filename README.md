@@ -72,6 +72,7 @@ your-agent
 | AgentFold | `AgentFold()` | `agent_fold` | Maintain official-style multi-scale summaries plus one raw latest interaction. | `RELAY_AGENT_FOLD_MODEL`<br>`RELAY_AGENT_FOLD_MAX_OUTPUT_TOKENS=4000` |
 | AutoCompact | `AutoCompact()` | `auto_compact` | Let a manager choose task-aware compaction points; keep the initial task and recent interactions verbatim. | `RELAY_AUTO_COMPACT_MODEL`<br>`RELAY_AUTO_COMPACT_FALLBACK_THRESHOLD=120000`<br>`RELAY_AUTO_COMPACT_KEEP_RECENT=2`<br>`RELAY_AUTO_COMPACT_MIN_INTERACTIONS=1`<br>`RELAY_AUTO_COMPACT_MAX_OUTPUT_TOKENS=4000` |
 | Multi-gran Compact | `MultiGranCompact()` | `multi_gran_compact` | Fold raw context on a fixed token cadence into accumulating memory notes; a dedicated compactor picks trajectory/transition/state granularity per span. | `RELAY_MULTI_GRAN_THRESHOLD=30000`<br>`RELAY_MULTI_GRAN_MAX_COMPACTION=10`<br>`RELAY_MULTI_GRAN_MODEL`<br>`RELAY_MULTI_GRAN_BASE_URL`<br>`RELAY_MULTI_GRAN_API_KEY`<br>`RELAY_MULTI_GRAN_REASONING_EFFORT`<br>`RELAY_MULTI_GRAN_TOKENIZER=Qwen/Qwen3.5-9B`<br>`RELAY_MULTI_GRAN_TASK_PROFILE=general` |
+| Selective discard | `SelectiveDiscard()` | `selective_discard` | Ask a manager model which complete old steps or tool-output line ranges can be deleted without replacement. | `RELAY_DISCARD_MODEL`<br>`RELAY_DISCARD_KEEP_RECENT=2`<br>`RELAY_DISCARD_MIN_CANDIDATE_STEPS=1`<br>`RELAY_DISCARD_MAX_OUTPUT_TOKENS=2000` |
 | PRO-LONG | `ProLong()` | `prolong` | Keep a lossless structured log; a private resumable model searches it with Read/Grep/Python equivalents and supplies context to the passive task model. | `RELAY_PROLONG_MODEL`<br>`RELAY_PROLONG_CONTEXT_THRESHOLD=120000`<br>`RELAY_PROLONG_MANAGER_COMPACT_THRESHOLD=120000`<br>`RELAY_PROLONG_MAX_OUTPUT_TOKENS=4000`<br>`RELAY_PROLONG_MAX_STEPS=6`<br>`RELAY_PROLONG_ENABLE_PYTHON=true` |
 
 | Checkpoint mode | Python | Environment | Behavior |
@@ -81,6 +82,14 @@ your-agent
 
 Cache mode is recommended for transparent integration. Inline checkpoints are
 Relay-specific and require Relay to remain in the request path when replayed.
+
+Selective discard is stateless and calls a hidden Responses manager whenever at
+least `RELAY_DISCARD_MIN_CANDIDATE_STEPS` completed interactions are older than
+the protected recent suffix. The manager can delete an entire tool-safe step or
+select exact line ranges to retain from a text tool output; Relay validates every
+step ID, call ID, and range before applying the decision. It never rewrites or
+summarizes retained content. The initial task, pending interaction, and the most
+recent `RELAY_DISCARD_KEEP_RECENT` completed interactions stay verbatim.
 
 RLM follows the official fresh-query behavior: every request processes the full
 trajectory with `persistent=False` and `compaction=False`. It does not create or

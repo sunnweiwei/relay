@@ -16,6 +16,7 @@ from .strategies import (
     ContextFolding,
     ProLong,
     RollingMemory,
+    SelectiveDiscard,
     SlidingWindow,
 )
 
@@ -36,6 +37,7 @@ __all__ = [
     "PrefixMatch",
     "ProLong",
     "RollingMemory",
+    "SelectiveDiscard",
     "SlidingWindow",
     "wrap",
 ]

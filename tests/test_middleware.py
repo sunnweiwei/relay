@@ -183,6 +183,7 @@ class CompactTests(unittest.TestCase):
                 "ContextFolding",
                 "ProLong",
                 "RollingMemory",
+                "SelectiveDiscard",
                 "SlidingWindow",
             ],
         )

@@ -13,6 +13,7 @@ from .context_folding import ContextFolding
 from .prolong import ProLong
 from .rlm import RLM
 from .rolling_memory import RollingMemory
+from .selective_discard import SelectiveDiscard
 from .sliding_window import SlidingWindow
 
 
@@ -34,12 +35,14 @@ def strategy_from_env() -> ContextStrategy:
         return AgentFold.from_env()
     if name == "auto_compact":
         return AutoCompact.from_env()
+    if name == "selective_discard":
+        return SelectiveDiscard.from_env()
     if name == "prolong":
         return ProLong.from_env()
     raise ValueError(
         "RELAY_STRATEGY must be 'compact', 'checkpoint', 'sliding_window', "
         "'rolling_memory', 'rlm', 'context_folding', 'agent_fold', or "
-        "'auto_compact' or 'prolong'"
+        "'auto_compact', 'selective_discard', or 'prolong'"
     )
 
 
@@ -52,5 +55,6 @@ __all__ = [
     "ContextFolding",
     "ProLong",
     "RollingMemory",
+    "SelectiveDiscard",
     "SlidingWindow",
 ]
