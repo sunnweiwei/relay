@@ -6,10 +6,12 @@ import unittest
 from importlib.util import find_spec
 from pathlib import Path
 
-from relay import MultiGranCompact, PrefixCheckpointCache
-from relay.proxy import ProxyConfig, create_app
-from relay.strategies.multi_gran_compact import MEMORY_HEADER
-from tests.test_codex_e2e import _FakeResponsesUpstream, _serve
+from relay.experimental import MultiGranCompact, PrefixCheckpointCache
+from relay.experimental.proxy import ProxyConfig, create_app
+from relay.experimental.strategies.multi_gran_compact import (
+    GENERAL_MEMORY_HEADER as MEMORY_HEADER,
+)
+from tests.experimental.test_codex_e2e import _FakeResponsesUpstream, _serve
 
 # A live compactor endpoint (vLLM/OpenAI chat.completions) must be configured for this
 # end-to-end test; without it there is nothing real to exercise, so the test skips.

@@ -1,0 +1,50 @@
+"""Anthropic Claude Code (Messages API).
+
+Claude Code wraps injected context in `<system-reminder>` blocks and slash-command
+tags, and starts a self-compacted session with a fixed continuation preamble.
+"""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+from dataclasses import replace
+from pathlib import Path
+
+from ..core.ir import Item, Kind
+from ..install import Setting
+from .base import REMINDER, Harness
+CONTEXT_MARKERS = (
+    "<command-name>",
+    "<command-message>",
+    "<command-args>",
+    "<local-command-stdout>",
+    "<local-command-stderr>",
+    "<local-command-caveat>",
+)
+SUMMARY_PREFIX = "This session is being continued from a previous conversation"
+
+
+class ClaudeCode(Harness):
+    name = "claude_code"
+
+    def matches(self, headers: Mapping[str, str]) -> bool:
+        return "x-claude-code-session-id" in headers or headers.get(
+            "user-agent", ""
+        ).startswith("claude-cli")
+
+    def refine(self, item: Item) -> Item:
+        if item.kind is Kind.USER:
+            visible = REMINDER.sub("", item.text).strip()
+            if visible.startswith(SUMMARY_PREFIX):
+                return replace(item, kind=Kind.SUMMARY)
+            if not visible or visible.startswith(CONTEXT_MARKERS):
+                return replace(item, kind=Kind.CONTEXT)
+        return super().refine(item)
+
+    def settings(self) -> list[Setting]:
+        home = Path(os.getenv("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser()
+        return [Setting(home / "settings.json", ("env", "ANTHROPIC_BASE_URL"), endpoint="https://api.anthropic.com")]
+
+    def launch(self, relay_url: str, args: list[str]) -> tuple[list[str], dict[str, str]]:
+        return ["claude", *args], {"ANTHROPIC_BASE_URL": relay_url}

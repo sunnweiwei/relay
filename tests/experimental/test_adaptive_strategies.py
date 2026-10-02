@@ -5,11 +5,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from relay import AgentFold, AutoCompact, ContextFolding
-from relay.strategies import strategy_from_env
-from relay.strategies.agent_fold import OFFICIAL_AGENT_FOLD_COMMIT
-from relay.strategies.auto_compact import AUTO_CONTEXT_SUMMARY
-from relay.strategies.context_folding import (
+from relay.experimental import AgentFold, AutoCompact, ContextFolding
+from relay.experimental.strategies import strategy_from_env
+from relay.experimental.strategies.agent_fold import OFFICIAL_AGENT_FOLD_COMMIT
+from relay.experimental.strategies.auto_compact import AUTO_CONTEXT_SUMMARY
+from relay.experimental.strategies.context_folding import (
     CONTEXT_FOLDING_RETURN_PREFIX,
     OFFICIAL_CONTEXT_FOLDING_COMMIT,
 )

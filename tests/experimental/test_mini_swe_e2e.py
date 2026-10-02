@@ -5,15 +5,15 @@ import unittest
 from importlib.util import find_spec
 from pathlib import Path
 
-from relay import (
+from relay.experimental import (
     AgentFold,
     AutoCompact,
     ContextFolding,
     PrefixCheckpointCache,
     ProLong,
 )
-from relay.proxy import ProxyConfig, create_app
-from tests.test_codex_e2e import _FakeResponsesUpstream, _serve
+from relay.experimental.proxy import ProxyConfig, create_app
+from tests.experimental.test_codex_e2e import _FakeResponsesUpstream, _serve
 
 
 @unittest.skipUnless(find_spec("minisweagent"), "mini-swe-agent is not installed")

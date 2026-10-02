@@ -4,165 +4,249 @@
 
 # Relay
 
-Relay is transparent context management for append-only OpenAI Responses API
-agent loops. Use it as a Python client wrapper or an OpenAI-compatible proxy.
+Relay is a context-management layer between agent harnesses and model APIs. It
+runs as a local proxy: the harness keeps its normal append-only loop and sends its
+whole history on every request; Relay decides what the model actually sees and
+forwards that instead. One strategy written against Relay's protocol-neutral view
+therefore works for every supported harness and model.
 
-## Install
+The first strategy is **Codex-style context compaction**: when the prompt reaches a
+threshold, the history is summarized with Codex's own compaction prompt and replaced
+by the initial context, the most recent user messages, and the summary.
+
+## Quickstart
 
 ```bash
 pip install -e .
+relay serve &              # http://127.0.0.1:8787
+relay install codex        # or: claude, gemini_cli, pi, opencode, kilo, crush,
+                           #     openclaw, kimi_code, goose
+codex                      # use the harness exactly as before
+relay uninstall codex      # restore its configuration
 ```
 
-RLM support uses the authors' official package:
+`relay install` edits the harness's own configuration file. It wraps whatever endpoint
+the harness is configured with (or its default): the setting becomes
+`http://127.0.0.1:8787/up/<id><original path>`, and Relay forwards `/up/<id>/...` to the
+original host. Logins, API keys, gateways and provider choices keep working; previous
+values are recorded in `~/.config/relay/installed.json` for `relay uninstall`.
 
-```bash
-pip install -e '.[rlm]'
+| Harness | Setting written by `relay install` |
+| --- | --- |
+| Codex | `openai_base_url` in `~/.codex/config.toml` (built-in provider; ChatGPT login or API key) |
+| Claude Code | `env.ANTHROPIC_BASE_URL` in `~/.claude/settings.json` |
+| Gemini CLI | `GOOGLE_GEMINI_BASE_URL` in `~/.gemini/.env` (API-key mode) |
+| pi | `providers.{openai,anthropic,google}.baseUrl` in `~/.pi/agent/models.json` |
+| OpenCode / Kilo | `provider.{openai,anthropic,google}.options.baseURL` in `opencode.json` / `kilo/config.json`, plus `compaction.prune = false` |
+| Crush | `providers.<id>.base_url` in `~/.config/crush/crush.json` |
+| OpenClaw | `models.providers.{openai,anthropic,google}.baseUrl` in `~/.openclaw/openclaw.json` |
+| Kimi Code | `providers.<id>.base_url` in `~/.kimi-code/config.toml` |
+| Goose | `OPENAI_HOST` / `ANTHROPIC_HOST` / `GOOGLE_HOST` in `~/.config/goose/config.yaml` |
+| Hermes Agent | `model.base_url` in `~/.hermes/config.yaml`, plus the protocol Hermes would have picked from the original host (`api_mode: codex_responses` for api.openai.com; Gemini's OpenAI-compatible endpoint for Google) |
+| nanobot | `providers.{openai,gemini,anthropic}.apiBase` in `~/.nanobot/config.json`, plus `apiType: responses` for a provider that was talking to api.openai.com |
+| DeepSeek Harness | `llm-deepseek` `baseURL` and existing `llm-pi-ai` routes in `~/.dsh/cordis.patch.yml` |
+| WorkBuddy / CodeBuddy Code | `url` of each custom model in `~/.workbuddy/models.json` / `~/.codebuddy/models.json` |
+| mini-swe-agent | `OPENAI_BASE_URL` / `GEMINI_API_BASE` / `ANTHROPIC_BASE_URL` in its global `.env` (read by litellm) |
+
+`relay run <harness> -- <args>` runs Codex or Claude Code through a private, temporary
+Relay instead. Harness-side auto-compaction does not need to be disabled: harnesses size
+their context from the usage the API reports, which stays below their own thresholds
+once Relay compacts earlier (keep `RELAY_COMPACT_THRESHOLD` below the harness's limit).
+
+## Architecture
+
+```
+ harness ──► protocol codec ──► View ──► strategy ──► Rewrite ──► codec ──► upstream
+ (Codex,      (Responses,      (Items: kind,           (cut + head)        (OpenAI, Anthropic,
+  Claude Code) Messages)        text, wire ref)                             OpenRouter, xAI, …)
 ```
 
-## Python
+| Module | Responsibility |
+| --- | --- |
+| `relay/core/ir.py` | The protocol-neutral `Item` / `View` / `Rewrite` a strategy works with. Items keep a reference to their wire item, so whatever a strategy keeps is forwarded byte-for-byte. |
+| `relay/protocols/` | One codec per wire protocol (OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, Gemini): item kinds and text, legal cut points (never between a tool call and its result), prefix canonicalization, synthetic messages, summary requests, usage and overflow errors. |
+| `relay/harnesses/` | Harness profiles: which user-role messages the harness injected itself (environment, instructions, reminders, its own summaries), detection from request headers, and the settings `relay install` writes. |
+| `relay/install.py` | `relay install` / `uninstall`: reversible edits of JSON, TOML, YAML and `.env` config files, and the endpoint mounts Relay forwards. |
+| `relay/strategies/` | Strategies. `compaction.py` ports Codex's local compaction. |
+| `relay/core/engine.py` | Per-request orchestration: restore state, estimate tokens, plan, rewrite, remember. Strategy failures never reach the harness; the request is forwarded with the last good rewrite. |
+| `relay/core/store.py` | Exact-prefix store: a rewrite computed for one request is found again by the next request of the same conversation, because it extends the same canonical history. |
+| `relay/providers.py` | Upstream routing (installed mounts, else by path) and model context windows. |
+| `relay/transport/proxy.py` | The HTTP proxy. Responses, including streams, are relayed unchanged. |
 
-Wrap a synchronous OpenAI client and keep the rest of the agent loop unchanged:
+Relay never translates between protocols: a request is forwarded in the protocol the
+harness spoke. Models are reached through any provider that serves that protocol.
 
-```python
-from openai import OpenAI
-from relay import Checkpoint, wrap
+Token counts come from the usage the upstream reported for the previous request of the
+same conversation plus an estimate of the new items (four bytes per token, as in
+Codex), so no extra token-counting calls are made. If the upstream still rejects a
+request as too long, Relay compacts and retries it once.
 
-client = wrap(
-    OpenAI(),
-    Checkpoint(),
-    checkpoint_mode="cache",
-)
+## Compaction
 
-trajectory = [{"role": "user", "content": "Build the project"}]
-response = client.responses.create(model="your-model", input=trajectory)
-trajectory.extend(response.output)
-```
+Behavior follows `codex-rs/core/src/compact.rs`; prompts are vendored verbatim in
+`relay/prompts/`.
 
-`wrap()` returns a client-compatible view and does not modify the original
-client. Only `client.responses` is context-managed.
+- Compaction triggers at 90% of the model's context window (`RELAY_COMPACT_THRESHOLD` or
+  `RELAY_COMPACT_GROWTH` override this), and always at 95% of the window.
+- The summary request is the harness's own request with the history so far and
+  Codex's compaction prompt as the last user message, sent to the same upstream (with
+  tools disabled). It shares the previous request's prefix, so provider prompt caching
+  applies. Like Codex's `drain_to_completed`, a summary counts only if its response
+  completed: a stream cut short or a response stopped by a token limit is retried (up to
+  5 times) and never used. If the request overflows, the oldest history is dropped and
+  the request retried.
+- The new context follows Codex's replacement history: the newest real user messages up
+  to `RELAY_RETAIN_USER_TOKENS` (the oldest one kept is truncated in the middle; media is
+  reduced to text; earlier summaries are dropped) and the summary as a user message
+  starting with Codex's summary prefix. Mid-turn (the request ends with tool results)
+  everything is summarized, the initial context sits just above the last real user
+  message and the summary comes last. At the start of a turn the summary covers the
+  history before it, the initial context is re-injected after the summary, and the new
+  turn follows verbatim.
+- The initial context is what the harness injected before the model's first action:
+  system messages and context messages (environment, instructions, `<system-reminder>`
+  blocks). Like Codex, which rebuilds it from session state, Relay takes it from the
+  harness's own history, which is resent with every request, so it survives any number of
+  compactions. System messages (Codex's base instructions) stay first, except on the
+  Anthropic API, where a `system` message may only precede the model's turn: there it
+  follows a mid-turn summary and waits for the next mid-turn compaction after a turn start.
 
-## Proxy
-
-For agents that cannot accept a wrapped client, run Relay as a server:
-
-```bash
-export RELAY_STRATEGY=checkpoint
-export RELAY_CHECKPOINT_MODE=cache
-relay
-```
-
-Point the agent at Relay without changing its loop:
-
-```bash
-export OPENAI_API_KEY=...
-export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
-your-agent
-```
+Deliberate differences from Codex: a compaction that would free less than
+`RELAY_COMPACT_MIN_GAIN` of the threshold is skipped, so a threshold set close to the
+fixed prompt overhead (system prompt and tools) does not trigger a summary on every
+request; the summary request keeps the tool definitions with tool calls disabled
+(Anthropic rejects tool history without them) where Codex sends none; on overflow the
+oldest history is dropped a tenth at a time behind a short note instead of one item per
+retry; and an empty summary is a failed compaction rather than "(no summary available)".
 
 ## Configuration
 
-| Strategy | Python | `RELAY_STRATEGY` | Behavior | Configuration |
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `RELAY_COMPACT_THRESHOLD` | `RELAY_COMPACT_RATIO` × context window | Prompt tokens that trigger compaction. |
+| `RELAY_COMPACT_RATIO` | `0.9` | Share of the model's context window used when no threshold is set. |
+| `RELAY_COMPACT_GROWTH` | unset | Instead of a threshold, compact after this many tokens were added since the context window began (Codex's `BodyAfterPrefix` scope); independent of each harness's fixed prompt overhead. |
+| `RELAY_CONTEXT_WINDOW` | from the model name | Overrides the context window table in `relay/providers.py`. |
+| `RELAY_RETAIN_USER_TOKENS` | `20000` | Budget for recent user messages kept verbatim. |
+| `RELAY_COMPACT_MIN_GAIN` | `0.1` | Skip compactions that free less than this share of the threshold (or growth). |
+| `RELAY_OPENAI_BASE_URL` | `https://api.openai.com/v1` | Upstream for the Responses API. |
+| `RELAY_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Upstream for the Messages API. |
+| `RELAY_OPENAI_API_KEY`, `RELAY_ANTHROPIC_API_KEY` | unset | Replace the harness's credentials for that upstream. |
+| `RELAY_HARNESS` | detected | Force a harness profile by name, e.g. `codex`, `hermes`, `generic`. |
+| `RELAY_EVENT_LOG` | unset | Append one JSON line per compaction (sizes, timing, the new head). |
+| `RELAY_HOST`, `RELAY_PORT` | `127.0.0.1`, `8787` | Server address for `relay serve`. |
+| `RELAY_CACHE_MAX_ENTRIES`, `RELAY_CACHE_MAX_BYTES`, `RELAY_CACHE_TTL_SECONDS`, `RELAY_CACHE_SECRET` | `4096`, 256 MiB, 6 h, random | Limits of the in-memory prefix store. |
+
+Other providers are configured by endpoint, for example
+`RELAY_OPENAI_BASE_URL=https://api.x.ai/v1` for Grok, or
+`RELAY_OPENAI_BASE_URL=https://openrouter.ai/api/v1` /
+`RELAY_ANTHROPIC_BASE_URL=https://openrouter.ai/api` with the matching `*_API_KEY` for
+OpenRouter.
+
+## Support
+
+Checked in Docker against real models with `tests/docker/check.py`: a two-turn session
+compacting every 5k new tokens, so each run compacts at least twice mid-turn and once at
+a turn start, with every compaction checked (summary content, Codex layout, initial
+context kept, what was forwarded upstream; see [Development](#development)):
+
+| Harness | Protocol | GPT | Gemini | Claude |
 | --- | --- | --- | --- | --- |
-| Compact | `Compact()` | `compact` | Replace active context with a compacted checkpoint. | `RELAY_COMPACT_THRESHOLD=120000` |
-| Checkpoint | `Checkpoint()` | `checkpoint` | Create chunk checkpoints, then replace old chunks as context grows. | `RELAY_CHECKPOINT_THRESHOLD=30000`<br>`RELAY_CONTEXT_THRESHOLD=120000` |
-| Sliding window | `SlidingWindow()` | `sliding_window` | Keep the longest tool-safe suffix. | `RELAY_SLIDING_WINDOW_TOKENS=120000` |
-| Rolling memory | `RollingMemory()` | `rolling_memory` | Recursively update working memory while keeping the newest tool-safe segment verbatim. | `RELAY_MEMORY_MODEL`<br>`RELAY_MEMORY_MAX_OUTPUT_TOKENS=4000`<br>`RELAY_MEMORY_UPDATE_INPUT_TOKENS=120000` |
-| RLM | `RLM()` | `rlm` | Run the official Recursive Language Model over the full request, then render its result as one Responses turn. | `RELAY_RLM_MODEL`<br>`RELAY_RLM_MAX_DEPTH=1`<br>`RELAY_RLM_MAX_ITERATIONS=30`<br>`RELAY_RLM_ENVIRONMENT=local`<br>`RELAY_RLM_MAX_TIMEOUT`<br>`RELAY_RLM_MAX_TOKENS` |
-| Context Folding | `ContextFolding()` | `context_folding` | Hide branch control, then replace a completed branch with its return report. | `RELAY_CONTEXT_FOLDING_MODEL`<br>`RELAY_CONTEXT_FOLDING_MAX_OUTPUT_TOKENS=2000`<br>`RELAY_CONTEXT_FOLDING_MAX_BRANCH_STEPS=200`<br>`RELAY_CONTEXT_FOLDING_MAX_BRANCH_TOKENS=32768`<br>`RELAY_CONTEXT_FOLDING_MAX_BRANCHES=10` |
-| AgentFold | `AgentFold()` | `agent_fold` | Maintain official-style multi-scale summaries plus one raw latest interaction. | `RELAY_AGENT_FOLD_MODEL`<br>`RELAY_AGENT_FOLD_MAX_OUTPUT_TOKENS=4000` |
-| AutoCompact | `AutoCompact()` | `auto_compact` | Let a manager choose task-aware compaction points; keep the initial task and recent interactions verbatim. | `RELAY_AUTO_COMPACT_MODEL`<br>`RELAY_AUTO_COMPACT_FALLBACK_THRESHOLD=120000`<br>`RELAY_AUTO_COMPACT_KEEP_RECENT=2`<br>`RELAY_AUTO_COMPACT_MIN_INTERACTIONS=1`<br>`RELAY_AUTO_COMPACT_MAX_OUTPUT_TOKENS=4000` |
-| Multi-gran Compact | `MultiGranCompact()` | `multi_gran_compact` | Fold raw context on a fixed token cadence into accumulating memory notes; a dedicated compactor picks trajectory/transition/state granularity per span. | `RELAY_MULTI_GRAN_THRESHOLD=30000`<br>`RELAY_MULTI_GRAN_MAX_COMPACTION=10`<br>`RELAY_MULTI_GRAN_MODEL`<br>`RELAY_MULTI_GRAN_BASE_URL`<br>`RELAY_MULTI_GRAN_API_KEY`<br>`RELAY_MULTI_GRAN_REASONING_EFFORT`<br>`RELAY_MULTI_GRAN_TOKENIZER=Qwen/Qwen3.5-9B`<br>`RELAY_MULTI_GRAN_TASK_PROFILE=general` |
-| Selective discard | `SelectiveDiscard()` | `selective_discard` | Ask a manager model which complete old steps or tool-output line ranges can be deleted without replacement. | `RELAY_DISCARD_MODEL`<br>`RELAY_DISCARD_KEEP_RECENT=2`<br>`RELAY_DISCARD_MIN_CANDIDATE_STEPS=1`<br>`RELAY_DISCARD_MAX_OUTPUT_TOKENS=2000` |
-| PRO-LONG | `ProLong()` | `prolong` | Keep a lossless structured log; a private resumable model searches it with Read/Grep/Python equivalents and supplies context to the passive task model. | `RELAY_PROLONG_MODEL`<br>`RELAY_PROLONG_CONTEXT_THRESHOLD=120000`<br>`RELAY_PROLONG_MANAGER_COMPACT_THRESHOLD=120000`<br>`RELAY_PROLONG_MAX_OUTPUT_TOKENS=4000`<br>`RELAY_PROLONG_MAX_STEPS=6`<br>`RELAY_PROLONG_ENABLE_PYTHON=true` |
+| Codex 0.160 | Responses | ✅ ChatGPT login | | |
+| Claude Code 2.1.283 | Messages | ✅ via LiteLLM² | | ✅ subscription login |
+| Gemini CLI 0.62 | Gemini | ✅ via LiteLLM² | ✅ | |
+| pi 1.0 | Responses / Gemini | ✅ | ✅ | |
+| OpenCode 1.18 | Responses / Gemini | ✅ | ⚠️¹ | |
+| Kilo CLI 7.8 | Responses / Gemini | ✅ | ✅ | |
+| Crush 0.97 | Chat Completions / Gemini | ✅ | ✅ | |
+| OpenClaw 2026.9 | Responses / Gemini | ✅ | ✅ | |
+| Goose 1.52 | Responses / Gemini | ✅ | ✅ | |
+| Kimi Code 2.1 | Responses / Gemini | ✅ | ✅ (gemini-2.5-flash-lite) | |
+| Hermes Agent 0.19 | Responses / Chat Completions | ✅ | ✅ | |
+| nanobot 0.3.5 | Responses / Chat Completions | ✅ | ✅ | |
+| DeepSeek Harness 0.2 | Responses / Gemini | ✅ | ✅ | |
+| WorkBuddy (CodeBuddy Code 2.161) | Chat Completions | ✅³ | ✅ | |
+| mini-swe-agent 2.4 | Responses / Gemini | ✅⁴ | ✅⁴ | |
 
-| Checkpoint mode | Python | Environment | Behavior |
-| --- | --- | --- | --- |
-| Cache | `checkpoint_mode="cache"` | `RELAY_CHECKPOINT_MODE=cache` | Store artifacts in Relay's exact-prefix cache without changing agent responses. |
-| Inline | `checkpoint_mode="inline"` | `RELAY_CHECKPOINT_MODE=inline` | Return Relay checkpoint items for the agent to append to its trajectory. |
+Models: `gpt-6-luna`, `gemini-3.8-flash`, `claude-sonnet-5-5` unless noted. Some
+harness/model pairs fail without Relay too and were tested with the closest model the
+harness supports: Kimi Code requests a thinking level gemini-3.8-flash rejects.
+¹ Every compaction passes the checks, but when Gemini answers with nothing but a thought,
+OpenCode sends a request that ends with that model turn, which Gemini rejects; the same
+task fails the same way without Relay, so the run does not finish.
+² The harness was already configured to use a LiteLLM gateway that translates its protocol to
+OpenAI; `relay install` wrapped that gateway (harness → Relay → LiteLLM → OpenAI). Relay does
+not translate protocols itself.
+³ WorkBuddy is a desktop app; its engine ships as the CodeBuddy Code CLI, which was run on
+`~/.workbuddy`. Built-in models go through Tencent's service and cannot be managed; custom
+models can. gpt-6 accepts tools on Chat Completions only with `reasoning_effort: none`, so
+thinking was turned off; nanobot likewise needs a reasoning effort set to stop sending
+`temperature` to gpt-6.
 
-Cache mode is recommended for transparent integration. Inline checkpoints are
-Relay-specific and require Relay to remain in the request path when replayed.
+⁴ One turn: mini cannot continue a session, so the turn-start path is not exercised.
 
-Selective discard is stateless and calls a hidden Responses manager whenever at
-least `RELAY_DISCARD_MIN_CANDIDATE_STEPS` completed interactions are older than
-the protected recent suffix. The manager can delete an entire tool-safe step or
-select exact line ranges to retain from a text tool output; Relay validates every
-step ID, call ID, and range before applying the decision. It never rewrites or
-summarizes retained content. The initial task, pending interaction, and the most
-recent `RELAY_DISCARD_KEEP_RECENT` completed interactions stay verbatim.
+Resumed sessions keep their compaction: several harnesses rewrite their history when a
+session is resumed without changing what the model reads (Codex writes absent reasoning
+content as null, Gemini CLI repeats tool results and replaces thought signatures, OpenClaw
+drops reasoning summaries, Hermes drops tool names, CodeBuddy adds its own metadata), and
+the codecs compare items by what reaches the model, so the stored compaction still
+applies. Claude Code can leave earlier tool calls out of a resumed history; that is a
+different history, so Relay summarizes it again.
 
-RLM follows the official fresh-query behavior: every request processes the full
-trajectory with `persistent=False` and `compaction=False`. It does not create or
-reuse Relay checkpoints. Its manager model uses Chat Completions; the original
-request model remains the Responses renderer. The default `local` RLM environment
-executes model-generated Python in the Relay process; use an isolated official
-RLM environment for untrusted workloads.
+Hermes Agent and nanobot choose their protocol from the endpoint's host name, which is why
+`relay install` pins it for them. Hermes ignores Anthropic endpoints on hosts it does not
+recognize, so its native Anthropic provider is not supported. DeepSeek models on DeepSeek
+Harness were not checked (no key), but use the same Messages codec as Claude Code.
 
-Context Folding follows FoldAgent's branch/return state transition, but Relay's
-branch decision is hidden from the task trajectory. AgentFold follows the
-official multi-scale summary update and applies each fold to the next turn.
-AutoCompact follows its published inference behavior; its project currently
-does not publish inference code or model weights, so Relay uses a hidden manager
-for the learned compact/keep decision.
+Cursor, Windsurf, Amp and similar products route model requests through their own
+servers, so a local proxy cannot manage their context. (Cursor Agent's `--endpoint`
+exchanges the API key with Cursor's backend first, and the desktop app's OpenAI base-URL
+override did not reach a local endpoint.)
 
-Multi-gran Compact is a port of FoldAgent's prompt-based (`pg_compaction`)
-scheme. Compaction fires on a fixed token cadence: from the last sealed note,
-raw interactions accumulate until a tool-safe boundary first crosses
-`RELAY_MULTI_GRAN_THRESHOLD`, and that span is folded into one memory note (a
-user turn written in the agent's own voice). Notes accumulate and are never
-re-summarized, so the active context is `[protected prefix, note_1, ..., note_k,
-raw tail]`; `RELAY_MULTI_GRAN_MAX_COMPACTION` caps the fold count and the final
-note carries a commit-now footer. Unlike the other manager strategies, the
-compactor is a genuinely separate endpoint speaking Chat Completions —
-configured with `RELAY_MULTI_GRAN_BASE_URL` / `RELAY_MULTI_GRAN_API_KEY` /
-`RELAY_MULTI_GRAN_MODEL` (mirroring FoldAgent's `--compact_base_url` /
-`--compact_model_name`). When `RELAY_MULTI_GRAN_BASE_URL` is unset it inherits
-the task upstream, so a model-name-only override still works. Cadence tokens are
-counted with the compactor's own tokenizer (`RELAY_MULTI_GRAN_TOKENIZER`,
-default Qwen3.5-9B), falling back to a length estimate when it cannot be loaded.
-The compaction prompt is domain-agnostic by default; `RELAY_MULTI_GRAN_TASK_PROFILE`
-selects a full built-in prompt bundle (`general` or `browsecomp`, the original
-search/docid-tuned prompt) — each bundle carries its own system prompt, memory
-header and commit-now footer.
+Known limitations: state lives in memory, so a restart costs one extra summary per
+conversation; WebSocket transports are refused (Codex falls back to HTTP); an overflow
+reported inside an already-started stream is not retried; token-counting endpoints are
+passed through unchanged; Gemini CLI's Google-login mode (Code Assist API) is not
+covered yet.
 
-PRO-LONG follows the official lossless-log design, adapted so the task model
-never performs context-management actions. A private model inherits the task
-context, keeps its own replayable Responses trajectory, and searches the full
-structured log programmatically. Relay preserves native compaction items for
-both model trajectories and stores the external log in the exact-prefix cache.
-Set `RELAY_PROLONG_MODEL` to a smaller Responses model; when unset, Relay uses
-the task model. `log_python` executes manager-generated local Python and should
-be disabled for untrusted workloads with `RELAY_PROLONG_ENABLE_PYTHON=false`.
+## Extending Relay
 
-Sources: [PRO-LONG](https://github.com/alexisfox7/PRO-LONG),
-[FoldAgent](https://github.com/sunnweiwei/FoldAgent),
-[AgentFold](https://github.com/Alibaba-NLP/DeepResearch/tree/main/WebAgent/AgentFold),
-and [AutoCompact](https://autocompact.github.io/).
+- **Harness**: subclass `Harness` in `relay/harnesses/`, implement `matches` (request
+  headers), `refine` (reclassify the user-role messages it injects), and `launch`; add it
+  to `HARNESSES`. Record its traffic into `tests/traces/` and add it to
+  `tests/test_protocols.py`: the append-only check is the contract every harness must meet.
+- **Protocol**: implement the `Codec` interface in `relay/protocols/base.py` and register
+  it in `CODECS`; add an upstream for it in `relay/providers.py`.
+- **Strategy**: implement `Strategy` (`fingerprint` and `plan(view, summarizer)`), returning
+  a `Rewrite` that replaces `view.items[:cut]` with `head`.
 
-## Codex
+The earlier strategies (checkpoint, sliding window, rolling memory, RLM, context
+folding, AgentFold, AutoCompact, selective discard, PRO-LONG, multi-granularity
+compaction) live unchanged in `relay/experimental/` until they are ported to this
+interface.
 
-Start Relay with the API key Codex already uses:
+## Development
 
 ```bash
-export OPENAI_API_KEY=...
-export RELAY_CHECKPOINT_MODE=cache
-relay
+pip install -e '.[dev]'
+pytest                                  # unit tests and fake-upstream tests, seconds
 ```
 
-Add a provider to `~/.codex/config.toml`:
+Real harnesses are checked in Docker against real models, with a low compaction
+threshold so a short task compacts several times. The image holds the harness CLIs;
+each run gets a throwaway HOME, so the host's own configurations are never touched.
 
-```toml
-model_provider = "relay"
-model_auto_compact_token_limit = 1000000000
-
-[model_providers.relay]
-name = "Relay"
-base_url = "http://127.0.0.1:8787/v1"
-env_key = "OPENAI_API_KEY"
-wire_api = "responses"
-supports_websockets = false
+```bash
+docker build -t relay-harness-test tests/docker
+RELAY_TEST_KEYS=keys.env python tests/docker/check.py pi:gpt          # one harness × model
+RELAY_TEST_KEYS=keys.env python tests/docker/check.py --matrix        # all of them
 ```
 
-Run Codex normally. Relay uses the Responses SSE transport and keeps its
-checkpoints in the local exact-prefix cache. The high Codex compaction limit
-keeps Codex's own compactor from replacing the append-only trajectory first.
+`keys.env` holds `OPENAI_API_KEY`, `GEMINI_API_KEY` and `ANTHROPIC_API_KEY`; Codex uses
+the host's ChatGPT login. Each run is two turns of one session (the second through the
+harness's own continue/resume), so Relay compacts mid-turn and at the start of a turn.
+A run passes only if, for every compaction, the summary contains every code read so far,
+the new context has Codex's layout and keeps the initial context and user messages, and
+every later request Relay forwarded carries just the latest summary and none of the
+summarized tool output; no file was read twice, both answers are right, no compaction
+failed, and the upstream accepted every model call.

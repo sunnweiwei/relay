@@ -22,7 +22,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from relay import (
+from relay.experimental import (
     RLM,
     AgentFold,
     AutoCompact,
@@ -34,13 +34,13 @@ from relay import (
     RollingMemory,
     SlidingWindow,
 )
-from relay.proxy import ProxyConfig, create_app
-from relay.strategies.auto_compact import AUTO_CONTEXT_SUMMARY
-from relay.strategies.compact import CODEX_COMPACTION_PROMPT, CODEX_SUMMARY_PREFIX
-from relay.strategies.context_folding import CONTEXT_FOLDING_RETURN_PREFIX
-from relay.strategies.prolong import PROLONG_CONTEXT_PREFIX
-from relay.strategies.rlm import RLM_HANDOFF_PREFIX
-from relay.strategies.rolling_memory import (
+from relay.experimental.proxy import ProxyConfig, create_app
+from relay.experimental.strategies.auto_compact import AUTO_CONTEXT_SUMMARY
+from relay.experimental.strategies.compact import CODEX_COMPACTION_PROMPT, CODEX_SUMMARY_PREFIX
+from relay.experimental.strategies.context_folding import CONTEXT_FOLDING_RETURN_PREFIX
+from relay.experimental.strategies.prolong import PROLONG_CONTEXT_PREFIX
+from relay.experimental.strategies.rlm import RLM_HANDOFF_PREFIX
+from relay.experimental.strategies.rolling_memory import (
     ROLLING_MEMORY_PREFIX,
     ROLLING_MEMORY_PROMPT,
 )
@@ -509,9 +509,7 @@ def _serve(app: Starlette) -> Iterator[str]:
 
 @contextmanager
 def _serve_relay_command(upstream_url: str) -> Iterator[str]:
-    command = Path(sys.executable).with_name("relay")
-    if not command.is_file():
-        raise unittest.SkipTest("the Relay console script is not installed")
+    command = [sys.executable, "-c", "from relay.experimental.proxy import main; main()"]
     probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     probe.bind(("127.0.0.1", 0))
     port = probe.getsockname()[1]
@@ -530,7 +528,7 @@ def _serve_relay_command(upstream_url: str) -> Iterator[str]:
         }
     )
     process = subprocess.Popen(
-        [str(command)],
+        command,
         env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,

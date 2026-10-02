@@ -6,9 +6,9 @@ from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from relay import ContextEngine, PrefixCheckpointCache, ProLong
-from relay.strategies import strategy_from_env
-from relay.strategies.prolong import PROLONG_CONTEXT_PREFIX
+from relay.experimental import ContextEngine, PrefixCheckpointCache, ProLong
+from relay.experimental.strategies import strategy_from_env
+from relay.experimental.strategies.prolong import PROLONG_CONTEXT_PREFIX
 
 
 def message(role: str, text: str) -> dict:
