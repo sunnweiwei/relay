@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import sys
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -16,6 +18,8 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from .checkpoint_cache import PrefixCheckpointCache
+from .gemini import GeminiInput
+from .gemini_manager import GeminiManagementResponses, GeminiManagementUnavailable
 from .middleware import ContextEngine, item_dict, item_list
 from .strategies import ContextStrategy, strategy_from_env
 
@@ -30,6 +34,10 @@ class ProxyConfig:
     host: str = "127.0.0.1"
     port: int = 8787
     checkpoint_mode: str = "inline"
+    gemini_enabled: bool = False
+    management_base_url: str | None = None
+    management_api_key: str | None = None
+    management_model: str | None = None
 
     @classmethod
     def from_env(cls) -> ProxyConfig:
@@ -41,6 +49,10 @@ class ProxyConfig:
             host=os.getenv("RELAY_HOST", "127.0.0.1"),
             port=int(os.getenv("RELAY_PORT", "8787")),
             checkpoint_mode=os.getenv("RELAY_CHECKPOINT_MODE", "inline"),
+            gemini_enabled=os.getenv("RELAY_GEMINI_ENABLED", "false").lower() == "true",
+            management_base_url=os.getenv("RELAY_MANAGEMENT_BASE_URL"),
+            management_api_key=os.getenv("RELAY_MANAGEMENT_API_KEY"),
+            management_model=os.getenv("RELAY_MANAGEMENT_MODEL"),
         )
 
 
@@ -107,6 +119,26 @@ def _management_responses(
         project=request.headers.get("openai-project"),
     )
     return client.responses, client.close
+
+
+def _trace_prepare(engine: ContextEngine, prepared: Any) -> None:
+    if os.getenv("RELAY_TRACE", "false").lower() != "true":
+        return
+    print(
+        json.dumps(
+            {
+                "event": "relay_context_prepare",
+                "strategy": engine.strategy.name,
+                "context_changed": prepared.compacted,
+                "input_items": len(prepared.raw_input),
+                "forwarded_items": len(prepared.input),
+                "checkpoints": len(prepared.checkpoints),
+            },
+            separators=(",", ":"),
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _sse(event: str | None, data: str) -> bytes:
@@ -251,7 +283,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
-        timeout = httpx.Timeout(60.0, read=None)
+        timeout = httpx.Timeout(60.0, read=120.0)
         app.state.upstream = httpx.AsyncClient(
             timeout=timeout, transport=upstream_transport
         )
@@ -263,6 +295,80 @@ def create_app(
         url = _upstream_url(config.upstream_base_url, request)
         headers = _headers(request.headers, config.upstream_api_key)
         body_bytes = await request.body()
+
+        gemini_match = re.fullmatch(
+            r"/v1(?:beta)?/models/([^/]+):(generateContent|streamGenerateContent)",
+            request.url.path,
+        )
+        if config.gemini_enabled and request.method == "POST" and gemini_match:
+            close_management: Callable[[], None] = lambda: None
+            try:
+                if engine.checkpoint_mode != "cache":
+                    raise ValueError("Gemini strategies require RELAY_CHECKPOINT_MODE=cache")
+                tenant = request.headers.get("x-goog-api-key") or request.headers.get("authorization")
+                if not tenant:
+                    raise ValueError("Gemini cache requires x-goog-api-key or Authorization")
+                if management_responses is None:
+                    management_fields = (
+                        config.management_base_url,
+                        config.management_api_key,
+                        config.management_model,
+                    )
+                    if all(management_fields):
+                        from openai import OpenAI
+                        client = OpenAI(
+                            base_url=config.management_base_url,
+                            api_key=config.management_api_key,
+                        )
+                        responses, close_management = client.responses, client.close
+                    elif any(management_fields):
+                        raise ValueError("Set all RELAY_MANAGEMENT_* fields, or none to use Gemini")
+                    else:
+                        if engine.strategy.name not in {"compact", "checkpoint", "sliding_window"}:
+                            raise ValueError("Gemini native management supports compact, checkpoint and sliding_window")
+                        api_key = config.upstream_api_key or request.headers.get("x-goog-api-key")
+                        if not api_key:
+                            raise ValueError("Gemini native management requires x-goog-api-key or RELAY_UPSTREAM_API_KEY")
+                        client = GeminiManagementResponses(
+                            config.upstream_base_url, api_key, gemini_match[1]
+                        )
+                        responses, close_management = client, client.close
+                else:
+                    responses = management_responses
+                adapter = GeminiInput(json.loads(body_bytes), config.management_model or gemini_match[1])
+                namespace = json.dumps({"protocol": "gemini", "tenant": tenant,
+                                        "task_model": gemini_match[1]}, sort_keys=True)
+                prepared = await run_in_threadpool(engine.prepare, responses, adapter.request, namespace)
+                _trace_prepare(engine, prepared)
+                forwarded = adapter.render(prepared.input)
+                if prepared.overrides:
+                    fields = ", ".join(sorted(prepared.overrides))
+                    raise ValueError(
+                        f"strategy prepare and context conversion completed; "
+                        f"Gemini adapter cannot map request overrides: {fields}"
+                    )
+            except GeminiManagementUnavailable as exc:
+                await run_in_threadpool(close_management)
+                return JSONResponse(
+                    {"error": {"message": str(exc), "code": "relay_gemini_upstream_unavailable"}},
+                    status_code=503,
+                )
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+                await run_in_threadpool(close_management)
+                return JSONResponse({"error": {"message": str(exc), "code": "relay_gemini_error"}}, status_code=400)
+            try:
+                # Native auth, tools, generation settings and response/SSE stay native.
+                native_headers = _headers(request.headers, None)
+                if config.upstream_api_key:
+                    native_headers.pop("authorization", None)
+                    native_headers["x-goog-api-key"] = config.upstream_api_key
+                upstream = await upstream_client.send(
+                    upstream_client.build_request("POST", url, headers=native_headers, json=forwarded), stream=True)
+            finally:
+                await run_in_threadpool(close_management)
+            return StreamingResponse(_raw_body(upstream), status_code=upstream.status_code,
+                                     headers=_response_headers(upstream.headers),
+                                     background=BackgroundTask(upstream.aclose))
 
         if request.method != "POST" or request.url.path != "/v1/responses":
             upstream = await upstream_client.send(
@@ -295,6 +401,7 @@ def create_app(
             prepared = await run_in_threadpool(
                 engine.prepare, responses, body, namespace
             )
+            _trace_prepare(engine, prepared)
             forwarded = engine.upstream_request(body, prepared)
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             await run_in_threadpool(close_management)

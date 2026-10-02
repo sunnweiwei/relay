@@ -54,6 +54,42 @@ class PrefixCheckpointCacheTests(unittest.TestCase):
         self.assertIsNotNone(self.cache.match(self.partition, [reordered]))
         self.assertIsNone(self.cache.match(self.partition, [message("Root")]))
 
+    def test_reasoning_absent_content_matches_null_after_resume(self) -> None:
+        reasoning = {
+            "type": "reasoning", "id": "rs_1",
+            "summary": [{"type": "summary_text", "text": "checked config"}],
+            "encrypted_content": "opaque-reasoning",
+        }
+        original = [message("inspect config"), reasoning, message("750 ms")]
+        self.cache.put(self.partition, original, artifact("summary checkpoint"))
+
+        resumed_reasoning = {**reasoning, "content": None}
+        resumed = [original[0], resumed_reasoning, original[2], message("continue")]
+        match = self.cache.match(self.partition, resumed)
+
+        assert match is not None
+        self.assertEqual(match.matched_items, 3)
+        self.assertEqual(match.artifact, artifact("summary checkpoint"))
+        self.assertNotIn("content", reasoning)
+        self.assertIsNone(resumed_reasoning["content"])
+
+        changed_reasoning = {**resumed_reasoning, "encrypted_content": "different"}
+        self.assertIsNone(self.cache.match(
+            self.partition, [original[0], changed_reasoning, original[2]]
+        ))
+        visible_content = {**reasoning, "content": [{"type": "reasoning_text", "text": "new"}]}
+        self.assertIsNone(self.cache.match(
+            self.partition, [original[0], visible_content, original[2]]
+        ))
+
+    def test_null_content_is_not_ignored_for_other_item_types(self) -> None:
+        assistant = {"type": "message", "role": "assistant"}
+        self.cache.put(self.partition, [assistant], artifact("checkpoint"))
+
+        self.assertIsNone(self.cache.match(
+            self.partition, [{**assistant, "content": None}]
+        ))
+
     def test_tenants_and_request_scopes_cannot_cross_hit(self) -> None:
         tenant_b = self.cache.partition("tenant-b", {"model": "test"})
         other_model = self.cache.partition("tenant-a", {"model": "other"})

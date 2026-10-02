@@ -181,6 +181,7 @@ class CompactTests(unittest.TestCase):
                 "Checkpoint",
                 "Compact",
                 "ContextFolding",
+                "MultiGranCompact",
                 "ProLong",
                 "RollingMemory",
                 "SelectiveDiscard",
@@ -249,6 +250,40 @@ class CompactTests(unittest.TestCase):
         self.assertEqual(sent[-2]["content"], "first result")
         self.assertEqual(sent[-1]["content"], "continue")
         self.assertEqual(cache.stats().hits, 1)
+
+    def test_cache_mode_restores_codex_reasoning_after_null_content_resume(self) -> None:
+        api = FakeResponses(
+            token_count=500,
+            task_outputs=[
+                [message("assistant", "first result")],
+                [message("assistant", "second result")],
+            ],
+        )
+        cache = PrefixCheckpointCache(secret=b"test-secret")
+        client = ContextManagingOpenAI(
+            FakeClient(api), Compact(compact_threshold=100),
+            checkpoint_mode="cache", checkpoint_cache=cache,
+            cache_namespace="tenant-a",
+        )
+        reasoning = {
+            "type": "reasoning", "id": "rs_1", "summary": [],
+            "encrypted_content": "opaque-reasoning",
+        }
+        original = [message("user", "old request"), reasoning,
+                    message("assistant", "tool result")]
+
+        first = client.responses.create(model="task", input=original)
+        api.token_count = 1
+        resumed = [original[0], {**reasoning, "content": None}, original[2],
+                   *first.output, message("user", "continue")]
+        client.responses.create(model="task", input=resumed)
+
+        self.assertEqual(cache.stats().hits, 1)
+        sent = api.create_calls[-1]["input"]
+        self.assertTrue(any("durable coding handoff" in item.get("content", "")
+                            for item in sent))
+        self.assertEqual(sent[-2]["content"], "first result")
+        self.assertEqual(sent[-1]["content"], "continue")
 
     def test_inline_checkpoint_has_priority_over_cache_matching(self) -> None:
         api = FakeResponses(token_count=1)

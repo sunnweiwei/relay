@@ -258,7 +258,10 @@ class PrefixCheckpointCache:
         return value.digest()
 
     def _child_digest(self, parent: bytes, item: Mapping[str, Any]) -> bytes:
-        return self._digest(b"item\0", parent, b"\0", _canonical(dict(item)))
+        identity = dict(item)
+        if identity.get("type") == "reasoning" and identity.get("content") is None:
+            identity.pop("content", None)
+        return self._digest(b"item\0", parent, b"\0", _canonical(identity))
 
     def _valid_checkpoint(self, node: _Node, now: float) -> _Node | None:
         if node.artifact is None:
