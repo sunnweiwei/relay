@@ -43,14 +43,13 @@ No extra API request was made for the correction.
 
 Codex completed both answers and compacted. It hit a checkpoint inside the
 first user turn, but the second user's `exec resume --last` request changed two
-earlier `reasoning` items. The cache namespace/scope fields did not change;
-the exact stored prefix no longer matched. The second request re-summarized
-old history. This is a cross-turn Cache compatibility failure, not a task
-answer failure. No normalization of reasoning items has been applied: their
-content might affect the checkpoint. A subsequent bounded run with only the
-isolated Codex `model_reasoning_effort = "none"` setting changed passed all
-checks: no reasoning items appeared and the second user turn matched the
-stored checkpoint. Reasoning-enabled Codex resume remains a known failure.
+earlier `reasoning` items. Raw field capture showed that their only change was
+an absent `content` field becoming `null`; the cache namespace/scope and all
+other item fields stayed the same. Cache-key normalization now equates only
+those two representations for reasoning items. A later reasoning-enabled run
+passed all checks and matched the checkpoint on the second user turn. The
+earlier `model_reasoning_effort = "none"` run also passed, but is no longer the
+only passing Codex configuration.
 
 Claude Code required a tool bridge for GPT Responses. Empty `Read.pages` from
 the model was rejected by the Claude tool, so the bridge now omits that empty

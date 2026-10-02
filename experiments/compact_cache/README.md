@@ -40,9 +40,10 @@ summary calls, and 90,000 summary input tokens overall. It stops after the
 second user turn if the Harness completes normally.
 The isolated Codex configuration sets `model_reasoning_effort = "none"` for
 this GPT-6 Luna case. With its previous fallback reasoning setting, Codex
-rewrote prior reasoning items on `exec resume --last`, so exact-prefix Cache
-missed across the two user turns. The `none` configuration produced a stable
-prefix and passed; this does not validate Codex resume with reasoning enabled.
+serialized an absent `reasoning.content` field as `null` on `exec resume --last`.
+The Cache now treats those two representations as the same reasoning item while
+keeping all other fields exact. The `none` configuration passed, and a later
+reasoning-enabled `local-files` run passed with an exact second-turn Cache hit.
 To diagnose that resume mismatch once, run the Codex `local-files` live case
 with `--codex-reasoning-diagnostic`. This omits the `none` setting and saves
 the complete incoming reasoning items in `runs/*/codex_reasoning_raw.json`
