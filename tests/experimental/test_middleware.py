@@ -4,9 +4,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import relay
-import relay.strategies
-from relay import (
+import relay.experimental.strategies  # noqa: F401  (loads the subpackage)
+import relay.experimental as relay
+from relay.experimental import (
     RLM,
     Checkpoint,
     Compact,
@@ -16,14 +16,14 @@ from relay import (
     SlidingWindow,
     wrap,
 )
-from relay.middleware import decode_local_checkpoint, local_compaction_item
-from relay.strategies.compact import (
+from relay.experimental.middleware import decode_local_checkpoint, local_compaction_item
+from relay.experimental.strategies.compact import (
     CODEX_COMPACTION_PROMPT,
     CODEX_SUMMARY_PREFIX,
     _retain_user_messages,
 )
-from relay.strategies.rlm import RLM_HANDOFF_PREFIX, RLM_ROOT_PROMPT
-from relay.strategies.rolling_memory import (
+from relay.experimental.strategies.rlm import RLM_HANDOFF_PREFIX, RLM_ROOT_PROMPT
+from relay.experimental.strategies.rolling_memory import (
     ROLLING_MEMORY_PREFIX,
     ROLLING_MEMORY_PROMPT,
 )
@@ -705,7 +705,7 @@ class RLMTests(unittest.TestCase):
             }
         ]
 
-        with patch("relay.strategies.rlm._official_runtime", factory):
+        with patch("relay.experimental.strategies.rlm._official_runtime", factory):
             response = client.responses.create(
                 model="task-model",
                 instructions="Act as a coding agent.",
@@ -764,7 +764,7 @@ class RLMTests(unittest.TestCase):
         )
         trajectory = [message("user", "initial task")]
 
-        with patch("relay.strategies.rlm._official_runtime", factory):
+        with patch("relay.experimental.strategies.rlm._official_runtime", factory):
             first = client.responses.create(model="task", input=trajectory)
             trajectory.extend(first.output)
             trajectory.append(message("user", "continue"))

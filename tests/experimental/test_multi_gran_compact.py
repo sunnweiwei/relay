@@ -6,11 +6,11 @@ from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from relay import ContextEngine, MultiGranCompact, PrefixCheckpointCache
-from relay.strategies import strategy_from_env
-from relay.strategies import multi_gran_compact as mgc
-from relay.strategies.base import GeneratedCheckpoint
-from relay.strategies.multi_gran_compact import (
+from relay.experimental import ContextEngine, MultiGranCompact, PrefixCheckpointCache
+from relay.experimental.strategies import strategy_from_env
+from relay.experimental.strategies import multi_gran_compact as mgc
+from relay.experimental.strategies.base import GeneratedCheckpoint
+from relay.experimental.strategies.multi_gran_compact import (
     GENERAL_MEMORY_HEADER as MEMORY_HEADER,
     _item_text,
     _leading_prefix,

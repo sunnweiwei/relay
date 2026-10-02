@@ -7,8 +7,8 @@ from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from relay import ContextEngine, SelectiveDiscard
-from relay.strategies import strategy_from_env
+from relay.experimental import ContextEngine, SelectiveDiscard
+from relay.experimental.strategies import strategy_from_env
 
 
 def message(role: str, text: str) -> dict:

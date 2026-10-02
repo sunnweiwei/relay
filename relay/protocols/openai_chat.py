@@ -1,0 +1,130 @@
+"""OpenAI Chat Completions (`POST .../chat/completions`), the common OpenAI-compatible API.
+
+Items are messages. An assistant message with `tool_calls` and the `tool` messages
+answering it form one group.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from ..core.ir import Item, Kind
+from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, error_message
+
+
+# Message fields that reach the model, including common provider extensions for reasoning.
+MESSAGE_FIELDS = {"role", "content", "name", "tool_calls", "tool_call_id", "function_call", "refusal", "audio",
+                  "reasoning", "reasoning_content", "reasoning_details", "thinking"}
+
+
+class OpenAIChat:
+    name = "openai_chat"
+    paths = ("/chat/completions",)
+
+    def managed(self, body: Body) -> bool:
+        return isinstance(body.get("messages"), list)
+
+    def items(self, body: Body) -> list[WireItem]:
+        return list(body.get("messages") or [])
+
+    def with_items(self, body: Body, items: list[WireItem]) -> Body:
+        return {**body, "messages": items}
+
+    def classify(self, item: WireItem) -> Item:
+        role = item.get("role")
+        text, media = _content_text(item.get("content"))
+        if role in {"system", "developer"}:
+            return Item(Kind.SYSTEM, text)
+        if role in {"tool", "function"}:
+            return Item(Kind.TOOL_RESULT, text)
+        if role == "assistant":
+            calls = [c.get("function") or {} for c in item.get("tool_calls") or []]
+            if calls:
+                text = "\n".join([text, *(f"{c.get('name', '')}({c.get('arguments', '')})" for c in calls)])
+                return Item(Kind.TOOL_CALL, text.strip())
+            return Item(Kind.ASSISTANT, text)
+        return Item(Kind.USER, text, media=media)
+
+    def canonical(self, item: WireItem) -> bytes:
+        """What the model reads of a message: no harness metadata (CodeBuddy adds `usage` and
+        more on resume), no `cache_control`, string content as one text part, and no `name`
+        on tool results (Hermes drops it on resume)."""
+
+        message = {k: v for k, v in item.items() if k in MESSAGE_FIELDS}
+        if message.get("role") == "tool":
+            message.pop("name", None)
+        content = message.get("content")
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        if isinstance(content, list):
+            content = [{k: v for k, v in part.items() if k != "cache_control"} for part in content
+                       if isinstance(part, dict)]
+        return canonical_json({**message, "content": content})
+
+    def boundaries(self, items: list[WireItem]) -> frozenset[int]:
+        legal, pending = {0}, set()
+        for index, item in enumerate(items):
+            if item.get("role") == "assistant":
+                pending |= {c.get("id") for c in item.get("tool_calls") or []}
+            elif item.get("role") == "tool":
+                pending.discard(item.get("tool_call_id"))
+            if not pending:
+                legal.add(index + 1)
+        return frozenset(legal)
+
+    def arrange(self, head: tuple[Item, ...], mid_turn: bool) -> tuple[Item, ...]:
+        return head
+
+    def user_message(self, text: str) -> WireItem:
+        return {"role": "user", "content": text}
+
+    def preamble(self, body: Body) -> str:
+        return json.dumps(body.get("tools") or [], ensure_ascii=False)
+
+    def summary_request(self, body: Body, items: list[WireItem], prompt: str) -> Body:
+        drop = {"stream", "stream_options", "response_format", "n"}
+        request = {key: value for key, value in body.items() if key not in drop}
+        request.update(messages=[*items, self.user_message(prompt)], stream=False)
+        if request.get("tools"):
+            request["tool_choice"] = "none"
+        return request
+
+    def stream_result(self, events: list[Body]) -> Body:
+        choices = [choice for event in events for choice in event.get("choices") or []]
+        text = "".join((choice.get("delta") or {}).get("content") or "" for choice in choices)
+        reason = next((c["finish_reason"] for c in reversed(choices) if c.get("finish_reason")), None)
+        return {"choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": reason}]}
+
+    def output_text(self, payload: Body) -> str:
+        choices = payload.get("choices") or [{}]
+        return _content_text((choices[0].get("message") or {}).get("content"))[0].strip()
+
+    def finished(self, payload: Body) -> bool:
+        """A finish reason arrived and it is not a cutoff (gateways name normal stops differently)."""
+
+        reason = (payload.get("choices") or [{}])[0].get("finish_reason")
+        return reason is not None and reason not in {"length", "content_filter"}
+
+    def usage(self, payload: Body) -> int | None:
+        usage = payload.get("usage")
+        tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+        return tokens if isinstance(tokens, int) else None
+
+    def is_overflow(self, status: int, payload: Any) -> bool:
+        code, message = error_message(payload)
+        return status in {400, 413} and (
+            code == "context_length_exceeded" or any(p in message for p in OVERFLOW_PHRASES)
+        )
+
+
+def _content_text(content: Any) -> tuple[str, bool]:
+    if isinstance(content, str):
+        return content, False
+    texts, media = [], False
+    for part in content or []:
+        if isinstance(part, dict) and isinstance(part.get("text"), str):
+            texts.append(part["text"])
+        elif isinstance(part, dict):
+            media = True
+    return "\n".join(texts), media

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from relay import PrefixCheckpointCache
+from relay.experimental import PrefixCheckpointCache
 
 
 def message(text: str) -> dict:
