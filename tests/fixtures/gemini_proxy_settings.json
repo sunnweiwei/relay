@@ -1,0 +1,6 @@
+{
+  "security": {"auth": {"selectedType": "gemini-api-key"}},
+  "privacy": {"usageStatisticsEnabled": false},
+  "telemetry": {"enabled": false},
+  "model": {"compressionThreshold": 1000000000}
+}
