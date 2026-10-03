@@ -42,6 +42,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 from relay.core.ir import AGENT_KINDS, CONTEXT_KINDS, Kind  # noqa: E402
 from relay.harnesses import detect  # noqa: E402
+from relay.harnesses.codex import rebuild  # noqa: E402
 from relay.prompts import SUMMARY_PREFIX  # noqa: E402
 from relay.protocols import codec_for  # noqa: E402
 
@@ -389,12 +390,23 @@ def evaluate(name: str, home: Path) -> dict:
         start = event["covered"] < len(raw)
         if start and codec.name == "anthropic_messages":  # no legal place for a system message there
             initial = {i for i in initial if kind({"ref": i}) is not Kind.SYSTEM}
-        if dropped := initial - kept:
+        rendered = rebuild(raw) if harness.name == "codex" and codec.name == "openai_responses" else None
+        if rendered is not None:  # Codex re-renders its context: every rebuilt section must be there
+            wires = [json.loads(e["wire"]) for e in event["head"] if "wire" in e]
+            missing = [p for p in (*rendered.pinned, *rendered.context)
+                       if (p not in kept if isinstance(p, int) else p not in wires)]
+            if missing:
+                problems.append(f"compaction {k}: re-rendered initial context {missing!r:.200} missing")
+        elif dropped := initial - kept:
             problems.append(f"compaction {k}: initial context {sorted(dropped)} dropped")
         starts, mids = starts + start, mids + (not start)
         if start and resume_reused is None:
             resume_reused = event["items_before"] < len(raw)
-        if not re.fullmatch(r"S*U*YC*" if start else r"S*U*C*U?YS*", layout):  # Anthropic: system last
+        if rendered is not None:  # developer sections belong to Codex's re-rendered context block
+            pattern = r"S*U*Y[SC]*" if start else r"S*U*[SC]*U?Y"
+        else:  # Anthropic: system last
+            pattern = r"S*U*YC*" if start else r"S*U*C*U?YS*"
+        if not re.fullmatch(pattern, layout):
             problems.append(f"compaction {k}: layout {layout} is not Codex's")
         summary = next((e["text"] for e in event["head"] if e.get("kind") == "summary"), "")
         read = [c for c in CODES if f"CODE: {c}" in json.dumps(raw[: event["covered"]])]

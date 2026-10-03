@@ -88,10 +88,11 @@ class Engine:
             return replace(harness.refine(codec.classify(raw[index])), ref=index)
 
         def materialize(state: dict[str, Any]) -> tuple[list[Item], list[WireItem]]:
-            head = [view_item(h["ref"]) if "ref" in h else Item(Kind(h["kind"]), h["text"])
+            head = [view_item(h["ref"]) if "ref" in h else Item(Kind(h["kind"]), h["text"], wire=h.get("wire"))
                     for h in state.get("head", [])]
             items = head + [view_item(i) for i in range(state.get("covered", 0), len(raw))]
-            wire = [raw[i.ref] if i.ref is not None else codec.user_message(i.text) for i in items]
+            wire = [raw[i.ref] if i.ref is not None else json.loads(i.wire) if i.wire else codec.user_message(i.text)
+                    for i in items]
             return items, wire
 
         items, wire = materialize(state)
@@ -102,8 +103,10 @@ class Engine:
             tokens += sum(approx_tokens(codec.classify(item).text) for item in volatile)
         # The harness resends its history from the start, so the system and context items before
         # the model's first action are always at hand as the conversation's initial context, which
-        # compaction re-injects like Codex does, whatever an earlier rewrite kept of them.
+        # compaction re-injects like Codex does, whatever an earlier rewrite kept of them. A harness
+        # profile may re-render it instead, as Codex does.
         first_action = next((i for i in range(len(raw)) if view_item(i).kind in AGENT_KINDS), len(raw))
+        rendered = harness.initial_context(codec, raw)
         view = View(
             tuple(items),
             codec.boundaries(wire),
@@ -111,7 +114,9 @@ class Engine:
             self.window or context_window(body.get("model")),
             force,
             state.get("base"),
+            rendered.items if rendered else
             tuple(item for item in map(view_item, range(first_action)) if item.kind in CONTEXT_KINDS),
+            current=rendered is not None and rendered.current,
         )
 
         compacted = False
@@ -188,7 +193,7 @@ def _to_state(rewrite: Rewrite, view: View, raw_length: int) -> dict[str, Any]:
     head = []
     for item in rewrite.head:
         if item.ref is None:
-            head.append({"kind": item.kind.value, "text": item.text})
+            head.append({"kind": item.kind.value, "text": item.text, **({"wire": item.wire} if item.wire else {})})
         elif item.ref < covered:
             head.append({"ref": item.ref})
         else:

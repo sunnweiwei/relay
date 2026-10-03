@@ -1,0 +1,3120 @@
+{
+ "codex": "0.160.0",
+ "models": [
+  "gpt-6.1-sol",
+  "gpt-6-sol"
+ ],
+ "note": "mid_turn/turn_start: turn 1 in directory A with AGENTS.md v1 on gpt-6.1-sol, turn 2 resumed in directory B with AGENTS.md v2 on gpt-6-sol. approved_prefixes: command prefixes approved during the session. `expected` is what Codex sent after its own compaction.",
+ "cases": {
+  "mid_turn": {
+   "request": [
+    {
+     "type": "additional_tools",
+     "id": "at_8daedc1d-0777-599d-bd47-962c41874a94",
+     "role": "developer",
+     "tools": [
+      {
+       "type": "namespace",
+       "name": "functions",
+       "description": "",
+       "tools": [
+        {
+         "type": "custom",
+         "name": "exec",
+         "description": "Run JavaScript code to orchestrate/compose tool calls …[2babc9bf7341, 17477 chars]",
+         "format": {
+          "type": "grammar",
+          "syntax": "lark",
+          "definition": "\nstart: pragma_source | plain_source\npragma_source: PRAGMA_LINE NEWLINE SOURCE\nplain_source: SOURCE\n\nPRAGMA_LINE: /[ \\t]*\\/\\/ @exec:[^\\r\\n]*/\nNEWLINE: /\\r?\\n/\nSOURCE: /[\\s\\S]+/\n"
+         }
+        },
+        {
+         "type": "function",
+         "name": "wait",
+         "description": "Waits on a yielded `exec` cell and returns new output or completion. …[3d01168d21f3, 769 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "cell_id": {
+            "type": "string",
+            "description": "Identifier of the running exec cell."
+           },
+           "max_tokens": {
+            "type": "number",
+            "description": "Output token budget for this wait call. Defaults to 10000 tokens."
+           },
+           "terminate": {
+            "type": "boolean",
+            "description": "True stops the running exec cell; false or omitted waits for output."
+           },
+           "yield_time_ms": {
+            "type": "number",
+            "description": "Wait before yielding more output. Defaults to 10000 ms."
+           }
+          },
+          "required": [
+           "cell_id"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "request_user_input",
+         "description": "Request user input for one to three short questions and wait for the response. This tool is only available in Plan mode.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "questions": {
+            "type": "array",
+            "description": "Questions to show the user. Prefer 1 and do not exceed 3",
+            "items": {
+             "type": "object",
+             "properties": {
+              "header": {
+               "type": "string",
+               "description": "Short header label shown in the UI (12 or fewer chars)."
+              },
+              "id": {
+               "type": "string",
+               "description": "Stable identifier for mapping answers (snake_case)."
+              },
+              "options": {
+               "type": "array",
+               "description": "Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; the client will add a free-form \"Other\" option automatically.",
+               "items": {
+                "type": "object",
+                "properties": {
+                 "description": {
+                  "type": "string",
+                  "description": "One short sentence explaining impact/tradeoff if selected."
+                 },
+                 "label": {
+                  "type": "string",
+                  "description": "User-facing label (1-5 words)."
+                 }
+                },
+                "required": [
+                 "label",
+                 "description"
+                ],
+                "additionalProperties": false
+               }
+              },
+              "question": {
+               "type": "string",
+               "description": "Single-sentence prompt shown to the user."
+              }
+             },
+             "required": [
+              "id",
+              "header",
+              "question",
+              "options"
+             ],
+             "additionalProperties": false
+            }
+           }
+          },
+          "required": [
+           "questions"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "request_user_input_async",
+         "description": "Ask the user one or more questions during ongoing work. Use this tool only to re …[116f6eb903f4, 556 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "questions": {
+            "type": "array",
+            "description": "One or more self-contained questions to present together, in display order.",
+            "items": {
+             "type": "object",
+             "properties": {
+              "options": {
+               "type": "array",
+               "description": "Suggested answers, in display order. Put the recommended answer first; the first option is preselected by default. The user can select one option or enter a free-text answer. Do not include an Other option or a free-text placeholder; the UI provides free-text input automatically. Omit options for a free-text-only question.",
+               "items": {
+                "type": "string"
+               },
+               "minItems": 1
+              },
+              "title": {
+               "type": "string",
+               "description": "The complete question shown to the user, including any context needed to answer it."
+              }
+             },
+             "required": [
+              "title"
+             ],
+             "additionalProperties": false
+            },
+            "minItems": 1
+           }
+          },
+          "required": [
+           "questions"
+          ],
+          "additionalProperties": false
+         }
+        }
+       ]
+      },
+      {
+       "type": "namespace",
+       "name": "clock",
+       "description": "Tools for reading and waiting on time.",
+       "tools": [
+        {
+         "type": "function",
+         "name": "sleep",
+         "description": "Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn. Returns the elapsed wall-clock time.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "duration_ms": {
+            "type": "number",
+            "description": "How long to sleep in milliseconds. Must be between 1 and 43200000."
+           }
+          },
+          "required": [
+           "duration_ms"
+          ],
+          "additionalProperties": false
+         }
+        }
+       ]
+      },
+      {
+       "type": "namespace",
+       "name": "collaboration",
+       "description": "Tools for spawning and managing sub-agents.",
+       "tools": [
+        {
+         "type": "function",
+         "name": "followup_task",
+         "description": "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "message": {
+            "type": "string",
+            "description": "Message text to send to the target agent.",
+            "encrypted": true
+           },
+           "target": {
+            "type": "string",
+            "description": "Agent id or canonical task name to send a follow-up task to (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "interrupt_agent",
+         "description": "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "target": {
+            "type": "string",
+            "description": "Agent id or canonical task name to interrupt (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "list_agents",
+         "description": "List live agents in the current root thread tree. Optionally filter by task-path prefix.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "path_prefix": {
+            "type": "string",
+            "description": "Task-path prefix filter without a trailing slash. Omit to list all live agents."
+           }
+          },
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "send_message",
+         "description": "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "message": {
+            "type": "string",
+            "description": "Message text to queue on the target agent.",
+            "encrypted": true
+           },
+           "target": {
+            "type": "string",
+            "description": "Relative or canonical task name to message (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "spawn_agent",
+         "description": " …[ac8c3735d1c1, 1829 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "fork_turns": {
+            "type": "string",
+            "description": "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+           },
+           "message": {
+            "type": "string",
+            "description": "Initial plain-text task for the new agent.",
+            "encrypted": true
+           },
+           "model": {
+            "type": "string",
+            "description": "Model override for the new agent. Omit unless an explicit override is needed."
+           },
+           "reasoning_effort": {
+            "type": "string",
+            "description": "Reasoning effort override for the new agent. Omit to inherit the parent effort."
+           },
+           "task_name": {
+            "type": "string",
+            "description": "Task name for the new agent. Use lowercase letters, digits, and underscores."
+           }
+          },
+          "required": [
+           "task_name",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "wait_agent",
+         "description": "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which agents have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "timeout_ms": {
+            "type": "number",
+            "description": "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000."
+           }
+          },
+          "additionalProperties": false
+         }
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_ccf73cf0-590e-54ac-b29c-709c0dc9b393",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "You are Codex, an agent based on GPT-6. You and the user share one workspace, an …[76db213c53f3, 21769 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fece-ed52-7b23-9c09-93b072a3ed3e",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<skills_instructions> …[404500b2f1f4, 6638 chars]"
+      },
+      {
+       "type": "input_text",
+       "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `danger-full-access`: No filesystem sandboxing - all commands are permitted. Network access is enabled.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>"
+      },
+      {
+       "type": "input_text",
+       "text": "<collaboration_mode># Collaboration Mode: Default …[a735e580171c, 920 chars]"
+      },
+      {
+       "type": "input_text",
+       "text": "<recommended_plugins> …[916bc0cffdf3, 920 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fece-ed52-7b23-9c09-93c5ea1e142a",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<multi_agent_role>You are `/root`, the primary agent in a team of agents collabo …[2a7b33040c92, 2429 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fece-ed52-7b23-9c09-93d380c97f34",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.</multi_agent_mode>"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fece-ed52-7b23-9c09-93e7f9fed4e6",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "# AGENTS.md instructions for /work/A\n\n<INSTRUCTIONS>\n# Project notes (v1)\nAlways keep answers short. This is directory A.\n\n</INSTRUCTIONS>"
+      },
+      {
+       "type": "input_text",
+       "text": "<environment_context>\n  <cwd>/work/A</cwd>\n  <shell>bash</shell>\n  <current_date>2026-10-02</current_date>\n  <timezone>America/New_York</timezone>\n  <filesystem><workspace_roots><root>/work/A</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fece-ed69-7682-98d9-bb639748088f",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Run `ls` once and reply with one short sentence."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_041967bab7d02345016ac034fb5a1487d18b847481191c5359",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "I’ll run `ls` once.\n"
+      }
+     ],
+     "phase": "commentary"
+    },
+    {
+     "type": "custom_tool_call",
+     "id": "ctc_041967bab7d02345016ac034fbec7887d19f94409cb0a835f1",
+     "status": "completed",
+     "call_id": "call_6eX6uEv0BZRNLAdfdnOIjVmy",
+     "name": "exec",
+     "input": "const r = await tools.exec_command({cmd:\"ls\",max_output_tokens:1000}); text(r.output);\n"
+    },
+    {
+     "type": "custom_tool_call_output",
+     "id": "ctco_01a0fece-fc18-7140-aecb-988a328419ac",
+     "call_id": "call_6eX6uEv0BZRNLAdfdnOIjVmy",
+     "output": [
+      {
+       "type": "input_text",
+       "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"
+      },
+      {
+       "type": "input_text",
+       "text": "AGENTS.md\nREADME.md\nassets\npyproject.toml\nrelay\ntests\n"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_041967bab7d02345016ac034fea07087d1a920c83db8e8728d",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "The directory contains AGENTS.md, README.md, assets, pyproject.toml, relay, and tests."
+      }
+     ],
+     "phase": "final_answer"
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fecf-0a36-7c41-9e12-74c382f1d5b7",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<model_switch> …[e6f338c767e4, 19147 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fecf-0a36-7c41-9e12-74d9ff3f5e7f",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "# AGENTS.md instructions for /work/B\n\n<INSTRUCTIONS>\nThese AGENTS.md instructions replace all previously provided AGENTS.md instructions.\n\n# Project notes (v2)\nAlways keep answers short and cite file paths. This is directory B.\n\n</INSTRUCTIONS>"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fecf-0a36-7c41-9e12-74e540640b05",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<skills_instructions> …[39a8cc4bde3b, 2956 chars]"
+      },
+      {
+       "type": "input_text",
+       "text": "<collaboration_mode># Collaboration Mode: Default …[a735e580171c, 920 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fecf-0a36-7c41-9e12-74ff6c43c135",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<environment_context>\n  <cwd>/work/B</cwd>\n  <shell>bash</shell>\n  <current_date>2026-10-02</current_date>\n  <timezone>America/New_York</timezone>\n  <filesystem><workspace_roots><root>/work/B</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fecf-0a46-7173-952a-492ff20967f9",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Run these one at a time, one shell command each: cat relay/core/engine.py; cat relay/transport/proxy.py; cat relay/install.py; cat relay/protocols/openai_responses.py. Then reply with one sentence."
+      }
+     ]
+    },
+    {
+     "type": "reasoning",
+     "id": "rs_041967bab7d02345016ac03501d1f087d1a070e61ed818b3fb",
+     "summary": [],
+     "encrypted_content": "gAAAAABqwDUCsIBRMCez9McaE8vATDWhKnDmE34UKg0tfWUooqm-WMW7TH-9XzKRW4GNz17FNa88YHNo …[d29577542b18, 1420 chars]"
+    },
+    {
+     "type": "message",
+     "id": "msg_041967bab7d02345016ac03502612087d18ae34d856bf7957b",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "I’ll read the four files in the order you listed.\n"
+      }
+     ],
+     "phase": "commentary"
+    },
+    {
+     "type": "custom_tool_call",
+     "id": "ctc_041967bab7d02345016ac035030b1c87d1999fa4e4e56d755b",
+     "status": "completed",
+     "call_id": "call_rY7X3WwmA8I159ZcluXiPRIn",
+     "name": "exec",
+     "input": "const r = await tools.exec_command({cmd:\"cat relay/core/engine.py\",max_output_tokens:10000}); text(r.output);\n"
+    },
+    {
+     "type": "custom_tool_call_output",
+     "id": "ctco_01a0fecf-1740-79f0-8642-68cdc41583c0",
+     "call_id": "call_rY7X3WwmA8I159ZcluXiPRIn",
+     "output": [
+      {
+       "type": "input_text",
+       "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"
+      },
+      {
+       "type": "input_text",
+       "text": "\"\"\"Per-request orchestration. …[8cdcbd56c166, 11446 chars]"
+      }
+     ]
+    }
+   ],
+   "expected": [
+    {
+     "type": "additional_tools",
+     "id": "at_8daedc1d-0777-599d-bd47-962c41874a94",
+     "role": "developer",
+     "tools": [
+      {
+       "type": "namespace",
+       "name": "functions",
+       "description": "",
+       "tools": [
+        {
+         "type": "custom",
+         "name": "exec",
+         "description": "Run JavaScript code to orchestrate/compose tool calls …[2babc9bf7341, 17477 chars]",
+         "format": {
+          "type": "grammar",
+          "syntax": "lark",
+          "definition": "\nstart: pragma_source | plain_source\npragma_source: PRAGMA_LINE NEWLINE SOURCE\nplain_source: SOURCE\n\nPRAGMA_LINE: /[ \\t]*\\/\\/ @exec:[^\\r\\n]*/\nNEWLINE: /\\r?\\n/\nSOURCE: /[\\s\\S]+/\n"
+         }
+        },
+        {
+         "type": "function",
+         "name": "wait",
+         "description": "Waits on a yielded `exec` cell and returns new output or completion. …[3d01168d21f3, 769 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "cell_id": {
+            "type": "string",
+            "description": "Identifier of the running exec cell."
+           },
+           "max_tokens": {
+            "type": "number",
+            "description": "Output token budget for this wait call. Defaults to 10000 tokens."
+           },
+           "terminate": {
+            "type": "boolean",
+            "description": "True stops the running exec cell; false or omitted waits for output."
+           },
+           "yield_time_ms": {
+            "type": "number",
+            "description": "Wait before yielding more output. Defaults to 10000 ms."
+           }
+          },
+          "required": [
+           "cell_id"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "request_user_input",
+         "description": "Request user input for one to three short questions and wait for the response. This tool is only available in Plan mode.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "questions": {
+            "type": "array",
+            "description": "Questions to show the user. Prefer 1 and do not exceed 3",
+            "items": {
+             "type": "object",
+             "properties": {
+              "header": {
+               "type": "string",
+               "description": "Short header label shown in the UI (12 or fewer chars)."
+              },
+              "id": {
+               "type": "string",
+               "description": "Stable identifier for mapping answers (snake_case)."
+              },
+              "options": {
+               "type": "array",
+               "description": "Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; the client will add a free-form \"Other\" option automatically.",
+               "items": {
+                "type": "object",
+                "properties": {
+                 "description": {
+                  "type": "string",
+                  "description": "One short sentence explaining impact/tradeoff if selected."
+                 },
+                 "label": {
+                  "type": "string",
+                  "description": "User-facing label (1-5 words)."
+                 }
+                },
+                "required": [
+                 "label",
+                 "description"
+                ],
+                "additionalProperties": false
+               }
+              },
+              "question": {
+               "type": "string",
+               "description": "Single-sentence prompt shown to the user."
+              }
+             },
+             "required": [
+              "id",
+              "header",
+              "question",
+              "options"
+             ],
+             "additionalProperties": false
+            }
+           }
+          },
+          "required": [
+           "questions"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "request_user_input_async",
+         "description": "Ask the user one or more questions during ongoing work. Use this tool only to re …[116f6eb903f4, 556 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "questions": {
+            "type": "array",
+            "description": "One or more self-contained questions to present together, in display order.",
+            "items": {
+             "type": "object",
+             "properties": {
+              "options": {
+               "type": "array",
+               "description": "Suggested answers, in display order. Put the recommended answer first; the first option is preselected by default. The user can select one option or enter a free-text answer. Do not include an Other option or a free-text placeholder; the UI provides free-text input automatically. Omit options for a free-text-only question.",
+               "items": {
+                "type": "string"
+               },
+               "minItems": 1
+              },
+              "title": {
+               "type": "string",
+               "description": "The complete question shown to the user, including any context needed to answer it."
+              }
+             },
+             "required": [
+              "title"
+             ],
+             "additionalProperties": false
+            },
+            "minItems": 1
+           }
+          },
+          "required": [
+           "questions"
+          ],
+          "additionalProperties": false
+         }
+        }
+       ]
+      },
+      {
+       "type": "namespace",
+       "name": "clock",
+       "description": "Tools for reading and waiting on time.",
+       "tools": [
+        {
+         "type": "function",
+         "name": "sleep",
+         "description": "Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn. Returns the elapsed wall-clock time.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "duration_ms": {
+            "type": "number",
+            "description": "How long to sleep in milliseconds. Must be between 1 and 43200000."
+           }
+          },
+          "required": [
+           "duration_ms"
+          ],
+          "additionalProperties": false
+         }
+        }
+       ]
+      },
+      {
+       "type": "namespace",
+       "name": "collaboration",
+       "description": "Tools for spawning and managing sub-agents.",
+       "tools": [
+        {
+         "type": "function",
+         "name": "followup_task",
+         "description": "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "message": {
+            "type": "string",
+            "description": "Message text to send to the target agent.",
+            "encrypted": true
+           },
+           "target": {
+            "type": "string",
+            "description": "Agent id or canonical task name to send a follow-up task to (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "interrupt_agent",
+         "description": "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "target": {
+            "type": "string",
+            "description": "Agent id or canonical task name to interrupt (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "list_agents",
+         "description": "List live agents in the current root thread tree. Optionally filter by task-path prefix.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "path_prefix": {
+            "type": "string",
+            "description": "Task-path prefix filter without a trailing slash. Omit to list all live agents."
+           }
+          },
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "send_message",
+         "description": "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "message": {
+            "type": "string",
+            "description": "Message text to queue on the target agent.",
+            "encrypted": true
+           },
+           "target": {
+            "type": "string",
+            "description": "Relative or canonical task name to message (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "spawn_agent",
+         "description": " …[ac8c3735d1c1, 1829 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "fork_turns": {
+            "type": "string",
+            "description": "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+           },
+           "message": {
+            "type": "string",
+            "description": "Initial plain-text task for the new agent.",
+            "encrypted": true
+           },
+           "model": {
+            "type": "string",
+            "description": "Model override for the new agent. Omit unless an explicit override is needed."
+           },
+           "reasoning_effort": {
+            "type": "string",
+            "description": "Reasoning effort override for the new agent. Omit to inherit the parent effort."
+           },
+           "task_name": {
+            "type": "string",
+            "description": "Task name for the new agent. Use lowercase letters, digits, and underscores."
+           }
+          },
+          "required": [
+           "task_name",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "wait_agent",
+         "description": "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which agents have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "timeout_ms": {
+            "type": "number",
+            "description": "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000."
+           }
+          },
+          "additionalProperties": false
+         }
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_ccf73cf0-590e-54ac-b29c-709c0dc9b393",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "You are Codex, an agent based on GPT-6. You and the user share one workspace, an …[76db213c53f3, 21769 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fece-ed69-7682-98d9-bb639748088f",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Run `ls` once and reply with one short sentence."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fecf-3478-7371-9bb7-652c8742d66e",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<skills_instructions> …[39a8cc4bde3b, 2956 chars]"
+      },
+      {
+       "type": "input_text",
+       "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `danger-full-access`: No filesystem sandboxing - all commands are permitted. Network access is enabled.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>"
+      },
+      {
+       "type": "input_text",
+       "text": "<collaboration_mode># Collaboration Mode: Default …[a735e580171c, 920 chars]"
+      },
+      {
+       "type": "input_text",
+       "text": "<recommended_plugins> …[916bc0cffdf3, 920 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fecf-3478-7371-9bb7-653343b2d8e8",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<multi_agent_role>You are `/root`, the primary agent in a team of agents collabo …[2a7b33040c92, 2429 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fecf-3478-7371-9bb7-65468d278f9b",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.</multi_agent_mode>"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fecf-3478-7371-9bb7-6553cbdd4a2a",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "# AGENTS.md instructions for /work/B\n\n<INSTRUCTIONS>\n# Project notes (v2)\nAlways keep answers short and cite file paths. This is directory B.\n\n</INSTRUCTIONS>"
+      },
+      {
+       "type": "input_text",
+       "text": "<environment_context>\n  <cwd>/work/B</cwd>\n  <shell>bash</shell>\n  <current_date>2026-10-02</current_date>\n  <timezone>America/New_York</timezone>\n  <filesystem><workspace_roots><root>/work/B</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fecf-0a46-7173-952a-492ff20967f9",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Run these one at a time, one shell command each: cat relay/core/engine.py; cat relay/transport/proxy.py; cat relay/install.py; cat relay/protocols/openai_responses.py. Then reply with one sentence."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fecf-3478-7371-9bb7-6567937f8784",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Another language model started to solve this problem and produced a summary of i …[55482379bce1, 1099 chars]"
+      }
+     ]
+    }
+   ]
+  },
+  "turn_start": {
+   "request": [
+    {
+     "type": "additional_tools",
+     "id": "at_25805d7e-830d-5223-b4b2-0eccd0957c70",
+     "role": "developer",
+     "tools": [
+      {
+       "type": "namespace",
+       "name": "functions",
+       "description": "",
+       "tools": [
+        {
+         "type": "custom",
+         "name": "exec",
+         "description": "Run JavaScript code to orchestrate/compose tool calls …[2babc9bf7341, 17477 chars]",
+         "format": {
+          "type": "grammar",
+          "syntax": "lark",
+          "definition": "\nstart: pragma_source | plain_source\npragma_source: PRAGMA_LINE NEWLINE SOURCE\nplain_source: SOURCE\n\nPRAGMA_LINE: /[ \\t]*\\/\\/ @exec:[^\\r\\n]*/\nNEWLINE: /\\r?\\n/\nSOURCE: /[\\s\\S]+/\n"
+         }
+        },
+        {
+         "type": "function",
+         "name": "wait",
+         "description": "Waits on a yielded `exec` cell and returns new output or completion. …[3d01168d21f3, 769 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "cell_id": {
+            "type": "string",
+            "description": "Identifier of the running exec cell."
+           },
+           "max_tokens": {
+            "type": "number",
+            "description": "Output token budget for this wait call. Defaults to 10000 tokens."
+           },
+           "terminate": {
+            "type": "boolean",
+            "description": "True stops the running exec cell; false or omitted waits for output."
+           },
+           "yield_time_ms": {
+            "type": "number",
+            "description": "Wait before yielding more output. Defaults to 10000 ms."
+           }
+          },
+          "required": [
+           "cell_id"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "request_user_input",
+         "description": "Request user input for one to three short questions and wait for the response. This tool is only available in Plan mode.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "questions": {
+            "type": "array",
+            "description": "Questions to show the user. Prefer 1 and do not exceed 3",
+            "items": {
+             "type": "object",
+             "properties": {
+              "header": {
+               "type": "string",
+               "description": "Short header label shown in the UI (12 or fewer chars)."
+              },
+              "id": {
+               "type": "string",
+               "description": "Stable identifier for mapping answers (snake_case)."
+              },
+              "options": {
+               "type": "array",
+               "description": "Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; the client will add a free-form \"Other\" option automatically.",
+               "items": {
+                "type": "object",
+                "properties": {
+                 "description": {
+                  "type": "string",
+                  "description": "One short sentence explaining impact/tradeoff if selected."
+                 },
+                 "label": {
+                  "type": "string",
+                  "description": "User-facing label (1-5 words)."
+                 }
+                },
+                "required": [
+                 "label",
+                 "description"
+                ],
+                "additionalProperties": false
+               }
+              },
+              "question": {
+               "type": "string",
+               "description": "Single-sentence prompt shown to the user."
+              }
+             },
+             "required": [
+              "id",
+              "header",
+              "question",
+              "options"
+             ],
+             "additionalProperties": false
+            }
+           }
+          },
+          "required": [
+           "questions"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "request_user_input_async",
+         "description": "Ask the user one or more questions during ongoing work. Use this tool only to re …[116f6eb903f4, 556 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "questions": {
+            "type": "array",
+            "description": "One or more self-contained questions to present together, in display order.",
+            "items": {
+             "type": "object",
+             "properties": {
+              "options": {
+               "type": "array",
+               "description": "Suggested answers, in display order. Put the recommended answer first; the first option is preselected by default. The user can select one option or enter a free-text answer. Do not include an Other option or a free-text placeholder; the UI provides free-text input automatically. Omit options for a free-text-only question.",
+               "items": {
+                "type": "string"
+               },
+               "minItems": 1
+              },
+              "title": {
+               "type": "string",
+               "description": "The complete question shown to the user, including any context needed to answer it."
+              }
+             },
+             "required": [
+              "title"
+             ],
+             "additionalProperties": false
+            },
+            "minItems": 1
+           }
+          },
+          "required": [
+           "questions"
+          ],
+          "additionalProperties": false
+         }
+        }
+       ]
+      },
+      {
+       "type": "namespace",
+       "name": "clock",
+       "description": "Tools for reading and waiting on time.",
+       "tools": [
+        {
+         "type": "function",
+         "name": "sleep",
+         "description": "Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn. Returns the elapsed wall-clock time.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "duration_ms": {
+            "type": "number",
+            "description": "How long to sleep in milliseconds. Must be between 1 and 43200000."
+           }
+          },
+          "required": [
+           "duration_ms"
+          ],
+          "additionalProperties": false
+         }
+        }
+       ]
+      },
+      {
+       "type": "namespace",
+       "name": "collaboration",
+       "description": "Tools for spawning and managing sub-agents.",
+       "tools": [
+        {
+         "type": "function",
+         "name": "followup_task",
+         "description": "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "message": {
+            "type": "string",
+            "description": "Message text to send to the target agent.",
+            "encrypted": true
+           },
+           "target": {
+            "type": "string",
+            "description": "Agent id or canonical task name to send a follow-up task to (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "interrupt_agent",
+         "description": "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "target": {
+            "type": "string",
+            "description": "Agent id or canonical task name to interrupt (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "list_agents",
+         "description": "List live agents in the current root thread tree. Optionally filter by task-path prefix.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "path_prefix": {
+            "type": "string",
+            "description": "Task-path prefix filter without a trailing slash. Omit to list all live agents."
+           }
+          },
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "send_message",
+         "description": "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "message": {
+            "type": "string",
+            "description": "Message text to queue on the target agent.",
+            "encrypted": true
+           },
+           "target": {
+            "type": "string",
+            "description": "Relative or canonical task name to message (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "spawn_agent",
+         "description": " …[ac8c3735d1c1, 1829 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "fork_turns": {
+            "type": "string",
+            "description": "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+           },
+           "message": {
+            "type": "string",
+            "description": "Initial plain-text task for the new agent.",
+            "encrypted": true
+           },
+           "model": {
+            "type": "string",
+            "description": "Model override for the new agent. Omit unless an explicit override is needed."
+           },
+           "reasoning_effort": {
+            "type": "string",
+            "description": "Reasoning effort override for the new agent. Omit to inherit the parent effort."
+           },
+           "task_name": {
+            "type": "string",
+            "description": "Task name for the new agent. Use lowercase letters, digits, and underscores."
+           }
+          },
+          "required": [
+           "task_name",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "wait_agent",
+         "description": "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which agents have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "timeout_ms": {
+            "type": "number",
+            "description": "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000."
+           }
+          },
+          "additionalProperties": false
+         }
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_c9c3fe53-0d36-5308-ac51-f9d1e22ffea9",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "You are Codex, an agent based on GPT-6. You and the user share one workspace, an …[76db213c53f3, 21769 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fed2-1eff-74e3-8596-866cb5fc561d",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<skills_instructions> …[404500b2f1f4, 6638 chars]"
+      },
+      {
+       "type": "input_text",
+       "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `danger-full-access`: No filesystem sandboxing - all commands are permitted. Network access is enabled.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>"
+      },
+      {
+       "type": "input_text",
+       "text": "<collaboration_mode># Collaboration Mode: Default …[a735e580171c, 920 chars]"
+      },
+      {
+       "type": "input_text",
+       "text": "<recommended_plugins> …[916bc0cffdf3, 920 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fed2-1eff-74e3-8596-8674a2b96e33",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<multi_agent_role>You are `/root`, the primary agent in a team of agents collabo …[2a7b33040c92, 2429 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fed2-1eff-74e3-8596-868588459803",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.</multi_agent_mode>"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fed2-1eff-74e3-8596-869c18b06aa0",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "# AGENTS.md instructions for /work/A\n\n<INSTRUCTIONS>\n# Project notes (v1)\nAlways keep answers short. This is directory A.\n\n</INSTRUCTIONS>"
+      },
+      {
+       "type": "input_text",
+       "text": "<environment_context>\n  <cwd>/work/A</cwd>\n  <shell>bash</shell>\n  <current_date>2026-10-02</current_date>\n  <timezone>America/New_York</timezone>\n  <filesystem><workspace_roots><root>/work/A</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fed2-1f19-7352-8c1d-87217a302661",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Run these one at a time, one shell command each: cat relay/core/engine.py; cat relay/transport/proxy.py; cat relay/install.py. Then reply with one sentence."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_0281bea20c28ac3d016ac035cd5e0087d1a567fe47c283dfba",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "I’ll run the three commands in order.\n"
+      }
+     ],
+     "phase": "commentary"
+    },
+    {
+     "type": "custom_tool_call",
+     "id": "ctc_0281bea20c28ac3d016ac035cddad087d1838da9f3338ca803",
+     "status": "completed",
+     "call_id": "call_PPiRoFQ5HkFv3AzwYz4ZVJeG",
+     "name": "exec",
+     "input": "text(await tools.exec_command({cmd:\"cat relay/core/engine.py\",max_output_tokens:20000}));\n"
+    },
+    {
+     "type": "custom_tool_call_output",
+     "id": "ctco_01a0fed2-2fb6-7af0-95f7-d16bded64a59",
+     "call_id": "call_PPiRoFQ5HkFv3AzwYz4ZVJeG",
+     "output": [
+      {
+       "type": "input_text",
+       "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"
+      },
+      {
+       "type": "input_text",
+       "text": "{\"chunk_id\":\"75a286\",\"wall_time_seconds\":0.00000434,\"exit_code\":0,\"original_toke …[804e13cbbdc9, 11936 chars]"
+      }
+     ]
+    },
+    {
+     "type": "custom_tool_call",
+     "id": "ctc_0281bea20c28ac3d016ac035d0921c87d1bf1684dcd38b405c",
+     "status": "completed",
+     "call_id": "call_5hWIIPTRoshr9IDhoE0dxPKS",
+     "name": "exec",
+     "input": "text(await tools.exec_command({cmd:\"cat relay/transport/proxy.py\",max_output_tokens:20000}));\n"
+    },
+    {
+     "type": "custom_tool_call_output",
+     "id": "ctco_01a0fed2-3a7c-74e0-8127-6e5d8b4f5543",
+     "call_id": "call_5hWIIPTRoshr9IDhoE0dxPKS",
+     "output": [
+      {
+       "type": "input_text",
+       "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"
+      },
+      {
+       "type": "input_text",
+       "text": "{\"chunk_id\":\"0f04ba\",\"wall_time_seconds\":0.00000355,\"exit_code\":0,\"original_toke …[fb6a15c2043b, 11343 chars]"
+      }
+     ]
+    },
+    {
+     "type": "custom_tool_call",
+     "id": "ctc_0281bea20c28ac3d016ac035d5d3c487d189539fb687a96dd7",
+     "status": "completed",
+     "call_id": "call_9saoKU6eYwX0zLNnWymKD6ZP",
+     "name": "exec",
+     "input": "text(await tools.exec_command({cmd:\"cat relay/install.py\",max_output_tokens:20000}));\n"
+    },
+    {
+     "type": "custom_tool_call_output",
+     "id": "ctco_01a0fed2-505c-7c41-8f13-7c3b12da11e5",
+     "call_id": "call_9saoKU6eYwX0zLNnWymKD6ZP",
+     "output": [
+      {
+       "type": "input_text",
+       "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"
+      },
+      {
+       "type": "input_text",
+       "text": "{\"chunk_id\":\"a48bbe\",\"wall_time_seconds\":0.00000671,\"exit_code\":0,\"original_toke …[4b566d234e74, 14110 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_0281bea20c28ac3d016ac035da6e8487d1b5c1ccfb41a2a43f",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "Ran all three `cat` commands successfully, one at a time, in the requested order."
+      }
+     ],
+     "phase": "final_answer"
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fecf-0a36-7c41-9e12-74c382f1d5b7",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<model_switch> …[e6f338c767e4, 19147 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fecf-0a36-7c41-9e12-74d9ff3f5e7f",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "# AGENTS.md instructions for /work/B\n\n<INSTRUCTIONS>\nThese AGENTS.md instructions replace all previously provided AGENTS.md instructions.\n\n# Project notes (v2)\nAlways keep answers short and cite file paths. This is directory B.\n\n</INSTRUCTIONS>"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fecf-0a36-7c41-9e12-74e540640b05",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<skills_instructions> …[39a8cc4bde3b, 2956 chars]"
+      },
+      {
+       "type": "input_text",
+       "text": "<collaboration_mode># Collaboration Mode: Default …[a735e580171c, 920 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fecf-0a36-7c41-9e12-74ff6c43c135",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<environment_context>\n  <cwd>/work/B</cwd>\n  <shell>bash</shell>\n  <current_date>2026-10-02</current_date>\n  <timezone>America/New_York</timezone>\n  <filesystem><workspace_roots><root>/work/B</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fed2-7db1-70f3-b088-78601e9a784d",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Run `ls` once and reply with one short sentence."
+      }
+     ]
+    }
+   ],
+   "expected": [
+    {
+     "type": "additional_tools",
+     "id": "at_25805d7e-830d-5223-b4b2-0eccd0957c70",
+     "role": "developer",
+     "tools": [
+      {
+       "type": "namespace",
+       "name": "functions",
+       "description": "",
+       "tools": [
+        {
+         "type": "custom",
+         "name": "exec",
+         "description": "Run JavaScript code to orchestrate/compose tool calls …[2babc9bf7341, 17477 chars]",
+         "format": {
+          "type": "grammar",
+          "syntax": "lark",
+          "definition": "\nstart: pragma_source | plain_source\npragma_source: PRAGMA_LINE NEWLINE SOURCE\nplain_source: SOURCE\n\nPRAGMA_LINE: /[ \\t]*\\/\\/ @exec:[^\\r\\n]*/\nNEWLINE: /\\r?\\n/\nSOURCE: /[\\s\\S]+/\n"
+         }
+        },
+        {
+         "type": "function",
+         "name": "wait",
+         "description": "Waits on a yielded `exec` cell and returns new output or completion. …[3d01168d21f3, 769 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "cell_id": {
+            "type": "string",
+            "description": "Identifier of the running exec cell."
+           },
+           "max_tokens": {
+            "type": "number",
+            "description": "Output token budget for this wait call. Defaults to 10000 tokens."
+           },
+           "terminate": {
+            "type": "boolean",
+            "description": "True stops the running exec cell; false or omitted waits for output."
+           },
+           "yield_time_ms": {
+            "type": "number",
+            "description": "Wait before yielding more output. Defaults to 10000 ms."
+           }
+          },
+          "required": [
+           "cell_id"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "request_user_input",
+         "description": "Request user input for one to three short questions and wait for the response. This tool is only available in Plan mode.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "questions": {
+            "type": "array",
+            "description": "Questions to show the user. Prefer 1 and do not exceed 3",
+            "items": {
+             "type": "object",
+             "properties": {
+              "header": {
+               "type": "string",
+               "description": "Short header label shown in the UI (12 or fewer chars)."
+              },
+              "id": {
+               "type": "string",
+               "description": "Stable identifier for mapping answers (snake_case)."
+              },
+              "options": {
+               "type": "array",
+               "description": "Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; the client will add a free-form \"Other\" option automatically.",
+               "items": {
+                "type": "object",
+                "properties": {
+                 "description": {
+                  "type": "string",
+                  "description": "One short sentence explaining impact/tradeoff if selected."
+                 },
+                 "label": {
+                  "type": "string",
+                  "description": "User-facing label (1-5 words)."
+                 }
+                },
+                "required": [
+                 "label",
+                 "description"
+                ],
+                "additionalProperties": false
+               }
+              },
+              "question": {
+               "type": "string",
+               "description": "Single-sentence prompt shown to the user."
+              }
+             },
+             "required": [
+              "id",
+              "header",
+              "question",
+              "options"
+             ],
+             "additionalProperties": false
+            }
+           }
+          },
+          "required": [
+           "questions"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "request_user_input_async",
+         "description": "Ask the user one or more questions during ongoing work. Use this tool only to re …[116f6eb903f4, 556 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "questions": {
+            "type": "array",
+            "description": "One or more self-contained questions to present together, in display order.",
+            "items": {
+             "type": "object",
+             "properties": {
+              "options": {
+               "type": "array",
+               "description": "Suggested answers, in display order. Put the recommended answer first; the first option is preselected by default. The user can select one option or enter a free-text answer. Do not include an Other option or a free-text placeholder; the UI provides free-text input automatically. Omit options for a free-text-only question.",
+               "items": {
+                "type": "string"
+               },
+               "minItems": 1
+              },
+              "title": {
+               "type": "string",
+               "description": "The complete question shown to the user, including any context needed to answer it."
+              }
+             },
+             "required": [
+              "title"
+             ],
+             "additionalProperties": false
+            },
+            "minItems": 1
+           }
+          },
+          "required": [
+           "questions"
+          ],
+          "additionalProperties": false
+         }
+        }
+       ]
+      },
+      {
+       "type": "namespace",
+       "name": "clock",
+       "description": "Tools for reading and waiting on time.",
+       "tools": [
+        {
+         "type": "function",
+         "name": "sleep",
+         "description": "Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn. Returns the elapsed wall-clock time.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "duration_ms": {
+            "type": "number",
+            "description": "How long to sleep in milliseconds. Must be between 1 and 43200000."
+           }
+          },
+          "required": [
+           "duration_ms"
+          ],
+          "additionalProperties": false
+         }
+        }
+       ]
+      },
+      {
+       "type": "namespace",
+       "name": "collaboration",
+       "description": "Tools for spawning and managing sub-agents.",
+       "tools": [
+        {
+         "type": "function",
+         "name": "followup_task",
+         "description": "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "message": {
+            "type": "string",
+            "description": "Message text to send to the target agent.",
+            "encrypted": true
+           },
+           "target": {
+            "type": "string",
+            "description": "Agent id or canonical task name to send a follow-up task to (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "interrupt_agent",
+         "description": "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "target": {
+            "type": "string",
+            "description": "Agent id or canonical task name to interrupt (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "list_agents",
+         "description": "List live agents in the current root thread tree. Optionally filter by task-path prefix.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "path_prefix": {
+            "type": "string",
+            "description": "Task-path prefix filter without a trailing slash. Omit to list all live agents."
+           }
+          },
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "send_message",
+         "description": "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "message": {
+            "type": "string",
+            "description": "Message text to queue on the target agent.",
+            "encrypted": true
+           },
+           "target": {
+            "type": "string",
+            "description": "Relative or canonical task name to message (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "spawn_agent",
+         "description": " …[ac8c3735d1c1, 1829 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "fork_turns": {
+            "type": "string",
+            "description": "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+           },
+           "message": {
+            "type": "string",
+            "description": "Initial plain-text task for the new agent.",
+            "encrypted": true
+           },
+           "model": {
+            "type": "string",
+            "description": "Model override for the new agent. Omit unless an explicit override is needed."
+           },
+           "reasoning_effort": {
+            "type": "string",
+            "description": "Reasoning effort override for the new agent. Omit to inherit the parent effort."
+           },
+           "task_name": {
+            "type": "string",
+            "description": "Task name for the new agent. Use lowercase letters, digits, and underscores."
+           }
+          },
+          "required": [
+           "task_name",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "wait_agent",
+         "description": "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which agents have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "timeout_ms": {
+            "type": "number",
+            "description": "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000."
+           }
+          },
+          "additionalProperties": false
+         }
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_c9c3fe53-0d36-5308-ac51-f9d1e22ffea9",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "You are Codex, an agent based on GPT-6. You and the user share one workspace, an …[76db213c53f3, 21769 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fed2-1f19-7352-8c1d-87217a302661",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Run these one at a time, one shell command each: cat relay/core/engine.py; cat relay/transport/proxy.py; cat relay/install.py. Then reply with one sentence."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fed2-7c9f-7263-a2ec-277affe3dfc2",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Another language model started to solve this problem and produced a summary of i …[e2d179eba83e, 787 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fed2-7da2-7eb1-b773-521d803fb17d",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<model_switch> …[e6f338c767e4, 19147 chars]"
+      },
+      {
+       "type": "input_text",
+       "text": "<skills_instructions> …[39a8cc4bde3b, 2956 chars]"
+      },
+      {
+       "type": "input_text",
+       "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `danger-full-access`: No filesystem sandboxing - all commands are permitted. Network access is enabled.\nApproval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.\n</permissions instructions>"
+      },
+      {
+       "type": "input_text",
+       "text": "<collaboration_mode># Collaboration Mode: Default …[a735e580171c, 920 chars]"
+      },
+      {
+       "type": "input_text",
+       "text": "<recommended_plugins> …[916bc0cffdf3, 920 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fed2-7da2-7eb1-b773-5222f050b3f4",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<multi_agent_role>You are `/root`, the primary agent in a team of agents collabo …[2a7b33040c92, 2429 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fed2-7da2-7eb1-b773-523eaf375863",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.</multi_agent_mode>"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fed2-7da2-7eb1-b773-52448721e605",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "# AGENTS.md instructions for /work/B\n\n<INSTRUCTIONS>\n# Project notes (v2)\nAlways keep answers short and cite file paths. This is directory B.\n\n</INSTRUCTIONS>"
+      },
+      {
+       "type": "input_text",
+       "text": "<environment_context>\n  <cwd>/work/B</cwd>\n  <shell>bash</shell>\n  <current_date>2026-10-02</current_date>\n  <timezone>America/New_York</timezone>\n  <filesystem><workspace_roots><root>/work/B</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0fed2-7db1-70f3-b088-78601e9a784d",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Run `ls` once and reply with one short sentence."
+      }
+     ]
+    }
+   ]
+  },
+  "approved_prefixes": {
+   "request": [
+    {
+     "type": "additional_tools",
+     "id": "at_ba877931-6ae4-5a0d-8c44-6b57f670e29e",
+     "role": "developer",
+     "tools": [
+      {
+       "type": "namespace",
+       "name": "functions",
+       "description": "",
+       "tools": [
+        {
+         "type": "custom",
+         "name": "exec",
+         "description": "Run JavaScript code to orchestrate/compose tool calls …[2babc9bf7341, 17477 chars]",
+         "format": {
+          "type": "grammar",
+          "syntax": "lark",
+          "definition": "\nstart: pragma_source | plain_source\npragma_source: PRAGMA_LINE NEWLINE SOURCE\nplain_source: SOURCE\n\nPRAGMA_LINE: /[ \\t]*\\/\\/ @exec:[^\\r\\n]*/\nNEWLINE: /\\r?\\n/\nSOURCE: /[\\s\\S]+/\n"
+         }
+        },
+        {
+         "type": "function",
+         "name": "wait",
+         "description": "Waits on a yielded `exec` cell and returns new output or completion. …[3d01168d21f3, 769 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "cell_id": {
+            "type": "string",
+            "description": "Identifier of the running exec cell."
+           },
+           "max_tokens": {
+            "type": "number",
+            "description": "Output token budget for this wait call. Defaults to 10000 tokens."
+           },
+           "terminate": {
+            "type": "boolean",
+            "description": "True stops the running exec cell; false or omitted waits for output."
+           },
+           "yield_time_ms": {
+            "type": "number",
+            "description": "Wait before yielding more output. Defaults to 10000 ms."
+           }
+          },
+          "required": [
+           "cell_id"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "request_user_input",
+         "description": "Request user input for one to three short questions and wait for the response. This tool is only available in Plan mode.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "questions": {
+            "type": "array",
+            "description": "Questions to show the user. Prefer 1 and do not exceed 3",
+            "items": {
+             "type": "object",
+             "properties": {
+              "header": {
+               "type": "string",
+               "description": "Short header label shown in the UI (12 or fewer chars)."
+              },
+              "id": {
+               "type": "string",
+               "description": "Stable identifier for mapping answers (snake_case)."
+              },
+              "options": {
+               "type": "array",
+               "description": "Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; the client will add a free-form \"Other\" option automatically.",
+               "items": {
+                "type": "object",
+                "properties": {
+                 "description": {
+                  "type": "string",
+                  "description": "One short sentence explaining impact/tradeoff if selected."
+                 },
+                 "label": {
+                  "type": "string",
+                  "description": "User-facing label (1-5 words)."
+                 }
+                },
+                "required": [
+                 "label",
+                 "description"
+                ],
+                "additionalProperties": false
+               }
+              },
+              "question": {
+               "type": "string",
+               "description": "Single-sentence prompt shown to the user."
+              }
+             },
+             "required": [
+              "id",
+              "header",
+              "question",
+              "options"
+             ],
+             "additionalProperties": false
+            }
+           }
+          },
+          "required": [
+           "questions"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "request_user_input_async",
+         "description": "Ask the user one or more questions during ongoing work. Use this tool only to re …[116f6eb903f4, 556 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "questions": {
+            "type": "array",
+            "description": "One or more self-contained questions to present together, in display order.",
+            "items": {
+             "type": "object",
+             "properties": {
+              "options": {
+               "type": "array",
+               "description": "Suggested answers, in display order. Put the recommended answer first; the first option is preselected by default. The user can select one option or enter a free-text answer. Do not include an Other option or a free-text placeholder; the UI provides free-text input automatically. Omit options for a free-text-only question.",
+               "items": {
+                "type": "string"
+               },
+               "minItems": 1
+              },
+              "title": {
+               "type": "string",
+               "description": "The complete question shown to the user, including any context needed to answer it."
+              }
+             },
+             "required": [
+              "title"
+             ],
+             "additionalProperties": false
+            },
+            "minItems": 1
+           }
+          },
+          "required": [
+           "questions"
+          ],
+          "additionalProperties": false
+         }
+        }
+       ]
+      },
+      {
+       "type": "namespace",
+       "name": "clock",
+       "description": "Tools for reading and waiting on time.",
+       "tools": [
+        {
+         "type": "function",
+         "name": "sleep",
+         "description": "Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn. Returns the elapsed wall-clock time.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "duration_ms": {
+            "type": "number",
+            "description": "How long to sleep in milliseconds. Must be between 1 and 43200000."
+           }
+          },
+          "required": [
+           "duration_ms"
+          ],
+          "additionalProperties": false
+         }
+        }
+       ]
+      },
+      {
+       "type": "namespace",
+       "name": "collaboration",
+       "description": "Tools for spawning and managing sub-agents.",
+       "tools": [
+        {
+         "type": "function",
+         "name": "followup_task",
+         "description": "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "message": {
+            "type": "string",
+            "description": "Message text to send to the target agent.",
+            "encrypted": true
+           },
+           "target": {
+            "type": "string",
+            "description": "Agent id or canonical task name to send a follow-up task to (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "interrupt_agent",
+         "description": "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "target": {
+            "type": "string",
+            "description": "Agent id or canonical task name to interrupt (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "list_agents",
+         "description": "List live agents in the current root thread tree. Optionally filter by task-path prefix.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "path_prefix": {
+            "type": "string",
+            "description": "Task-path prefix filter without a trailing slash. Omit to list all live agents."
+           }
+          },
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "send_message",
+         "description": "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "message": {
+            "type": "string",
+            "description": "Message text to queue on the target agent.",
+            "encrypted": true
+           },
+           "target": {
+            "type": "string",
+            "description": "Relative or canonical task name to message (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "spawn_agent",
+         "description": " …[ac8c3735d1c1, 1829 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "fork_turns": {
+            "type": "string",
+            "description": "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+           },
+           "message": {
+            "type": "string",
+            "description": "Initial plain-text task for the new agent.",
+            "encrypted": true
+           },
+           "model": {
+            "type": "string",
+            "description": "Model override for the new agent. Omit unless an explicit override is needed."
+           },
+           "reasoning_effort": {
+            "type": "string",
+            "description": "Reasoning effort override for the new agent. Omit to inherit the parent effort."
+           },
+           "task_name": {
+            "type": "string",
+            "description": "Task name for the new agent. Use lowercase letters, digits, and underscores."
+           }
+          },
+          "required": [
+           "task_name",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "wait_agent",
+         "description": "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which agents have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "timeout_ms": {
+            "type": "number",
+            "description": "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000."
+           }
+          },
+          "additionalProperties": false
+         }
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_168f8daf-918a-50d1-8c6b-c060a820ef4b",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "You are Codex, an agent based on GPT-6. You and the user share one workspace, an …[76db213c53f3, 21769 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0ff02-0843-7453-876e-df29687abd9a",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<skills_instructions> …[404500b2f1f4, 6638 chars]"
+      },
+      {
+       "type": "input_text",
+       "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `workspace-write`: The sandbox permits reading files, and editing files in `cwd` and `writable_roots`. Editing files in other directories requires approval. Network access is enabled.\n# Escalation Requests\n\nCommands are run outside the sandbox if they are approved by the user, or match an existing rule that allows it to run unrestricted. The command string is split into independent command segments at shell control operators, including but not limited to:\n\n- Pipes: |\n- Logical operators: &&, ||\n- Command separators: ;\n- Subshell boundaries: (...), $(...)\n\nEach resulting segment is evaluated independently for sandbox restrictions and approval requirements.\n\nExample:\n\ngit pull | tee output.txt\n\nThis is treated as two command segments:\n\n[\"git\", \"pull\"]\n\n[\"tee\", \"output.txt\"]\n\nCommands that use more advanced shell features like redirection (>, >>, <), substitutions ($(...), ...), environment variables (FOO=bar), or wildcard patterns (*, ?) will not be evaluated against rules, to limit the scope of what an approved rule allows.\n\n## How to request escalation\n\nIMPORTANT: To request approval to execute a command that will require escalated privileges:\n\n- Provide the `sandbox_permissions` parameter with the value `\"require_escalated\"`\n- Include a short question asking the user if they want to allow the action in `justification` parameter. e.g. \"Do you want to download and install dependencies for this project?\"\n- Optionally suggest a `prefix_rule` - this will be shown to the user with an option to persist the rule approval for future sessions.\n\nIf you run a command that is important to solving the user's query, but it fails because of sandboxing or with a likely sandbox-related network error (for example DNS/host resolution, registry/index access, or dependency download failure), rerun the command with \"require_escalated\". ALWAYS proceed to use the `justification` parameter - do not message the user before requesting approval for the command.\n\n## When to request escalation\n\nWhile commands are running inside the sandbox, here are some scenarios that will require escalation outside the sandbox:\n\n- You need to run a command that writes to a directory that requires it (e.g. running tests that write to /var)\n- You need to run a GUI app (e.g., open/xdg-open/osascript) to open browsers or files.\n- If you run a command that is important to solving the user's query, but it fails because of sandboxing or with a likely sandbox-related network error (for example DNS/host resolution, registry/index access, or dependency download failure), rerun the command with `require_escalated`. ALWAYS proceed to use the `sandbox_permissions` and `justification` parameters. do not message the user before requesting approval for the command.\n- You are about to take a potentially destructive action such as an `rm` or `git reset` that the user did not explicitly ask for.\n- Be judicious with escalating, but if completing the user's request requires it, you should do so - don't try and circumvent approvals by using other tools.\n\n## prefix_rule guidance\n\nWhen choosing a `prefix_rule`, request one that will allow you to fulfill similar requests from the user in the future without re-requesting escalation. It should be categorical and reasonably scoped to similar capabilities. You should rarely pass the entire command into `prefix_rule`.\n\n### Banned prefix_rules \nAvoid requesting overly broad prefixes that the user would be ill-advised to approve. For example, do not request [\"python3\"], [\"python\", \"-\"], or other similar prefixes that would allow arbitrary scripting.\nNEVER provide a prefix_rule argument for destructive commands like rm.\nNEVER provide a prefix_rule if your command uses a heredoc or herestring. \n\n### Examples\nGood examples of prefixes:\n- [\"npm\", \"run\", \"dev\"]\n- [\"gh\", \"pr\", \"check\"]\n- [\"cargo\", \"test\"]\n\n\n## Approved command prefixes\nThe following prefix rules have already been approved: - [\"rg\"]\n- [\"pwd\"]\n- [\"sed\"]\n- [\"find\"]\n The writable roots are `/tmp`, `/work/ws`.\n</permissions instructions>"
+      },
+      {
+       "type": "input_text",
+       "text": "<collaboration_mode># Collaboration Mode: Default …[a735e580171c, 920 chars]"
+      },
+      {
+       "type": "input_text",
+       "text": "<recommended_plugins> …[916bc0cffdf3, 920 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0ff02-0843-7453-876e-df390a1dccad",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<multi_agent_role>You are `/root`, the primary agent in a team of agents collabo …[2a7b33040c92, 2429 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0ff02-0843-7453-876e-df4593ede0cd",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.</multi_agent_mode>"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0ff02-0843-7453-876e-df5f6c535179",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<environment_context> …[8ac72dd15849, 799 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0ff02-0860-7bc0-a313-39ccc5a964a2",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Run `python3 -c \"print(42)\"`. If the sandbox blocks it, rerun it with escalated permissions and propose the prefix rule [\"python3\"] so it is approved from now on. Reply with one sentence."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_03e301c469c63c95016ac042112dbc87d1905cf2608f4c7c07",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "I’ll run the command now.\n"
+      }
+     ],
+     "phase": "commentary"
+    },
+    {
+     "type": "custom_tool_call",
+     "id": "ctc_03e301c469c63c95016ac04211c22887d1ba6334828b8e9a9b",
+     "status": "completed",
+     "call_id": "call_2N7FPysZ6T3B0xvHmUjgnXaV",
+     "name": "exec",
+     "input": "text(await tools.exec_command({cmd: 'python3 -c \"print(42)\"', max_output_tokens: 1000}));\n"
+    },
+    {
+     "type": "custom_tool_call_output",
+     "id": "ctco_01a0ff02-19bb-74b2-8c15-b94518659de3",
+     "call_id": "call_2N7FPysZ6T3B0xvHmUjgnXaV",
+     "output": [
+      {
+       "type": "input_text",
+       "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"
+      },
+      {
+       "type": "input_text",
+       "text": "{\"chunk_id\":\"b1feb7\",\"wall_time_seconds\":0,\"exit_code\":1,\"original_token_count\":12,\"output\":\"bwrap: setting up uid map: Permission denied\\n\"}"
+      }
+     ]
+    },
+    {
+     "type": "reasoning",
+     "id": "rs_03e301c469c63c95016ac04215571887d197e1340c34e670e1",
+     "summary": [],
+     "encrypted_content": "gAAAAABqwEIWphAmJ5V8lLBQO1jRzf3WuY5qhX-Mud-AmnkJ8zilO7-tTYBFEdnS6MhRP6PxcWNnPmem …[aa461f2031da, 1420 chars]"
+    },
+    {
+     "type": "custom_tool_call",
+     "id": "ctc_03e301c469c63c95016ac042163f6887d1a8dda3ef97b8f344",
+     "status": "completed",
+     "call_id": "call_wiVmXwXjaYhVwhOW6hDxftca",
+     "name": "exec",
+     "input": "text(await tools.exec_command({cmd: 'python3 -c \"print(42)\"', sandbox_permissions: \"require_escalated\", justification: \"The sandbox blocked the command; may I rerun it with escalated permissions?\", max_output_tokens: 1000}));\n"
+    },
+    {
+     "type": "custom_tool_call_output",
+     "id": "ctco_01a0ff02-2e31-7d01-91d3-01f8ec76a2f1",
+     "call_id": "call_wiVmXwXjaYhVwhOW6hDxftca",
+     "output": [
+      {
+       "type": "input_text",
+       "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"
+      },
+      {
+       "type": "input_text",
+       "text": "{\"chunk_id\":\"3965da\",\"wall_time_seconds\":0.00002724,\"exit_code\":0,\"original_token_count\":1,\"output\":\"42\\n\"}"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0ff02-2e3f-7241-a79f-426ca3583195",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Approved command prefix saved:\n- [\"python3\", \"-c\", \"print(42)\"]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_03e301c469c63c95016ac0421a3f5c87d1ad06897fd95e63e8",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "The command printed `42` after escalation, and approval was saved for this exact command because a broad `[\"python3\"]` prefix is prohibited."
+      }
+     ],
+     "phase": "final_answer"
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0ff02-3adf-7d21-92f0-2864e05e2c84",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Run `wc -l README.md` the same way, proposing the prefix rule [\"wc\"]. Then run these one at a time, escalating with a proposed prefix rule if the sandbox blocks them: cat relay/core/engine.py; cat relay/transport/proxy.py; cat relay/install.py; cat relay/protocols/openai_responses.py. Reply with one sentence."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_03e301c469c63c95016ac0421e2cf087d1bfd6b86d0f241c6c",
+     "role": "assistant",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "I’ll run each command in order and request escalation if the sandbox blocks it.\n"
+      }
+     ],
+     "phase": "commentary"
+    },
+    {
+     "type": "custom_tool_call",
+     "id": "ctc_03e301c469c63c95016ac0421f39dc87d19417d994bfe9ec6a",
+     "status": "completed",
+     "call_id": "call_6rEqmuPidz8JmhPX2YqahmZP",
+     "name": "exec",
+     "input": "text(await tools.exec_command({cmd: \"wc -l README.md\", max_output_tokens: 1000}));\n"
+    },
+    {
+     "type": "custom_tool_call_output",
+     "id": "ctco_01a0ff02-4e3e-7112-9497-b554743c7682",
+     "call_id": "call_6rEqmuPidz8JmhPX2YqahmZP",
+     "output": [
+      {
+       "type": "input_text",
+       "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"
+      },
+      {
+       "type": "input_text",
+       "text": "{\"chunk_id\":\"d559ce\",\"wall_time_seconds\":0,\"exit_code\":1,\"original_token_count\":12,\"output\":\"bwrap: setting up uid map: Permission denied\\n\"}"
+      }
+     ]
+    },
+    {
+     "type": "custom_tool_call",
+     "id": "ctc_03e301c469c63c95016ac0422382a887d1b26aa24c47998695",
+     "status": "completed",
+     "call_id": "call_uqCXh8Vqhrw6bz7WWOsmTZBs",
+     "name": "exec",
+     "input": "text(await tools.exec_command({cmd: \"wc -l README.md\", sandbox_permissions: \"require_escalated\", justification: \"The sandbox blocked wc; may I rerun it with escalated permissions and save approval for wc commands?\", prefix_rule: [\"wc\"], max_output_tokens: 1000}));\n"
+    },
+    {
+     "type": "custom_tool_call_output",
+     "id": "ctco_01a0ff02-62dd-7b81-9686-2eebbfbb4e86",
+     "call_id": "call_uqCXh8Vqhrw6bz7WWOsmTZBs",
+     "output": [
+      {
+       "type": "input_text",
+       "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"
+      },
+      {
+       "type": "input_text",
+       "text": "{\"chunk_id\":\"760dd2\",\"wall_time_seconds\":0.00001114,\"exit_code\":0,\"original_token_count\":4,\"output\":\"252 README.md\\n\"}"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0ff02-62e6-7fd0-985d-7a213c9039b9",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Approved command prefix saved:\n- [\"wc\"]"
+      }
+     ]
+    },
+    {
+     "type": "custom_tool_call",
+     "id": "ctc_03e301c469c63c95016ac0422913d487d1af450ee6bf6f96a7",
+     "status": "completed",
+     "call_id": "call_e0emPT7vSN6inBK0B26O4Ghu",
+     "name": "exec",
+     "input": "text(await tools.exec_command({cmd: \"cat relay/core/engine.py\", max_output_tokens: 15000}));\n"
+    },
+    {
+     "type": "custom_tool_call_output",
+     "id": "ctco_01a0ff02-7480-7ea0-8072-0790c5e40012",
+     "call_id": "call_e0emPT7vSN6inBK0B26O4Ghu",
+     "output": [
+      {
+       "type": "input_text",
+       "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"
+      },
+      {
+       "type": "input_text",
+       "text": "{\"chunk_id\":\"6ca15e\",\"wall_time_seconds\":0,\"exit_code\":1,\"original_token_count\":12,\"output\":\"bwrap: setting up uid map: Permission denied\\n\"}"
+      }
+     ]
+    },
+    {
+     "type": "custom_tool_call",
+     "id": "ctc_03e301c469c63c95016ac0422db9b087d1838c513adbf6a745",
+     "status": "completed",
+     "call_id": "call_IaJqF7aRImd68ZHb3H1qJqAw",
+     "name": "exec",
+     "input": "text(await tools.exec_command({cmd: \"cat relay/core/engine.py\", sandbox_permissions: \"require_escalated\", justification: \"The sandbox blocked cat; may I read the file with escalated permissions and save approval for cat commands?\", prefix_rule: [\"cat\"], max_output_tokens: 20000}));\n"
+    },
+    {
+     "type": "custom_tool_call_output",
+     "id": "ctco_01a0ff02-8b16-78d2-9a55-4c19228e5160",
+     "call_id": "call_IaJqF7aRImd68ZHb3H1qJqAw",
+     "output": [
+      {
+       "type": "input_text",
+       "text": "Script completed\nWall time 0.1 seconds\nOutput:\n"
+      },
+      {
+       "type": "input_text",
+       "text": "{\"chunk_id\":\"2c2fd4\",\"wall_time_seconds\":0.0000108,\"exit_code\":0,\"original_token …[87f1e74fd854, 11935 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0ff02-8b22-74b0-ae31-29355eca5e44",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Approved command prefix saved:\n- [\"cat\"]"
+      }
+     ]
+    },
+    {
+     "type": "custom_tool_call",
+     "id": "ctc_03e301c469c63c95016ac04232769887d1a2d0159717b69941",
+     "status": "completed",
+     "call_id": "call_wZRre3sS47a6XffjXsdDMTiW",
+     "name": "exec",
+     "input": "text(await tools.exec_command({cmd: \"cat relay/transport/proxy.py\", max_output_tokens: 25000}));\n"
+    },
+    {
+     "type": "custom_tool_call_output",
+     "id": "ctco_01a0ff02-9965-7123-b8bb-2e1f2324d182",
+     "call_id": "call_wZRre3sS47a6XffjXsdDMTiW",
+     "output": [
+      {
+       "type": "input_text",
+       "text": "Script completed\nWall time 0.0 seconds\nOutput:\n"
+      },
+      {
+       "type": "input_text",
+       "text": "{\"chunk_id\":\"8941ec\",\"wall_time_seconds\":0.00000991,\"exit_code\":0,\"original_toke …[e7a9b29a8177, 11343 chars]"
+      }
+     ]
+    }
+   ],
+   "expected": [
+    {
+     "type": "additional_tools",
+     "id": "at_ba877931-6ae4-5a0d-8c44-6b57f670e29e",
+     "role": "developer",
+     "tools": [
+      {
+       "type": "namespace",
+       "name": "functions",
+       "description": "",
+       "tools": [
+        {
+         "type": "custom",
+         "name": "exec",
+         "description": "Run JavaScript code to orchestrate/compose tool calls …[2babc9bf7341, 17477 chars]",
+         "format": {
+          "type": "grammar",
+          "syntax": "lark",
+          "definition": "\nstart: pragma_source | plain_source\npragma_source: PRAGMA_LINE NEWLINE SOURCE\nplain_source: SOURCE\n\nPRAGMA_LINE: /[ \\t]*\\/\\/ @exec:[^\\r\\n]*/\nNEWLINE: /\\r?\\n/\nSOURCE: /[\\s\\S]+/\n"
+         }
+        },
+        {
+         "type": "function",
+         "name": "wait",
+         "description": "Waits on a yielded `exec` cell and returns new output or completion. …[3d01168d21f3, 769 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "cell_id": {
+            "type": "string",
+            "description": "Identifier of the running exec cell."
+           },
+           "max_tokens": {
+            "type": "number",
+            "description": "Output token budget for this wait call. Defaults to 10000 tokens."
+           },
+           "terminate": {
+            "type": "boolean",
+            "description": "True stops the running exec cell; false or omitted waits for output."
+           },
+           "yield_time_ms": {
+            "type": "number",
+            "description": "Wait before yielding more output. Defaults to 10000 ms."
+           }
+          },
+          "required": [
+           "cell_id"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "request_user_input",
+         "description": "Request user input for one to three short questions and wait for the response. This tool is only available in Plan mode.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "questions": {
+            "type": "array",
+            "description": "Questions to show the user. Prefer 1 and do not exceed 3",
+            "items": {
+             "type": "object",
+             "properties": {
+              "header": {
+               "type": "string",
+               "description": "Short header label shown in the UI (12 or fewer chars)."
+              },
+              "id": {
+               "type": "string",
+               "description": "Stable identifier for mapping answers (snake_case)."
+              },
+              "options": {
+               "type": "array",
+               "description": "Provide 2-3 mutually exclusive choices. Put the recommended option first and suffix its label with \"(Recommended)\". Do not include an \"Other\" option in this list; the client will add a free-form \"Other\" option automatically.",
+               "items": {
+                "type": "object",
+                "properties": {
+                 "description": {
+                  "type": "string",
+                  "description": "One short sentence explaining impact/tradeoff if selected."
+                 },
+                 "label": {
+                  "type": "string",
+                  "description": "User-facing label (1-5 words)."
+                 }
+                },
+                "required": [
+                 "label",
+                 "description"
+                ],
+                "additionalProperties": false
+               }
+              },
+              "question": {
+               "type": "string",
+               "description": "Single-sentence prompt shown to the user."
+              }
+             },
+             "required": [
+              "id",
+              "header",
+              "question",
+              "options"
+             ],
+             "additionalProperties": false
+            }
+           }
+          },
+          "required": [
+           "questions"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "request_user_input_async",
+         "description": "Ask the user one or more questions during ongoing work. Use this tool only to re …[116f6eb903f4, 556 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "questions": {
+            "type": "array",
+            "description": "One or more self-contained questions to present together, in display order.",
+            "items": {
+             "type": "object",
+             "properties": {
+              "options": {
+               "type": "array",
+               "description": "Suggested answers, in display order. Put the recommended answer first; the first option is preselected by default. The user can select one option or enter a free-text answer. Do not include an Other option or a free-text placeholder; the UI provides free-text input automatically. Omit options for a free-text-only question.",
+               "items": {
+                "type": "string"
+               },
+               "minItems": 1
+              },
+              "title": {
+               "type": "string",
+               "description": "The complete question shown to the user, including any context needed to answer it."
+              }
+             },
+             "required": [
+              "title"
+             ],
+             "additionalProperties": false
+            },
+            "minItems": 1
+           }
+          },
+          "required": [
+           "questions"
+          ],
+          "additionalProperties": false
+         }
+        }
+       ]
+      },
+      {
+       "type": "namespace",
+       "name": "clock",
+       "description": "Tools for reading and waiting on time.",
+       "tools": [
+        {
+         "type": "function",
+         "name": "sleep",
+         "description": "Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn. Returns the elapsed wall-clock time.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "duration_ms": {
+            "type": "number",
+            "description": "How long to sleep in milliseconds. Must be between 1 and 43200000."
+           }
+          },
+          "required": [
+           "duration_ms"
+          ],
+          "additionalProperties": false
+         }
+        }
+       ]
+      },
+      {
+       "type": "namespace",
+       "name": "collaboration",
+       "description": "Tools for spawning and managing sub-agents.",
+       "tools": [
+        {
+         "type": "function",
+         "name": "followup_task",
+         "description": "Send a follow-up task to an existing non-root target agent and trigger a turn if it is idle. If the target is already running, deliver the task promptly at message boundaries while sampling, or after the pending tool call completes.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "message": {
+            "type": "string",
+            "description": "Message text to send to the target agent.",
+            "encrypted": true
+           },
+           "target": {
+            "type": "string",
+            "description": "Agent id or canonical task name to send a follow-up task to (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "interrupt_agent",
+         "description": "Interrupt an agent's current turn, if any, and return its previous status. The agent remains available for messages and follow-up tasks.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "target": {
+            "type": "string",
+            "description": "Agent id or canonical task name to interrupt (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "list_agents",
+         "description": "List live agents in the current root thread tree. Optionally filter by task-path prefix.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "path_prefix": {
+            "type": "string",
+            "description": "Task-path prefix filter without a trailing slash. Omit to list all live agents."
+           }
+          },
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "send_message",
+         "description": "Send a message to an existing agent. The message will be delivered promptly. Does not trigger a new turn.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "message": {
+            "type": "string",
+            "description": "Message text to queue on the target agent.",
+            "encrypted": true
+           },
+           "target": {
+            "type": "string",
+            "description": "Relative or canonical task name to message (from spawn_agent)."
+           }
+          },
+          "required": [
+           "target",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "spawn_agent",
+         "description": " …[ac8c3735d1c1, 1829 chars]",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "fork_turns": {
+            "type": "string",
+            "description": "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+           },
+           "message": {
+            "type": "string",
+            "description": "Initial plain-text task for the new agent.",
+            "encrypted": true
+           },
+           "model": {
+            "type": "string",
+            "description": "Model override for the new agent. Omit unless an explicit override is needed."
+           },
+           "reasoning_effort": {
+            "type": "string",
+            "description": "Reasoning effort override for the new agent. Omit to inherit the parent effort."
+           },
+           "task_name": {
+            "type": "string",
+            "description": "Task name for the new agent. Use lowercase letters, digits, and underscores."
+           }
+          },
+          "required": [
+           "task_name",
+           "message"
+          ],
+          "additionalProperties": false
+         }
+        },
+        {
+         "type": "function",
+         "name": "wait_agent",
+         "description": "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which agents have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline.",
+         "strict": false,
+         "parameters": {
+          "type": "object",
+          "properties": {
+           "timeout_ms": {
+            "type": "number",
+            "description": "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000."
+           }
+          },
+          "additionalProperties": false
+         }
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_168f8daf-918a-50d1-8c6b-c060a820ef4b",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "You are Codex, an agent based on GPT-6. You and the user share one workspace, an …[76db213c53f3, 21769 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0ff02-0860-7bc0-a313-39ccc5a964a2",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Run `python3 -c \"print(42)\"`. If the sandbox blocks it, rerun it with escalated permissions and propose the prefix rule [\"python3\"] so it is approved from now on. Reply with one sentence."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0ff02-e720-7333-891e-4048baf94f71",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<skills_instructions> …[404500b2f1f4, 6638 chars]"
+      },
+      {
+       "type": "input_text",
+       "text": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `workspace-write`: The sandbox permits reading files, and editing files in `cwd` and `writable_roots`. Editing files in other directories requires approval. Network access is enabled.\n# Escalation Requests\n\nCommands are run outside the sandbox if they are approved by the user, or match an existing rule that allows it to run unrestricted. The command string is split into independent command segments at shell control operators, including but not limited to:\n\n- Pipes: |\n- Logical operators: &&, ||\n- Command separators: ;\n- Subshell boundaries: (...), $(...)\n\nEach resulting segment is evaluated independently for sandbox restrictions and approval requirements.\n\nExample:\n\ngit pull | tee output.txt\n\nThis is treated as two command segments:\n\n[\"git\", \"pull\"]\n\n[\"tee\", \"output.txt\"]\n\nCommands that use more advanced shell features like redirection (>, >>, <), substitutions ($(...), ...), environment variables (FOO=bar), or wildcard patterns (*, ?) will not be evaluated against rules, to limit the scope of what an approved rule allows.\n\n## How to request escalation\n\nIMPORTANT: To request approval to execute a command that will require escalated privileges:\n\n- Provide the `sandbox_permissions` parameter with the value `\"require_escalated\"`\n- Include a short question asking the user if they want to allow the action in `justification` parameter. e.g. \"Do you want to download and install dependencies for this project?\"\n- Optionally suggest a `prefix_rule` - this will be shown to the user with an option to persist the rule approval for future sessions.\n\nIf you run a command that is important to solving the user's query, but it fails because of sandboxing or with a likely sandbox-related network error (for example DNS/host resolution, registry/index access, or dependency download failure), rerun the command with \"require_escalated\". ALWAYS proceed to use the `justification` parameter - do not message the user before requesting approval for the command.\n\n## When to request escalation\n\nWhile commands are running inside the sandbox, here are some scenarios that will require escalation outside the sandbox:\n\n- You need to run a command that writes to a directory that requires it (e.g. running tests that write to /var)\n- You need to run a GUI app (e.g., open/xdg-open/osascript) to open browsers or files.\n- If you run a command that is important to solving the user's query, but it fails because of sandboxing or with a likely sandbox-related network error (for example DNS/host resolution, registry/index access, or dependency download failure), rerun the command with `require_escalated`. ALWAYS proceed to use the `sandbox_permissions` and `justification` parameters. do not message the user before requesting approval for the command.\n- You are about to take a potentially destructive action such as an `rm` or `git reset` that the user did not explicitly ask for.\n- Be judicious with escalating, but if completing the user's request requires it, you should do so - don't try and circumvent approvals by using other tools.\n\n## prefix_rule guidance\n\nWhen choosing a `prefix_rule`, request one that will allow you to fulfill similar requests from the user in the future without re-requesting escalation. It should be categorical and reasonably scoped to similar capabilities. You should rarely pass the entire command into `prefix_rule`.\n\n### Banned prefix_rules \nAvoid requesting overly broad prefixes that the user would be ill-advised to approve. For example, do not request [\"python3\"], [\"python\", \"-\"], or other similar prefixes that would allow arbitrary scripting.\nNEVER provide a prefix_rule argument for destructive commands like rm.\nNEVER provide a prefix_rule if your command uses a heredoc or herestring. \n\n### Examples\nGood examples of prefixes:\n- [\"npm\", \"run\", \"dev\"]\n- [\"gh\", \"pr\", \"check\"]\n- [\"cargo\", \"test\"]\n\n\n## Approved command prefixes\nThe following prefix rules have already been approved: - [\"rg\"]\n- [\"wc\"]\n- [\"cat\"]\n- [\"pwd\"]\n- [\"sed\"]\n- [\"find\"]\n- [\"python3\", \"-c\", \"print(42)\"]\n The writable roots are `/tmp`, `/work/ws`.\n</permissions instructions>"
+      },
+      {
+       "type": "input_text",
+       "text": "<collaboration_mode># Collaboration Mode: Default …[a735e580171c, 920 chars]"
+      },
+      {
+       "type": "input_text",
+       "text": "<recommended_plugins> …[916bc0cffdf3, 920 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0ff02-e720-7333-891e-40567bfc4280",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<multi_agent_role>You are `/root`, the primary agent in a team of agents collabo …[2a7b33040c92, 2429 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0ff02-e720-7333-891e-406cd8bc8f3f",
+     "role": "developer",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.</multi_agent_mode>"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0ff02-e720-7333-891e-407a010908bc",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "<environment_context> …[8ac72dd15849, 799 chars]"
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0ff02-3adf-7d21-92f0-2864e05e2c84",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Run `wc -l README.md` the same way, proposing the prefix rule [\"wc\"]. Then run these one at a time, escalating with a proposed prefix rule if the sandbox blocks them: cat relay/core/engine.py; cat relay/transport/proxy.py; cat relay/install.py; cat relay/protocols/openai_responses.py. Reply with one sentence."
+      }
+     ]
+    },
+    {
+     "type": "message",
+     "id": "msg_01a0ff02-e720-7333-891e-4087219b6cb8",
+     "role": "user",
+     "content": [
+      {
+       "type": "input_text",
+       "text": "Another language model started to solve this problem and produced a summary of i …[f2a7af3a9052, 2664 chars]"
+      }
+     ]
+    }
+   ]
+  }
+ }
+}
