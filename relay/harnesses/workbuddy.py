@@ -9,14 +9,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 from ..install import Setting
-from .base import Harness
+from .base import REMINDER, Harness
 
 
 class WorkBuddy(Harness):
     name = "workbuddy"
+    # Memory and rules files, re-rendered in the first user message around its <user_query>.
+    injected = (REMINDER, re.compile(r"<always_applied_workspace_rules>.*?</always_applied_workspace_rules>", re.S))
     config_env, config_dir = "WORKBUDDY_CONFIG_DIR", "~/.workbuddy"
 
     def settings(self) -> list[Setting]:

@@ -125,7 +125,8 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
         trace(path=request.url.path, user_agent=request.headers.get("user-agent"),
               items=len(codec.items(body)), sent=len(codec.items(exchange.body)),
               rewritten=exchange.body is not body, compacted=exchange.compacted, body=body,
-              forwarded=exchange.body if exchange.body is not body else None)
+              forwarded=exchange.body if exchange.body is not body else None,
+              cache={"depth": exchange.depth, "covered": exchange.state.get("covered", 0), "diverged": exchange.diverged})
 
         try:
             if exchange.body is body:

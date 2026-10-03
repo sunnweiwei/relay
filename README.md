@@ -56,20 +56,36 @@ once Relay compacts earlier (keep `RELAY_COMPACT_THRESHOLD` below the harness's 
 ## Architecture
 
 ```
- harness ──► protocol codec ──► View ──► strategy ──► Rewrite ──► codec ──► upstream
- (Codex,      (Responses,      (Items: kind,           (cut + head)        (OpenAI, Anthropic,
-  Claude Code) Messages)        text, wire ref)                             OpenRouter, xAI, …)
+ harness request ─► codec (protocol) ─► harness profile ─► View ─► strategy ─► Rewrite
+                    items, legal cuts    injected context,   the conversation   cut + head
+                                         identity, state     only
+ upstream ◄─ codec (legal placement) ◄─ harness profile (state placed into the head) ◄─┘
 ```
+
+Three layers keep strategies free of harness and protocol details:
+
+- the **codec** knows the wire protocol: items, legal cuts, how a message is written, and
+  where the protocol allows system messages;
+- the **harness profile** knows what the harness writes itself: which items are injected
+  context (`refine`), what makes two requests the same conversation for the prefix store
+  (`identity`, robust to instructions re-rendered in place and resumed histories), the
+  harness's current state (`state`: its instructions, environment, modes at their latest
+  version, and the history items that state supersedes), where that state goes in a
+  rewritten history (`place`), and which requests are the harness compacting itself
+  (`compacting`, passed through);
+- the **strategy** sees only the conversation (user, assistant, tool items and summaries)
+  and decides what to keep and what to write. Every rewrite gets the harness's current
+  state placed into it, so a new strategy inherits that, and cache hits, for free.
 
 | Module | Responsibility |
 | --- | --- |
 | `relay/core/ir.py` | The protocol-neutral `Item` / `View` / `Rewrite` a strategy works with. Items keep a reference to their wire item, so whatever a strategy keeps is forwarded byte-for-byte. |
 | `relay/protocols/` | One codec per wire protocol (OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, Gemini): item kinds and text, legal cut points (never between a tool call and its result), prefix canonicalization, synthetic messages, summary requests, usage and overflow errors. |
-| `relay/harnesses/` | Harness profiles: which user-role messages the harness injected itself (environment, instructions, reminders, its own summaries), detection from request headers, and the settings `relay install` writes. |
+| `relay/harnesses/` | Harness profiles: injected context, conversation identity, current state and its placement, the harness's own compaction requests, detection from request headers, and the settings `relay install` writes. |
 | `relay/install.py` | `relay install` / `uninstall`: reversible edits of JSON, TOML, YAML and `.env` config files, and the endpoint mounts Relay forwards. |
 | `relay/strategies/` | Strategies. `compaction.py` ports Codex's local compaction. |
-| `relay/core/engine.py` | Per-request orchestration: restore state, estimate tokens, plan, rewrite, remember. Strategy failures never reach the harness; the request is forwarded with the last good rewrite. |
-| `relay/core/store.py` | Exact-prefix store: a rewrite computed for one request is found again by the next request of the same conversation, because it extends the same canonical history. |
+| `relay/core/engine.py` | Per-request orchestration: restore the stored rewrite, estimate tokens, plan on the conversation, place the harness's state, remember. It records each request's cache decision (matched depth) and warns when a request no longer reaches its conversation's last compaction, with the item where it diverged. Strategy failures never reach the harness; the request is forwarded with the last good rewrite. |
+| `relay/core/store.py` | Exact-prefix store (a trie over item identities): a rewrite computed for one request is found again by every later request that extends the same history, including other conversations forked from it (sub-agents). Relay keeps no other session state. |
 | `relay/providers.py` | Upstream routing (installed mounts, else by path) and model context windows. |
 | `relay/transport/proxy.py` | The HTTP proxy. Responses, including streams, are relayed unchanged. |
 
@@ -111,6 +127,29 @@ Behavior follows `codex-rs/core/src/compact.rs`; prompts are vendored verbatim i
   Anthropic API, where a `system` message may only precede the model's turn: there it
   follows a mid-turn summary and waits for the next mid-turn compaction after a turn start.
 
+### Harness state
+
+Harnesses tell the model about their state (instruction files, environment, date, modes,
+memory, MCP servers) in three ways, and each needs a different treatment for the compacted
+context to describe the session as it is now:
+
+| Where the state is | Harnesses | What Relay does |
+| --- | --- | --- |
+| Fields sent with every request (top-level system prompt, instructions, tools) | Hermes Agent, nanobot, mini-swe-agent; Claude Code's and Gemini CLI's system prompts | Nothing to do: these are forwarded as sent. |
+| A first message re-rendered in place | OpenCode, Kilo, Crush, OpenClaw, Goose (system message with AGENTS.md / SOUL.md / `.goosehints`); Gemini CLI (`<session_context>` in the first user message); WorkBuddy (rules and memory in the first user message) | Prefix matching compares those items by position and user messages without the injected blocks (`Harness.identity`), so the compaction survives the change; the current version is what gets forwarded. |
+| Updates appended to the history | Codex (world-state sections); pi (a new system prompt on resume); Kimi Code (date and mode reminders); DeepSeek Harness (runtime snapshots, changed instruction files); Claude Code (MCP instructions as system messages) | The profile re-renders the initial context at compaction: Codex merges its section updates like Codex does; the others name each piece of state (`Harness.state_key`) and the latest version of each is re-injected. |
+
+Claude Code's other updates (instruction files re-read on resume, reminders) arrive inside
+user messages, which compaction keeps. Notifications (background tasks finishing) are
+events, not state, and are left to the summary.
+
+Sub-agents and multi-agent sessions need no special case: every sub-agent seen (Codex,
+Gemini CLI, OpenCode, Kilo, Crush, OpenClaw, Goose, Kimi Code, DeepSeek Harness, WorkBuddy,
+Hermes) runs its own conversation through the same Relay, and the prefix store keeps one
+compaction per conversation, matched by its own history. A sub-agent forked from its
+parent's history (Codex `fork_turns`) extends the parent's prefix and so starts from the
+parent's compaction.
+
 Deliberate differences from Codex: a compaction that would free less than
 `RELAY_COMPACT_MIN_GAIN` of the threshold is skipped, so a threshold set close to the
 fixed prompt overhead (system prompt and tools) does not trigger a summary on every
@@ -148,7 +187,9 @@ OpenRouter.
 Checked in Docker against real models with `tests/docker/check.py`: a two-turn session
 compacting every 5k new tokens, so each run compacts at least twice mid-turn and once at
 a turn start, with every compaction checked (summary content, Codex layout, initial
-context kept, what was forwarded upstream; see [Development](#development)):
+context kept, latest instructions forwarded; see [Development](#development)). Between
+the turns the project's instruction files change, and turn 2 hands work to a sub-agent
+where the harness has one:
 
 | Harness | Protocol | GPT | Gemini | Claude |
 | --- | --- | --- | --- | --- |
@@ -203,6 +244,17 @@ servers, so a local proxy cannot manage their context. (Cursor Agent's `--endpoi
 exchanges the API key with Cursor's backend first, and the desktop app's OpenAI base-URL
 override did not reach a local endpoint.)
 
+Beyond the matrix: `--subagent` (a sub-agent reads three files, so its own conversation
+compacts) passed for Codex, Claude Code, OpenCode, Kilo, Crush, Goose, Kimi Code, DeepSeek
+Harness and WorkBuddy; `--window` (Relay's own 90% trigger on a small window) for pi, Codex
+and Claude Code; `--native-compact` (Claude Code's own `/compact` between the turns, whose
+history then starts with Claude Code's summary) for Claude Code. Hermes Agent's background
+sub-agents do not run under `hermes chat -q`, which exits with the turn. Kimi Code and Hermes
+Agent keep the instructions they loaded when a session is resumed (the request itself still
+carries the old version), so they answer with the old codename;
+`gemini-2.5-flash-lite` on Kimi Code sometimes re-reads files and writes summaries that miss
+facts, with or without earlier summaries in view.
+
 Known limitations: state lives in memory, so a restart costs one extra summary per
 conversation; WebSocket transports are refused (Codex falls back to HTTP); an overflow
 reported inside an already-started stream is not retried; token-counting endpoints are
@@ -211,14 +263,19 @@ covered yet.
 
 ## Extending Relay
 
-- **Harness**: subclass `Harness` in `relay/harnesses/`, implement `matches` (request
-  headers), `refine` (reclassify the user-role messages it injects), and `launch`; add it
-  to `HARNESSES`. Record its traffic into `tests/traces/` and add it to
-  `tests/test_protocols.py`: the append-only check is the contract every harness must meet.
+- **Harness**: subclass `Harness` in `relay/harnesses/`: `matches` (request headers),
+  `refine` and `injected` (what it writes into the conversation), and, where the defaults do
+  not fit, `identity`, `state_key` or `state`, `place`, `compacting`; then `settings` for
+  `relay install`. Add it to `HARNESSES`. Run `tests/docker/check.py --probe` to see where it
+  keeps state, then a two-turn check, and turn the run into a replay fixture
+  (`python -m tests.replay.build NAME HOME`): `tests/test_replay.py` is the contract every
+  harness must meet (every request finds its stored compaction, the latest state reaches
+  the model, the request stays well-formed).
 - **Protocol**: implement the `Codec` interface in `relay/protocols/base.py` and register
   it in `CODECS`; add an upstream for it in `relay/providers.py`.
 - **Strategy**: implement `Strategy` (`fingerprint` and `plan(view, summarizer)`), returning
-  a `Rewrite` that replaces `view.items[:cut]` with `head`.
+  a `Rewrite` that replaces `view.items[:cut]` with `head`. The view holds the conversation
+  only; never put harness context into `head`, the profile places the current state.
 
 The earlier strategies (checkpoint, sliding window, rolling memory, RLM, context
 folding, AgentFold, AutoCompact, selective discard, PRO-LONG, multi-granularity
@@ -229,7 +286,7 @@ interface.
 
 ```bash
 pip install -e '.[dev]'
-pytest                                  # unit tests and fake-upstream tests, seconds
+pytest                                  # unit, fake-upstream and replay tests (real sessions of every harness)
 ```
 
 Real harnesses are checked in Docker against real models, with a low compaction
@@ -246,7 +303,9 @@ RELAY_TEST_KEYS=keys.env python tests/docker/check.py --matrix        # all of t
 the host's ChatGPT login. Each run is two turns of one session (the second through the
 harness's own continue/resume), so Relay compacts mid-turn and at the start of a turn.
 A run passes only if, for every compaction, the summary contains every code read so far,
-the new context has Codex's layout and keeps the initial context and user messages, and
-every later request Relay forwarded carries just the latest summary and none of the
-summarized tool output; no file was read twice, both answers are right, no compaction
-failed, and the upstream accepted every model call.
+the new context has Codex's layout and keeps the initial context (at its latest state) and
+user messages, and every later request of that conversation that Relay forwarded carries
+just its latest summary and none of the summarized tool output; the harness's latest
+instructions reach the model; no conversation read a file twice; both answers are right;
+no compaction failed; and the upstream accepted every model call. `--probe` records a
+session without compacting, to see where a harness keeps its state.

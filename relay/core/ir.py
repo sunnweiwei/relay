@@ -1,8 +1,10 @@
 """Protocol-neutral view of a conversation.
 
 A codec maps the wire items of one API onto `Item`s; strategies only ever see a
-`View` and answer with a `Rewrite`. Items remember which wire item they came from,
-so anything a strategy keeps is forwarded byte-for-byte.
+`View` of the conversation and answer with a `Rewrite` of it. What the harness wrote
+itself (system and context items) is left to the harness profile, which puts its current
+state into every rewrite. Items remember which wire item they came from, so anything a
+strategy keeps is forwarded byte-for-byte.
 """
 
 from __future__ import annotations
@@ -38,17 +40,15 @@ class Item:
 
 @dataclass(frozen=True)
 class View:
-    items: tuple[Item, ...]
+    items: tuple[Item, ...]  # the conversation: no system or context items
     boundaries: frozenset[int]  # i is legal if items[:i] can be replaced as a unit
     tokens: int  # estimated prompt tokens of the whole request
     window: int | None  # context window of the requested model, when known
     force: bool = False  # the upstream already rejected this request as too long
     base: int | None = None  # prompt tokens when the current context window began
-    initial: tuple[Item, ...] = ()  # the conversation's initial context, from the harness's own history
-    current: bool = False  # `initial` already folds in the context updates of a pending turn
 
 
 @dataclass(frozen=True)
 class Rewrite:
     cut: int  # items[:cut] are replaced by `head`
-    head: tuple[Item, ...]  # kept view items and/or new items written by Relay
+    head: tuple[Item, ...]  # kept view items and/or new items written by Relay (no harness state)

@@ -6,6 +6,7 @@ import os
 import tomllib
 from pathlib import Path
 
+from ..core.ir import Item
 from ..install import Setting
 from .base import Harness
 
@@ -20,6 +21,15 @@ DEFAULTS = {  # by provider type, for providers without an explicit base_url
 
 class KimiCode(Harness):
     name = "kimi_code"
+
+    def state_key(self, item: Item) -> str | None:
+        """Reminders that restate the date, or the approval mode, whenever it changes."""
+
+        if "Today's date is" in item.text:
+            return "date"
+        if " mode is active" in item.text:
+            return "mode"
+        return None
 
     def settings(self) -> list[Setting]:
         config = Path(os.getenv("KIMI_CODE_HOME", "~/.kimi-code")).expanduser() / "config.toml"
