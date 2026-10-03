@@ -1,4 +1,10 @@
-"""Harness profiles: what Relay knows about an agent beyond its wire protocol."""
+"""Harness profiles: what Relay knows about an agent beyond its wire protocol.
+
+A strategy sees only the conversation. Everything the harness itself writes into the request
+(instructions, environment, reminders, modes) is the profile's business: which items are
+injected (`refine`), what makes two requests the same conversation (`identity`), what the
+harness's state is now (`state`), and where that state goes in a rewritten history (`place`).
+"""
 
 from __future__ import annotations
 
@@ -17,14 +23,14 @@ REMINDER = re.compile(r"<system-reminder\b[^>]*>.*?</system-reminder>", re.S)
 
 
 @dataclass(frozen=True)
-class InitialContext:
-    """The initial context a harness re-renders for a compacted history, as view items: kept
-    request items (by `ref`) or items Relay writes (`wire`). SYSTEM items stay first, the rest
-    form the context block. `current` is set when it also reflects the context updates that
-    open a pending turn, which compaction then replaces."""
+class State:
+    """What the harness has told the model about its state, as it stands now: request items
+    kept by `ref`, or items Relay writes (`wire`). SYSTEM items go first, the rest form one
+    context block. `supersedes` holds history items whose content the state replaces; a
+    rewrite drops those that directly follow its cut (a new turn's own updates)."""
 
-    items: tuple[Item, ...]
-    current: bool = False
+    items: tuple[Item, ...] = ()
+    supersedes: frozenset[int] = frozenset()
 
 
 class Harness:
@@ -54,7 +60,7 @@ class Harness:
 
     def state_key(self, item: Item) -> str | None:
         """Which piece of the harness's state an injected context item restates (a date, a mode,
-        a snapshot); compaction re-injects only the latest item of each. None: not state."""
+        a snapshot); the default `state` keeps only the latest item of each. None: not state."""
 
         return None
 
@@ -76,33 +82,46 @@ class Harness:
                 keys[index] = b"\0user\0" + text.encode() + (b"\0media" if item.media else b"")
         return keys
 
+    def compacting(self, codec: Codec, items: list[WireItem]) -> bool:
+        """Whether the request is the harness compacting its own history; it passes through as
+        sent (its prompt may sit inside history items a stored compaction would replace)."""
+
+        return False
+
     def volatile(self, item: Item) -> bool:
         """Whether a trailing item is regenerated on every request rather than appended."""
 
         return False
 
-    def initial_context(self, codec: Codec, items: list[WireItem]) -> InitialContext | None:
-        """The initial context as the harness would re-render it now, or None to reuse the
-        system and context items it wrote before the model's first action.
-
-        By default, a profile that names state (`state_key`) gets the context it wrote before
-        the model's first action with each piece of state at its latest version, plus state
-        that first appeared later. A pending turn keeps its own context after the summary."""
+    def state(self, codec: Codec, items: list[WireItem]) -> State:
+        """The harness's state at the end of `items`: by default the system and context items it
+        wrote before the model's first action, with each piece of state the profile names
+        (`state_key`) at its latest version, and named state that first appeared later."""
 
         view = [self.refine(codec.classify(wire)) for wire in items]
+        first = next((i for i, item in enumerate(view) if item.kind in AGENT_KINDS), len(view))
         keys = {i: key for i, item in enumerate(view) if item.kind in CONTEXT_KINDS and (key := self.state_key(item))}
-        agents = [i for i, item in enumerate(view) if item.kind in AGENT_KINDS]
-        if not keys or not agents:
-            return None
-        pending = any(item.kind is Kind.USER for item in view[agents[-1] + 1 :])
-        end = agents[-1] + 1 if pending else len(view)
-        latest = {key: i for i, key in sorted(keys.items()) if i < end}
+        latest = {key: i for i, key in sorted(keys.items())}
         chosen: list[int] = []
-        for i in range(agents[0]):
+        for i in range(first):
             if view[i].kind in CONTEXT_KINDS and (pick := latest.get(keys.get(i, ""), i)) not in chosen:
                 chosen.append(pick)
         chosen += [i for i in latest.values() if i not in chosen]
-        return InitialContext(tuple(replace(view[i], ref=i) for i in chosen))
+        return State(tuple(replace(view[i], ref=i) for i in chosen), frozenset(keys))
+
+    def place(self, head: tuple[Item, ...], state: tuple[Item, ...], mid_turn: bool) -> tuple[Item, ...]:
+        """Put the harness's state into a rewritten head, the way Codex does after compacting:
+        system items first; mid-turn the context sits just above the last real user message (or
+        the summary, which stays last), and at a turn start it follows the head, ahead of the
+        new turn."""
+
+        system = tuple(item for item in state if item.kind is Kind.SYSTEM)
+        context = tuple(item for item in state if item.kind is not Kind.SYSTEM)
+        if not mid_turn:
+            return (*system, *head, *context)
+        last = lambda kind: next((n for n in range(len(head) - 1, -1, -1) if head[n].kind is kind), None)
+        at = next(n for n in (last(Kind.USER), last(Kind.SUMMARY), len(head)) if n is not None)
+        return (*system, *head[:at], *context, *head[at:])
 
     def settings(self) -> list[Setting]:
         """Config-file settings that point the harness at Relay (`relay install`)."""

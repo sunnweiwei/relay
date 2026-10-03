@@ -1,10 +1,11 @@
 """Per-request orchestration.
 
 For each request the engine restores the stored rewrite for the longest known
-prefix, builds the protocol-neutral view the strategy sees, applies the strategy's
-rewrite to the wire items, and remembers the result (and later the prompt tokens the
-upstream reported) under the request's prefix. Strategy failures never reach the
-harness: the request is forwarded with the last good rewrite instead.
+prefix (compared by the harness's `identity`), builds the view of the conversation the
+strategy sees, puts the harness's current `state` into the strategy's rewrite where the
+harness `place`s it, lets the codec make it legal, and remembers the result (and later the
+prompt tokens the upstream reported) under the request's prefix. Strategy failures never
+reach the harness: the request is forwarded with the last good rewrite instead.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import hashlib
 import json
 import logging
 import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
@@ -21,7 +23,7 @@ from ..harnesses import Harness
 from ..protocols.base import Body, Codec, WireItem
 from ..providers import context_window
 from ..strategies.base import Strategy
-from .ir import AGENT_KINDS, CONTEXT_KINDS, Item, Kind, Rewrite, View
+from .ir import CONTEXT_KINDS, Item, Kind, View
 from .store import PrefixStore
 from .tokens import approx_tokens
 
@@ -43,6 +45,8 @@ class Exchange:
     state: dict[str, Any]  # stored rewrite applied to this request
     compacted: bool = False  # this request produced a new rewrite
     estimate: int = 0  # Relay's own estimate of the forwarded prompt, if usage is never reported
+    depth: int = 0  # leading items that matched a stored prefix
+    diverged: int | None = None  # where the request left its conversation's last compaction, if it did
 
 
 class Engine:
@@ -61,6 +65,9 @@ class Engine:
         self.event_log = event_log
         self.retry_after = retry_after
         self._retry_at: dict[bytes, float] = {}  # per conversation, after a failure
+        # Each conversation's last stored compaction (covered items, digests of their identities),
+        # to tell a request that should have found it but did not, and where it diverged.
+        self._compacted: OrderedDict[bytes, tuple[int, list[bytes]]] = OrderedDict()
 
     def prepare(
         self,
@@ -79,10 +86,15 @@ class Engine:
         while end and harness.volatile(harness.refine(codec.classify(raw[end - 1]))):
             end -= 1
         raw, volatile = raw[:end], raw[end:]
+        if harness.compacting(codec, raw):  # the harness summarizing its own history: not ours to touch
+            return Exchange(body, b"", [], {})
         keys = harness.identity(codec, raw)
         fingerprint = json.dumps(self.strategy.fingerprint(), sort_keys=True)
         partition = self.store.partition(tenant, codec.name, harness.name, fingerprint)
         depth, state = self.store.match(partition, keys) or (0, {})
+        named = [key for key in keys if key not in (b"\0system", b"\0context")][:3]
+        thread = partition + hashlib.sha256(b"\0".join(named)).digest()  # names the conversation
+        diverged = self._diverged(thread, keys, depth)
 
         def view_item(index: int) -> Item:
             return replace(harness.refine(codec.classify(raw[index])), ref=index)
@@ -101,35 +113,33 @@ class Engine:
         else:
             tokens = approx_tokens(codec.preamble(body)) + sum(approx_tokens(i.text) for i in items)
             tokens += sum(approx_tokens(codec.classify(item).text) for item in volatile)
-        # The harness resends its history from the start, so the system and context items before
-        # the model's first action are always at hand as the conversation's initial context, which
-        # compaction re-injects like Codex does, whatever an earlier rewrite kept of them. A harness
-        # profile may re-render it instead, as Codex does.
-        first_action = next((i for i in range(len(raw)) if view_item(i).kind in AGENT_KINDS), len(raw))
-        rendered = harness.initial_context(codec, raw)
+        # The strategy sees the conversation; what the harness wrote itself is its profile's.
+        conversation = [n for n, item in enumerate(items) if item.kind not in CONTEXT_KINDS]
+        legal = codec.boundaries(wire)
+
+        def position(cut: int) -> int:  # a cut of the conversation, as a cut of `items`
+            return conversation[cut] if cut < len(conversation) else len(items)
+
         view = View(
-            tuple(items),
-            codec.boundaries(wire),
+            tuple(items[n] for n in conversation),
+            frozenset(cut for cut in range(len(conversation) + 1) if position(cut) in legal),
             tokens,
             self.window or context_window(body.get("model")),
             force,
             state.get("base"),
-            rendered.items if rendered else
-            tuple(item for item in map(view_item, range(first_action)) if item.kind in CONTEXT_KINDS),
-            current=rendered is not None and rendered.current,
         )
+        leading = next((n for n, item in enumerate(items) if item.kind not in CONTEXT_KINDS), len(items))
 
         compacted = False
-        named = [key for key in keys if key not in (b"\0system", b"\0context")][:3]
-        conversation = partition + hashlib.sha256(b"\0".join(named)).digest()
-        if force or time.monotonic() >= self._retry_at.get(conversation, 0.0):
+        if force or time.monotonic() >= self._retry_at.get(thread, 0.0):
             started = time.monotonic()
             try:
-                rewrite = self.strategy.plan(view, _Summarizer(codec, body, view, wire, post))
+                summarizer = _Summarizer(codec, body, lambda cut: wire[: position(cut)], leading, post)
+                rewrite = self.strategy.plan(view, summarizer)
                 if rewrite is not None:
-                    rewrite = replace(rewrite, head=codec.arrange(rewrite.head, rewrite.cut == len(view.items)))
-                    state = _to_state(rewrite, view, len(raw))
+                    state = _to_state(codec, harness, raw, items, legal, position(rewrite.cut), rewrite.head)
                     self.store.put(partition, keys, state)
+                    self._remember(thread, state["covered"], keys)
                     items, wire = materialize(state)
                     compacted = True
                     self._emit(
@@ -148,13 +158,13 @@ class Engine:
                     )
             except Exception:
                 log.warning("%s failed; forwarding the request unchanged", self.strategy.name, exc_info=True)
-                self._retry_at[conversation] = time.monotonic() + self.retry_after
+                self._retry_at[thread] = time.monotonic() + self.retry_after
 
         unchanged = not state.get("head") and not state.get("covered")
         forwarded = body if unchanged else codec.with_items(body, [*wire, *volatile])
         estimate = approx_tokens(codec.preamble(body)) + sum(approx_tokens(i.text) for i in items)
         estimate += sum(approx_tokens(codec.classify(item).text) for item in volatile)
-        return Exchange(forwarded, partition, keys, state, compacted, estimate)
+        return Exchange(forwarded, partition, keys, state, compacted, estimate, depth, diverged)
 
     def record(self, exchange: Exchange, input_tokens: int | None) -> None:
         """Anchor future token estimates to the prompt tokens the upstream reported.
@@ -162,12 +172,33 @@ class Engine:
         The first size after a rewrite (or ever) starts a new context window. Upstreams that
         report no usage (some gateways send zeros) fall back to Relay's own estimate."""
 
+        if not exchange.keys:
+            return  # passed through untouched
         state = {k: v for k, v in exchange.state.items() if k != "tokens"}
         if "base" not in state or (input_tokens and state.get("estimated")):
             state["base"], state["estimated"] = input_tokens or exchange.estimate, not input_tokens
         if input_tokens:
             state["tokens"] = input_tokens
         self.store.put(exchange.partition, exchange.keys, state)
+
+    def _remember(self, thread: bytes, covered: int, keys: list[bytes]) -> None:
+        self._compacted[thread] = (covered, [hashlib.sha256(key).digest() for key in keys[:covered]])
+        self._compacted.move_to_end(thread)
+        while len(self._compacted) > 4096:
+            self._compacted.popitem(last=False)
+
+    def _diverged(self, thread: bytes, keys: list[bytes], depth: int) -> int | None:
+        """Where a request left the history its conversation's last compaction covered, when it
+        no longer reaches it: the harness rewrote that history in a way its profile's identity
+        does not see through. None when the compaction applies (or there is none)."""
+
+        covered, digests = self._compacted.get(thread, (0, []))
+        if not covered or depth >= covered:
+            return None
+        index = next((i for i, digest in enumerate(digests) if i >= len(keys) or hashlib.sha256(keys[i]).digest() != digest),
+                     len(digests))
+        log.warning("a stored compaction no longer applies: the request diverges from it at item %d", index)
+        return index
 
     def _emit(self, event: dict[str, Any], state: dict[str, Any]) -> None:
         log.info("rewrote context: %s", event)
@@ -180,41 +211,44 @@ class Engine:
                 log.warning("could not write the event log %s", self.event_log, exc_info=True)
 
 
-def _to_state(rewrite: Rewrite, view: View, raw_length: int) -> dict[str, Any]:
-    """Express a rewrite of the view in terms of the request's wire items."""
+def _to_state(codec: Codec, harness: Harness, raw: list[WireItem], items: list[Item], legal: frozenset[int],
+              cut: int, head: tuple[Item, ...]) -> dict[str, Any]:
+    """Express a strategy's rewrite of the conversation (`items[:cut]` become `head`) as a stored
+    rewrite of the request: the harness's current state placed into the head, the context it
+    supersedes right after the cut absorbed, and the protocol's rules applied."""
 
-    if rewrite.cut not in view.boundaries:
-        raise ValueError(f"rewrite cut {rewrite.cut} splits an atomic group")
-    if rewrite.cut < len(view.items):
-        covered = view.items[rewrite.cut].ref
-        if covered is None:
-            raise ValueError("rewrite cut falls inside Relay's own items")
-    else:
-        covered = raw_length
-    head = []
-    for item in rewrite.head:
+    if cut not in legal:
+        raise ValueError(f"rewrite cut {cut} splits an atomic group")
+    current = harness.state(codec, raw)
+    while cut < len(items) and items[cut].ref in current.supersedes and cut + 1 in legal:
+        cut += 1  # e.g. the context updates that open the pending turn
+    if cut < len(items) and items[cut].ref is None:
+        raise ValueError("rewrite cut falls inside Relay's own items")
+    covered = items[cut].ref if cut < len(items) else len(raw)
+    mid_turn = cut == len(items)
+    kept = tuple(item for item in current.items if item.ref is None or item.ref < covered)  # the rest is still there
+    entries = []
+    for item in codec.arrange(harness.place(head, kept, mid_turn), mid_turn):
         if item.ref is None:
-            head.append({"kind": item.kind.value, "text": item.text, **({"wire": item.wire} if item.wire else {})})
+            entries.append({"kind": item.kind.value, "text": item.text, **({"wire": item.wire} if item.wire else {})})
         elif item.ref < covered:
-            head.append({"ref": item.ref})
+            entries.append({"ref": item.ref})
         else:
             raise ValueError("rewrite keeps an item that it does not replace")
-    return {"covered": covered, "head": head}
+    return {"covered": covered, "head": entries}
 
 
 class _Summarizer:
     """Runs the summary request through the task's own upstream ("native continuation")."""
 
-    def __init__(self, codec: Codec, body: Body, view: View, wire: list[WireItem], post: Post) -> None:
-        self.codec, self.body, self.view, self.wire, self.post = codec, body, view, wire, post
+    def __init__(self, codec: Codec, body: Body, history: Callable[[int], list[WireItem]], keep: int,
+                 post: Post) -> None:
+        # `history(cut)`: the wire items a conversation cut replaces, the harness's own included;
+        # `keep`: the leading ones an overflow must not drop (Codex keeps the initial context).
+        self.codec, self.body, self.history, self.keep, self.post = codec, body, history, keep, post
 
     def summarize(self, cut: int, prompt: str) -> str:
-        items = self.wire[:cut]
-        # Like Codex, drop the oldest history on overflow, but keep the initial context.
-        keep = next(
-            (i for i, item in enumerate(self.view.items) if item.kind not in CONTEXT_KINDS),
-            len(self.view.items),
-        )
+        items, keep = self.history(cut), self.keep
         attempt = 0
         while True:
             status, payload = self.post(self.codec.summary_request(self.body, items, prompt))

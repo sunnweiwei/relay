@@ -2,19 +2,15 @@
 
 When the prompt reaches the threshold (90% of the context window, or a growth budget
 since the window began; 95% of the window always triggers), the conversation is
-summarized with Codex's prompt and rebuilt like Codex's replacement history:
-
-    mid-turn:    [system] [recent users…] [context] [last user] [summary]
-    turn start:  [system] [recent users…] [summary] [context] [new turn…]
-
-Mid-turn (the request ends with tool results) everything is summarized and the summary
-comes last, with the initial context just above the last real user message. At the start
-of a turn the summary covers everything before the new turn, and the initial context is
-re-injected after it, followed by the new turn verbatim. Recent user messages are kept
-within `retain_user_tokens`, newest first. System messages (Codex's base instructions)
-stay first. A compaction that would free less than `min_gain` of the budget is skipped,
-so a threshold set too close to the fixed prompt overhead cannot trigger a summary on
-every request.
+summarized with Codex's prompt and replaced like Codex's replacement history: the newest
+user messages within `retain_user_tokens` (newest first; the oldest one kept may be
+truncated) and the summary last. Mid-turn (the request ends with tool results) all of it
+is summarized; at the start of a turn the summary covers everything before the new turn,
+which stays verbatim. The harness's own context is not the strategy's concern: the harness
+profile puts its current state into the result (Codex: above the last user message
+mid-turn, after the summary at a turn start). A compaction that would free less than
+`min_gain` of the budget is skipped, so a threshold set too close to the fixed prompt
+overhead cannot trigger a summary on every request.
 """
 
 from __future__ import annotations
@@ -23,7 +19,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from ..core.ir import AGENT_KINDS, CONTEXT_KINDS, Item, Kind, Rewrite, View
+from ..core.ir import AGENT_KINDS, Item, Kind, Rewrite, View
 from ..core.tokens import approx_tokens, truncate_middle
 from ..prompts import SUMMARIZATION_PROMPT, SUMMARY_PREFIX
 from .base import Summarizer
@@ -91,20 +87,12 @@ class Compaction:
         if cut is None:
             return None
         items = view.items[:cut]
-        system = [item for item in view.initial if item.kind is Kind.SYSTEM]
-        context = [item for item in view.initial if item.kind is not Kind.SYSTEM]
         users = self._recent_users(items)
-        freed = sum(approx_tokens(i.text) for i in items) - sum(approx_tokens(i.text) for i in system + context + users)
+        freed = sum(approx_tokens(i.text) for i in items) - sum(approx_tokens(i.text) for i in users)
         if not view.force and freed < self.min_gain * budget:
             return None
         summary = Item(Kind.SUMMARY, f"{SUMMARY_PREFIX}\n{summarizer.summarize(cut, SUMMARIZATION_PROMPT)}")
-        if cut < len(view.items):  # turn start: context is re-injected for the new turn
-            # A re-rendered context already holds the new turn's context updates, which go too.
-            end = cut
-            while view.current and end < len(view.items) and view.items[end].kind in CONTEXT_KINDS:
-                end += 1
-            return Rewrite(end if end in view.boundaries else cut, (*system, *users, summary, *context))
-        return Rewrite(cut, (*system, *users[:-1], *context, *users[-1:], summary))
+        return Rewrite(cut, (*users, summary))
 
     def _recent_users(self, items: tuple[Item, ...]) -> list[Item]:
         """The newest user messages within budget; the oldest one kept may be truncated."""

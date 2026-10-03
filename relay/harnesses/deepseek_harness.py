@@ -28,14 +28,15 @@ DEFAULTS = {  # pi-ai catalog endpoints, for routes without an explicit baseURL
 
 RUNTIME = "Current runtime context."
 UPDATED = re.compile(r"Updated instructions from: (\S+)")
-AGENT_MESSAGE = re.compile(r"Agent \S+ sent a message:")  # a sub-agent reporting back, like Codex's notifications
+# Sub-agents reporting back (like Codex's notifications): a message, and their closing one.
+NOTICE = re.compile(r"Agent \S+ sent a message:|Background subagent \S+ finished")
 
 
 class DeepSeekHarness(Harness):
     name = "deepseek_harness"
 
     def refine(self, item: Item) -> Item:
-        if item.kind is Kind.USER and (item.text.lstrip().startswith(RUNTIME) or AGENT_MESSAGE.match(item.text.lstrip())):
+        if item.kind is Kind.USER and (item.text.lstrip().startswith(RUNTIME) or NOTICE.match(item.text.lstrip())):
             return replace(item, kind=Kind.CONTEXT)
         return super().refine(item)
 

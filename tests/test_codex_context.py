@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from relay.core.engine import Engine
-from relay.harnesses import Codex
+from relay.harnesses import Codex, Harness
 from relay.harnesses.codex import rebuild
 from relay.prompts import SUMMARY_PREFIX
 from relay.protocols import AnthropicMessages, OpenAIResponses
@@ -74,7 +74,7 @@ class RecordedCompactionTests(unittest.TestCase):
 class RebuildRuleTests(unittest.TestCase):
     def test_without_updates_the_first_rendering_is_kept_by_reference(self) -> None:
         context = rebuild(START)
-        self.assertEqual((context.pinned, context.context, context.current), ((0, 1), (2, 3), False))
+        self.assertEqual((context.pinned, context.context, context.updates), ((0, 1), (2, 3), frozenset()))
 
     def test_latest_section_update_replaces_it_in_place(self) -> None:
         moved = "<environment_context>\n  <cwd>/b</cwd>\n</environment_context>"
@@ -102,7 +102,7 @@ class RebuildRuleTests(unittest.TestCase):
         switch = "<model_switch>\nnew model\n</model_switch>"
         new_turn = [*START, msg("assistant", "done"), msg("developer", switch), msg("user", "again")]
         context = rebuild(new_turn)
-        self.assertTrue(context.current)
+        self.assertIn(len(START) + 1, context.updates)  # folded in: a rewrite at the turn start drops it
         self.assertEqual(rendered(new_turn)[0]["content"][0]["text"], switch)
         self.assertEqual(rendered([*new_turn, CALL, OUTPUT]), rendered(START))
 
@@ -131,7 +131,7 @@ class RebuildRuleTests(unittest.TestCase):
         self.assertFalse(Codex().matches({"originator": "my-ide"}))
 
     def test_other_protocols_keep_the_default(self) -> None:
-        self.assertIsNone(Codex().initial_context(AnthropicMessages(), START))
+        self.assertEqual(Codex().state(AnthropicMessages(), START), Harness().state(AnthropicMessages(), START))
         self.assertIsNone(rebuild([TOOLS, BASE, TASK]))  # no model action yet
 
 
