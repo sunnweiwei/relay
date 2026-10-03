@@ -42,7 +42,6 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 from relay.core.ir import AGENT_KINDS, CONTEXT_KINDS, Kind  # noqa: E402
 from relay.harnesses import detect  # noqa: E402
-from relay.harnesses.codex import rebuild  # noqa: E402
 from relay.prompts import SUMMARY_PREFIX  # noqa: E402
 from relay.protocols import codec_for  # noqa: E402
 
@@ -58,8 +57,32 @@ PROMPT_ALL = (f"Read the files file_1.txt to file_8.txt in the current directory
               f"them, reply with their 8 codes in order, comma-separated, and nothing else.")  # one-turn harnesses
 NOTES = "\n".join(f"note {i}: the slow grey cat sleeps beside the warm stove all afternoon" for i in range(330))
 PROMPT2 = (f"Background notes, not needed for the task:\n{NOTES}\n\nNow read file_5.txt to file_8.txt, "
-           f"{RULES} Do not read file_1.txt to file_4.txt again. Then reply with the codes of all 8 files "
-           f"(file_1.txt to file_8.txt) in order, comma-separated, and nothing else.")
+           f"{RULES} If you can delegate work to a sub-agent, have one read file_5.txt and report its CODE "
+           f"instead of reading it yourself. Do not read file_1.txt to file_4.txt again. Then reply with the "
+           f"codes of all 8 files (file_1.txt to file_8.txt) in order, comma-separated, and on a last line the "
+           f"project codename as your project instructions state it now.")
+# `--subagent`: turn 2 hands three files to one sub-agent, so a sub-agent compacts too.
+SUBAGENT2 = (f"Background notes, not needed for the task:\n{NOTES}\n\nNow have one sub-agent read file_5.txt, "
+             f"file_6.txt and file_7.txt for you, {RULES} It must report their three CODEs. Then read file_8.txt "
+             f"yourself. Do not read file_1.txt to file_4.txt again. Reply with the codes of all 8 files "
+             f"(file_1.txt to file_8.txt) in order, comma-separated, and on a last line the project codename as "
+             f"your project instructions state it now.")
+
+# `--native-compact`: the harness compacts its own history between the turns, as a user would.
+NATIVE_COMPACT = {"claude_code": 'claude -c -p "/compact" --model {model}'}
+
+# `--probe`: what a harness keeps as state. Instruction files hold a codename that changes
+# between the turns; turn 2 asks for a sub-agent. Relay only records (no compaction).
+STATE_FILES = ("AGENTS.md", "CLAUDE.md", "GEMINI.md", "CRUSH.md", "CODEBUDDY.md", ".goosehints")
+PROBE = (
+    "This project has instruction files. What project codename do they give? Use your todo or "
+    "task-tracking tool, if you have one, to plan two steps: read file_1.txt, then read file_2.txt. "
+    "Then read file_1.txt. Reply with the codename and the CODE at the end of file_1.txt.",
+    "If you can delegate work to a sub-agent, have one read file_2.txt and report its CODE; otherwise "
+    "read it yourself. Reply with that CODE and the project codename as your project instructions "
+    "state it now.",
+)
+
 GPT, GEMINI, CLAUDE = "gpt-6-luna", "gemini-3.8-flash", "claude-sonnet-5-5"
 GEMINI_OPENAI = "https://generativelanguage.googleapis.com/v1beta/openai"
 GROWTH = 5_000  # each file adds about 2k tokens
@@ -287,7 +310,8 @@ SPECS = {
 }
 
 
-def run(name: str, growth: int | None = None, retried: bool = False) -> dict:
+def run(name: str, growth: int | None = None, retried: bool = False, probe: bool = False,
+        subagent: bool = False, window: int | None = None, native: bool = False) -> dict:
     spec, harness = SPECS[name], name.split(":")[0]
     root = Path(tempfile.mkdtemp(prefix=f"relay-{name.replace(':', '-')}-", dir=os.getenv("TMPDIR")))
     home, project = root / "home", root / "project"
@@ -296,12 +320,18 @@ def run(name: str, growth: int | None = None, retried: bool = False) -> dict:
     for n, code in enumerate(CODES, start=1):
         lines = [f"file {n} line {i}: the quick brown fox jumps over the lazy dog" for i in range(1, 121)]
         (project / f"file_{n}.txt").write_text("\n".join([*lines, f"CODE: {code}"]) + "\n")
+    for file in STATE_FILES:  # the harness's own instructions, changed between the turns
+        (project / file).write_text("# Project instructions\n\nThe project codename is ALPHA.\n")
 
     # Compact after every GROWTH new tokens, whatever the harness's fixed prompt overhead.
     # No min_gain guard (Codex has none): turn 2 must start with a compaction even when turn 1
     # ended right after one.
-    env = {"PROMPT": PROMPT if spec.resume else PROMPT_ALL, "PROMPT2": PROMPT2,
-           "RELAY_COMPACT_GROWTH": str(growth or GROWTH),
+    first, second = PROBE if probe else (PROMPT if spec.resume else PROMPT_ALL, SUBAGENT2 if subagent else PROMPT2)
+    # Growth (every GROWTH new tokens) by default; `window` instead uses Relay's own trigger,
+    # 90% of a context window of that many tokens (and 95% always).
+    trigger = {"RELAY_CONTEXT_WINDOW": str(window)} if window else {
+        "RELAY_COMPACT_GROWTH": str(10**9 if probe else growth or GROWTH)}
+    env = {"PROMPT": first, "PROMPT2": second, **trigger,
            "RELAY_COMPACT_MIN_GAIN": "0",
            "RELAY_EVENT_LOG": "/home/agent/events.jsonl", "RELAY_TRACE": "/home/agent/trace.jsonl"}
     passwd = root / "passwd"  # some harnesses look the user up (os.userInfo)
@@ -332,6 +362,8 @@ def run(name: str, growth: int | None = None, retried: bool = False) -> dict:
         cd /relay && python3 -m relay.cli install {harness} >> ~/relay.log 2>&1
         cd /project && timeout 600 {spec.command} > ~/harness.out 2> ~/harness.err < /dev/null
         export PROMPT="$PROMPT2"
+        sed -i s/ALPHA/BETA/ {" ".join(STATE_FILES)}
+        {f"cd /project && timeout 300 {NATIVE_COMPACT[harness].format(model=spec.command.split()[-1])} > ~/compact.out 2>&1 < /dev/null" if native else ""}
         {f"cd /project && timeout 600 {spec.resume} > ~/harness2.out 2> ~/harness2.err < /dev/null" if spec.resume else ""}
     """
     docker = ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "-w", "/project",
@@ -341,11 +373,31 @@ def run(name: str, growth: int | None = None, retried: bool = False) -> dict:
     for var, value in env.items():
         docker += ["-e", f"{var}={value}"]
     subprocess.run([*docker, IMAGE, "bash", "-c", script], check=False, timeout=1500)
-    result = evaluate(name, home)
+    if probe:
+        return {"name": name, "home": str(home)}
+    # Relay's own trigger compacts less often; after the harness compacted itself, turn 2 starts small.
+    result = evaluate(name, home, need=(1, 0) if window else (2, 0) if native else None)
     if not result["passed"] and result["transient"] and result["requests"] < 3 and not retried:
         time.sleep(60)  # rate-limited before the task got going: try once more
-        return run(name, growth, retried=True)
+        return run(name, growth, retried=True, subagent=subagent, window=window, native=native)
     return result
+
+
+CALL_ID = re.compile(r'"(?:tool_use_id|call_id|tool_call_id|id)":"([^"]+)"')
+
+
+def same_call(first: str, later: str) -> bool:
+    """Whether two tool results answer the same call: a resent request, or one the harness added
+    text to (Claude Code appends its compaction prompt to the last tool result)."""
+
+    ids = set(CALL_ID.findall(first))
+    return bool(ids & set(CALL_ID.findall(later))) if ids else first == later
+
+
+def name_of(keys: list[bytes]) -> tuple[bytes, ...]:
+    """A conversation, named as the engine names it: by its first items that are not slots."""
+
+    return tuple([key for key in keys if key not in (b"\0system", b"\0context")][:3])
 
 
 LAYOUT = {Kind.SYSTEM: "S", Kind.CONTEXT: "C", Kind.USER: "U", Kind.SUMMARY: "Y"}
@@ -353,7 +405,9 @@ MARK = json.dumps(SUMMARY_PREFIX)[1:61]  # how every summary starts inside a JSO
 MODEL_CALLS = ("/responses", "/chat/completions", "/messages", ":generateContent", ":streamGenerateContent")
 
 
-def evaluate(name: str, home: Path) -> dict:
+def evaluate(name: str, home: Path, need: tuple[int, int] | None = None) -> dict:
+    """Check a run; `need` is the (mid-turn, turn-start) compactions it must show."""
+
     def text(file: str) -> str:
         path = home / file
         return path.read_text(errors="replace") if path.exists() else ""
@@ -372,6 +426,10 @@ def evaluate(name: str, home: Path) -> dict:
     if len(compacting) != len(events):
         problems.append(f"{len(events)} compactions logged, {len(compacting)} requests compacted")
     starts = mids = 0
+    # Conversations besides the task: sub-agents, title generation, background calls.
+    starts_of = {tuple(detect({}, path=r["path"]).identity(codec_for(r["path"]), codec_for(r["path"]).items(r["body"]))[:2])
+                 for r in requests}
+    others = len(starts_of) - 1
     resume_reused = None  # did the first turn-start compaction build on the stored rewrite?
     replaced: list[tuple[str, list[str]]] = []  # (summary, codes it replaced) per compaction
     for k, (event, request) in enumerate(zip(events, compacting), start=1):
@@ -390,11 +448,13 @@ def evaluate(name: str, home: Path) -> dict:
         start = event["covered"] < len(raw)
         if start and codec.name == "anthropic_messages":  # no legal place for a system message there
             initial = {i for i in initial if kind({"ref": i}) is not Kind.SYSTEM}
-        rendered = rebuild(raw) if harness.name == "codex" and codec.name == "openai_responses" else None
-        if rendered is not None:  # Codex re-renders its context: every rebuilt section must be there
+        rendered = harness.initial_context(codec, raw)
+        if rendered is not None:  # re-rendered (Codex) or latest state (Kimi, ...): all of it must be there
             wires = [json.loads(e["wire"]) for e in event["head"] if "wire" in e]
-            missing = [p for p in (*rendered.pinned, *rendered.context)
-                       if (p not in kept if isinstance(p, int) else p not in wires)]
+            expected = [i for i in rendered.items
+                        if not (start and codec.name == "anthropic_messages" and i.kind is Kind.SYSTEM)]
+            missing = [i.ref if i.ref is not None else i.text[:60] for i in expected
+                       if (i.ref not in kept if i.ref is not None else json.loads(i.wire) not in wires)]
             if missing:
                 problems.append(f"compaction {k}: re-rendered initial context {missing!r:.200} missing")
         elif dropped := initial - kept:
@@ -402,7 +462,7 @@ def evaluate(name: str, home: Path) -> dict:
         starts, mids = starts + start, mids + (not start)
         if start and resume_reused is None:
             resume_reused = event["items_before"] < len(raw)
-        if rendered is not None:  # developer sections belong to Codex's re-rendered context block
+        if harness.name == "codex" and rendered is not None:  # developer sections join Codex's context block
             pattern = r"S*U*Y[SC]*" if start else r"S*U*[SC]*U?Y"
         else:  # Anthropic: system last
             pattern = r"S*U*YC*" if start else r"S*U*C*U?YS*"
@@ -417,14 +477,18 @@ def evaluate(name: str, home: Path) -> dict:
             problems.append(f"compaction {k}: user messages {sorted(dropped)} not kept verbatim")
         replaced.append((summary, read))
 
-    # Every later request of the conversation: the latest summary, none of what it replaced.
-    current, latest = None, iter(replaced)
+    # Every later request of each conversation (the task's, a sub-agent's): its latest summary,
+    # none of what that summary replaced.
+    current: dict[tuple, tuple[str, list[str]]] = {}
+    latest = iter(replaced)
     for n, request in enumerate(requests):
-        if request["compacted"]:
-            current = next(latest, None)
-        if current is None or f"CODE: {CODES[0]}" not in json.dumps(request["body"]):
-            continue  # before the first compaction, or a side request (titles and the like)
-        summary, read = current
+        codec, harness = codec_for(request["path"]), detect({}, path=request["path"])
+        conversation = name_of(harness.identity(codec, codec.items(request["body"])))
+        if request["compacted"] and (compaction := next(latest, None)):
+            current[conversation] = compaction
+        if conversation not in current:
+            continue  # before its first compaction, or a request that never compacts (titles and the like)
+        summary, read = current[conversation]
         sent = json.dumps(request.get("forwarded") or request["body"])
         if request.get("forwarded") is None:
             problems.append(f"request {n}: forwarded without the compacted context")
@@ -433,13 +497,29 @@ def evaluate(name: str, home: Path) -> dict:
         elif leaked := [c for c in read if f"CODE: {c}" in sent.replace(json.dumps(summary)[1:-1], "")]:
             problems.append(f"request {n}: summarized tool output {leaked} still sent")
 
-    if mids < 2 or starts < two_turns:
-        problems.append(f"compacted {mids}× mid-turn and {starts}× at a turn start (need 2 and {int(two_turns)})")
-    first_read: dict[str, str] = {}  # code -> the tool result that returned it (a resent request repeats it)
+    # The harness's latest instructions (BETA after the edit) must reach the model.
+    for n, request in enumerate(requests):
+        if not request.get("forwarded"):
+            continue
+        codec, harness = codec_for(request["path"]), detect({}, path=request["path"])
+        told = [harness.refine(codec.classify(item)) for item in codec.items(request["body"])]
+        injected = " ".join(item.text for item in told if item.kind in {Kind.SYSTEM, Kind.CONTEXT, Kind.USER})
+        if "codename is BETA" in injected and "codename is BETA" not in json.dumps(request["forwarded"]):
+            problems.append(f"request {n}: the latest instructions (BETA) were dropped")
+    need_mid, need_start = need or (2, int(two_turns))
+    if mids < need_mid or starts < need_start:
+        problems.append(f"compacted {mids}× mid-turn and {starts}× at a turn start (need {need_mid} and {need_start})")
+    # A conversation reading a file it already read (agents splitting work may overlap: not a re-read).
+    first_read: dict[tuple, str] = {}  # (conversation, file) -> the tool result that returned it
     for request in requests:
-        newest = json.dumps(codec_for(request["path"]).items(request["body"])[-1:])
-        if reread := [c for c in CODES if f"CODE: {c}" in newest and first_read.setdefault(c, newest) != newest]:
-            problems.append(f"files read again: {reread}")
+        codec, harness = codec_for(request["path"]), detect({}, path=request["path"])
+        items = codec.items(request["body"])
+        conversation, newest = name_of(harness.identity(codec, items)), codec.canonical(items[-1]).decode()
+        if harness.refine(codec.classify(items[-1])).kind is not Kind.TOOL_RESULT:
+            continue  # not a read: e.g. Claude Code re-attaching files after compacting itself
+        content = [n for n in range(1, 9) if f"file {n} line 1:" in newest]  # a report quoting a CODE is not a read
+        if reread := [n for n in content if not same_call(first_read.setdefault((conversation, n), newest), newest)]:
+            problems.append(f"files read again: {[f'file_{n}.txt' for n in reread]}")
     for turn, (answer, codes) in enumerate(zip(answers, (CODES[:4], CODES) if two_turns else (CODES,)), start=1):
         if not re.search(r"[\s,]+".join(codes), answer.lower()):
             problems.append(f"turn {turn} answer is wrong: {answer[-120:]!r}")
@@ -460,6 +540,9 @@ def evaluate(name: str, home: Path) -> dict:
         "turn_start": starts,
         "tokens_before": [e["tokens_before"] for e in events],
         "resume_reused": resume_reused,
+        "other_conversations": others,
+        "sub_compactions": sum("CODE: amber" not in json.dumps(r["body"]) for r in compacting),  # e.g. in sub-agents
+        "codename": next((c for c in ("BETA", "ALPHA") if c in answers[-1].split("\n")[-1] or c in answers[-1][-80:]), None),
         "transient": len(transient),  # rate limits / overloads the harness retried
         "problems": problems,
         "answers": [answer[-80:] for answer in answers],
@@ -470,8 +553,8 @@ def evaluate(name: str, home: Path) -> dict:
 
 def show(result: dict) -> None:
     print(f"\n== {result['name']}: {'PASS' if result['passed'] else 'FAIL'}  ({result['home']})")
-    for key in ("requests", "mid_turn", "turn_start", "resume_reused", "tokens_before", "transient", "answers",
-                "problems", "errors"):
+    for key in ("requests", "mid_turn", "turn_start", "resume_reused", "other_conversations", "sub_compactions", "codename",
+                "tokens_before", "transient", "answers", "problems", "errors"):
         if result[key] or key not in {"problems", "errors"}:
             print(f"  {key}: {result[key]}")
 
@@ -481,12 +564,22 @@ def main() -> int:
     parser.add_argument("names", nargs="*", help=f"harness:model, from {', '.join(SPECS)}")
     parser.add_argument("--matrix", action="store_true", help="run every spec (or the given ones)")
     parser.add_argument("--growth", type=int, help=f"tokens between compactions (default {GROWTH})")
+    parser.add_argument("--probe", action="store_true", help="record what the harness keeps as state")
+    parser.add_argument("--subagent", action="store_true", help="turn 2 hands three files to a sub-agent")
+    parser.add_argument("--window", type=int, help="use Relay's own trigger for a context window of this size")
+    parser.add_argument("--native-compact", action="store_true", help="the harness compacts itself between the turns")
     options = parser.parse_args()
     names = options.names or (list(SPECS) if options.matrix else parser.error("name a spec or use --matrix"))
     results = []
     for name in names:
-        results.append(run(name, options.growth))
-        show(results[-1])
+        results.append(run(name, options.growth, probe=options.probe, subagent=options.subagent, window=options.window,
+                           native=options.native_compact))
+        if options.probe:
+            print(f"== {name}: probe recorded  ({results[-1]['home']})")
+        else:
+            show(results[-1])
+    if options.probe:
+        return 0
     if len(results) > 1:
         print("\n| harness:model | mid-turn | turn start | requests | result |")
         print("|---|---|---|---|---|")

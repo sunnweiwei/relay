@@ -83,7 +83,11 @@ class Bench:
 
     def reset(self, base_url: str, limit: int) -> None:
         for path in (self.home, self.root / "A", self.root / "B"):
-            shutil.rmtree(path, ignore_errors=True)
+            for _ in range(50):  # a Codex process that just exited may still be writing there
+                shutil.rmtree(path, ignore_errors=True)
+                if not path.exists():
+                    break
+                time.sleep(0.1)
         self.home.mkdir()
         for name, notes in AGENTS.items():
             work = self.root / name

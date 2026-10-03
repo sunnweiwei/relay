@@ -79,7 +79,7 @@ class Engine:
         while end and harness.volatile(harness.refine(codec.classify(raw[end - 1]))):
             end -= 1
         raw, volatile = raw[:end], raw[end:]
-        keys = [codec.canonical(item) for item in raw]
+        keys = harness.identity(codec, raw)
         fingerprint = json.dumps(self.strategy.fingerprint(), sort_keys=True)
         partition = self.store.partition(tenant, codec.name, harness.name, fingerprint)
         depth, state = self.store.match(partition, keys) or (0, {})
@@ -120,7 +120,8 @@ class Engine:
         )
 
         compacted = False
-        conversation = partition + hashlib.sha256(b"\0".join(keys[:3])).digest()
+        named = [key for key in keys if key not in (b"\0system", b"\0context")][:3]
+        conversation = partition + hashlib.sha256(b"\0".join(named)).digest()
         if force or time.monotonic() >= self._retry_at.get(conversation, 0.0):
             started = time.monotonic()
             try:

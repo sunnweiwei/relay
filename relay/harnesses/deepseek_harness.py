@@ -9,8 +9,11 @@ pi-ai entry could hide routes configured in other layers.
 from __future__ import annotations
 
 import os
+import re
+from dataclasses import replace
 from pathlib import Path
 
+from ..core.ir import Item, Kind
 from ..install import Setting, yaml_keys
 from .base import Harness
 
@@ -23,8 +26,28 @@ DEFAULTS = {  # pi-ai catalog endpoints, for routes without an explicit baseURL
 }
 
 
+RUNTIME = "Current runtime context."
+UPDATED = re.compile(r"Updated instructions from: (\S+)")
+AGENT_MESSAGE = re.compile(r"Agent \S+ sent a message:")  # a sub-agent reporting back, like Codex's notifications
+
+
 class DeepSeekHarness(Harness):
     name = "deepseek_harness"
+
+    def refine(self, item: Item) -> Item:
+        if item.kind is Kind.USER and (item.text.lstrip().startswith(RUNTIME) or AGENT_MESSAGE.match(item.text.lstrip())):
+            return replace(item, kind=Kind.CONTEXT)
+        return super().refine(item)
+
+    def state_key(self, item: Item) -> str | None:
+        """Runtime snapshots ("This snapshot supersedes earlier runtime-context snapshots") and
+        instruction files restated after they changed."""
+
+        if item.text.lstrip().startswith(RUNTIME):
+            return "runtime"
+        if match := UPDATED.search(item.text):
+            return f"instructions:{match.group(1)}"
+        return None
 
     def settings(self) -> list[Setting]:
         patch = Path(os.getenv("DSH_HOME", "~/.dsh")).expanduser() / "cordis.patch.yml"

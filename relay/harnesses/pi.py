@@ -6,12 +6,18 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
+from ..core.ir import Item, Kind
 from ..install import Setting
 from .base import Harness
 
 
 class Pi(Harness):
     name = "pi"
+
+    def state_key(self, item: Item) -> str | None:
+        """A resumed session appends its system prompt anew, with instruction files as they are now."""
+
+        return "system" if item.kind is Kind.SYSTEM else None
 
     def matches(self, headers: Mapping[str, str]) -> bool:
         return headers.get("user-agent", "").startswith(("pi/", "pi ("))

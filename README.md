@@ -111,6 +111,29 @@ Behavior follows `codex-rs/core/src/compact.rs`; prompts are vendored verbatim i
   Anthropic API, where a `system` message may only precede the model's turn: there it
   follows a mid-turn summary and waits for the next mid-turn compaction after a turn start.
 
+### Harness state
+
+Harnesses tell the model about their state (instruction files, environment, date, modes,
+memory, MCP servers) in three ways, and each needs a different treatment for the compacted
+context to describe the session as it is now:
+
+| Where the state is | Harnesses | What Relay does |
+| --- | --- | --- |
+| Fields sent with every request (top-level system prompt, instructions, tools) | Hermes Agent, nanobot, mini-swe-agent; Claude Code's and Gemini CLI's system prompts | Nothing to do: these are forwarded as sent. |
+| A first message re-rendered in place | OpenCode, Kilo, Crush, OpenClaw, Goose (system message with AGENTS.md / SOUL.md / `.goosehints`); Gemini CLI (`<session_context>` in the first user message); WorkBuddy (rules and memory in the first user message) | Prefix matching compares those items by position and user messages without the injected blocks (`Harness.identity`), so the compaction survives the change; the current version is what gets forwarded. |
+| Updates appended to the history | Codex (world-state sections); pi (a new system prompt on resume); Kimi Code (date and mode reminders); DeepSeek Harness (runtime snapshots, changed instruction files); Claude Code (MCP instructions as system messages) | The profile re-renders the initial context at compaction: Codex merges its section updates like Codex does; the others name each piece of state (`Harness.state_key`) and the latest version of each is re-injected. |
+
+Claude Code's other updates (instruction files re-read on resume, reminders) arrive inside
+user messages, which compaction keeps. Notifications (background tasks finishing) are
+events, not state, and are left to the summary.
+
+Sub-agents and multi-agent sessions need no special case: every sub-agent seen (Codex,
+Gemini CLI, OpenCode, Kilo, Crush, OpenClaw, Goose, Kimi Code, DeepSeek Harness, WorkBuddy,
+Hermes) runs its own conversation through the same Relay, and the prefix store keeps one
+compaction per conversation, matched by its own history. A sub-agent forked from its
+parent's history (Codex `fork_turns`) extends the parent's prefix and so starts from the
+parent's compaction.
+
 Deliberate differences from Codex: a compaction that would free less than
 `RELAY_COMPACT_MIN_GAIN` of the threshold is skipped, so a threshold set close to the
 fixed prompt overhead (system prompt and tools) does not trigger a summary on every
@@ -148,7 +171,9 @@ OpenRouter.
 Checked in Docker against real models with `tests/docker/check.py`: a two-turn session
 compacting every 5k new tokens, so each run compacts at least twice mid-turn and once at
 a turn start, with every compaction checked (summary content, Codex layout, initial
-context kept, what was forwarded upstream; see [Development](#development)):
+context kept, latest instructions forwarded; see [Development](#development)). Between
+the turns the project's instruction files change, and turn 2 hands work to a sub-agent
+where the harness has one:
 
 | Harness | Protocol | GPT | Gemini | Claude |
 | --- | --- | --- | --- | --- |
@@ -203,6 +228,16 @@ servers, so a local proxy cannot manage their context. (Cursor Agent's `--endpoi
 exchanges the API key with Cursor's backend first, and the desktop app's OpenAI base-URL
 override did not reach a local endpoint.)
 
+Beyond the matrix: `--subagent` (a sub-agent reads three files, so its own conversation
+compacts) passed for Codex, Claude Code, OpenCode, Kilo, Crush, Goose, Kimi Code, DeepSeek
+Harness and WorkBuddy; `--window` (Relay's own 90% trigger on a small window) for pi, Codex
+and Claude Code; `--native-compact` (Claude Code's own `/compact` between the turns, whose
+history then starts with Claude Code's summary) for Claude Code. Hermes Agent's background
+sub-agents do not run under `hermes chat -q`, which exits with the turn. Kimi Code keeps the
+instructions it loaded when a session is resumed, so it answers with the old codename;
+`gemini-2.5-flash-lite` on Kimi Code sometimes re-reads files and writes summaries that miss
+facts, with or without earlier summaries in view.
+
 Known limitations: state lives in memory, so a restart costs one extra summary per
 conversation; WebSocket transports are refused (Codex falls back to HTTP); an overflow
 reported inside an already-started stream is not retried; token-counting endpoints are
@@ -246,7 +281,9 @@ RELAY_TEST_KEYS=keys.env python tests/docker/check.py --matrix        # all of t
 the host's ChatGPT login. Each run is two turns of one session (the second through the
 harness's own continue/resume), so Relay compacts mid-turn and at the start of a turn.
 A run passes only if, for every compaction, the summary contains every code read so far,
-the new context has Codex's layout and keeps the initial context and user messages, and
-every later request Relay forwarded carries just the latest summary and none of the
-summarized tool output; no file was read twice, both answers are right, no compaction
-failed, and the upstream accepted every model call.
+the new context has Codex's layout and keeps the initial context (at its latest state) and
+user messages, and every later request of that conversation that Relay forwarded carries
+just its latest summary and none of the summarized tool output; the harness's latest
+instructions reach the model; no conversation read a file twice; both answers are right;
+no compaction failed; and the upstream accepted every model call. `--probe` records a
+session without compacting, to see where a harness keeps its state.
