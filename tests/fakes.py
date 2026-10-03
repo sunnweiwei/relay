@@ -41,9 +41,11 @@ class FakeUpstream:
         command: str = "echo relay",
         max_prompt_tokens: int | None = None,
         fail_summaries: bool = False,
+        arguments: dict[str, Any] | None = None,
     ) -> None:
         self.tool_calls = tool_calls
         self.command = command
+        self.arguments = arguments or {}  # extra exec_command arguments, e.g. an escalation request
         self.max_prompt_tokens = max_prompt_tokens
         self.fail_summaries = fail_summaries
         self.requests: list[dict[str, Any]] = []
@@ -94,7 +96,7 @@ class FakeUpstream:
             output = [
                 {"type": "reasoning", "id": f"rs_{n}", "summary": [], "encrypted_content": "ZmFrZQ=="},
                 {"type": "function_call", "id": f"fc_{n}", "call_id": f"call_{n}", "status": "completed",
-                 **_shell_call(body.get("tools") or [], self.command)},
+                 **_shell_call(body.get("tools") or [], self.command, self.arguments)},
             ]
         else:
             output = [{"type": "message", "id": "msg_fake", "role": "assistant", "status": "completed",
@@ -187,9 +189,9 @@ def _anthropic_turn(message: dict[str, Any]) -> tuple[str, str, int]:
     return ("tool" if results else message.get("role", "")), text, results
 
 
-def _shell_call(tools: list[dict[str, Any]], command: str) -> dict[str, Any]:
+def _shell_call(tools: list[dict[str, Any]], command: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if "exec_command" in {tool.get("name") for tool in tools}:
-        return {"name": "exec_command", "arguments": json.dumps({"cmd": command})}
+        return {"name": "exec_command", "arguments": json.dumps({"cmd": command, **arguments})}
     return {"name": "shell", "arguments": json.dumps({"command": ["bash", "-lc", command]})}
 
 

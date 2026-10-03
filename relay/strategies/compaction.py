@@ -23,7 +23,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from ..core.ir import AGENT_KINDS, Item, Kind, Rewrite, View
+from ..core.ir import AGENT_KINDS, CONTEXT_KINDS, Item, Kind, Rewrite, View
 from ..core.tokens import approx_tokens, truncate_middle
 from ..prompts import SUMMARIZATION_PROMPT, SUMMARY_PREFIX
 from .base import Summarizer
@@ -99,7 +99,11 @@ class Compaction:
             return None
         summary = Item(Kind.SUMMARY, f"{SUMMARY_PREFIX}\n{summarizer.summarize(cut, SUMMARIZATION_PROMPT)}")
         if cut < len(view.items):  # turn start: context is re-injected for the new turn
-            return Rewrite(cut, (*system, *users, summary, *context))
+            # A re-rendered context already holds the new turn's context updates, which go too.
+            end = cut
+            while view.current and end < len(view.items) and view.items[end].kind in CONTEXT_KINDS:
+                end += 1
+            return Rewrite(end if end in view.boundaries else cut, (*system, *users, summary, *context))
         return Rewrite(cut, (*system, *users[:-1], *context, *users[-1:], summary))
 
     def _recent_users(self, items: tuple[Item, ...]) -> list[Item]:

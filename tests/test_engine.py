@@ -140,7 +140,8 @@ class InitialContextTests(unittest.TestCase):
             self.assertTrue(exchange.compacted)
             engine.record(exchange, 500)
             sent = exchange.body["input"]
-            self.assertEqual(sent[:4], [msg("developer", "rules"), msg("user", "task"), context, msg("user", "more")])
+            # Codex re-renders its developer context with the rest, just above the last user message.
+            self.assertEqual(sent[:4], [msg("user", "task"), msg("developer", "rules"), context, msg("user", "more")])
             self.assertEqual(CODEC.classify(sent[4]).text.split("\n")[0], SUMMARY_PREFIX.split("\n")[0])
             self.assertEqual(len(sent), 5)
 

@@ -33,6 +33,7 @@ class Item:
     text: str = ""
     ref: int | None = None  # index of the wire item in the request; None if Relay wrote it
     media: bool = False  # carries non-text content such as images or files
+    wire: str | None = None  # JSON of the wire item Relay wrote, when not a plain user message
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,7 @@ class View:
     force: bool = False  # the upstream already rejected this request as too long
     base: int | None = None  # prompt tokens when the current context window began
     initial: tuple[Item, ...] = ()  # the conversation's initial context, from the harness's own history
+    current: bool = False  # `initial` already folds in the context updates of a pending turn
 
 
 @dataclass(frozen=True)
