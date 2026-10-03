@@ -60,6 +60,22 @@ def canonical_json(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 
+def decoded(value: Any) -> int:
+    """Bytes of base64 content (encrypted reasoning, signatures) once decoded."""
+
+    return len(value) * 3 // 4 if isinstance(value, str) else 0
+
+
+def json_text(text: Any) -> Any:
+    """A JSON-encoded string (tool call arguments) as its value, so that re-serializing it
+    (nanobot's compaction request adds spaces) does not change an item's identity."""
+
+    try:
+        return json.loads(text) if isinstance(text, str) else text
+    except ValueError:
+        return text
+
+
 def error_message(payload: Any) -> tuple[str, str]:
     """(code, lowercase message) of a typical JSON error body."""
 

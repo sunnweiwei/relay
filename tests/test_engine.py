@@ -7,6 +7,7 @@ from typing import Any
 
 from relay.core.engine import Engine
 from relay.core.ir import Rewrite
+from relay.core.tokens import approx_tokens
 from relay.harnesses import ClaudeCode, Codex, Harness
 from relay.prompts import SUMMARY_PREFIX
 from relay.protocols import AnthropicMessages, OpenAIResponses
@@ -28,6 +29,19 @@ def step(i: int, size: int = 800) -> list[dict[str, Any]]:
 
 def body(*items: dict[str, Any]) -> dict[str, Any]:
     return {"model": "m", "input": list(items)}
+
+
+def summary(text: str) -> tuple[int, dict[str, Any]]:
+    return 200, {"status": "completed", "output": [{"type": "message", "role": "assistant",
+                                                   "content": [{"type": "output_text", "text": text}]}]}
+
+
+def pieces(requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The history items summary requests covered: without the initial context, the summary
+    carried over from the previous piece, or the prompt."""
+
+    return [item for request in requests for item in request["input"][1:-1]
+            if not str(item.get("content", "")).startswith("[{'type': 'input_text', 'text': 'Another language model")]
 
 
 class Upstream:
@@ -90,15 +104,53 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(upstream.requests), 1)  # backed off
         self.assertTrue(self.prepare(request, upstream, force=True).compacted)
 
-    def test_summary_overflow_drops_the_oldest_history_but_keeps_the_initial_context(self) -> None:
+    def test_summary_overflow_splits_the_history_and_drops_nothing(self) -> None:
         overflow = (400, {"error": {"code": "context_length_exceeded", "message": "too long"}})
-        upstream = Upstream(overflow)
+        upstream = Upstream(overflow, *(summary(f"S{n}") for n in range(1, 9)))
         history = [msg("developer", "rules"), msg("user", "task"), *step(1), *step(2), *step(3)]
-        self.assertTrue(self.prepare(body(*history), upstream).compacted)
-        retried = upstream.requests[1]["input"][:-1]
-        self.assertEqual(retried[0], history[0])
-        self.assertLess(len(retried), len(history))
-        self.assertEqual(retried[-2:], step(3))
+        exchange = self.prepare(body(*history), upstream)
+        self.assertTrue(exchange.compacted)
+        self.assertEqual(pieces(upstream.requests[1:]), history[1:])  # every item, in order, once
+        self.assertEqual(upstream.requests[2]["input"][1]["content"][0]["text"], f"{SUMMARY_PREFIX}\nS1")
+        self.assertIn(f"S{len(upstream.requests) - 1}", json.dumps(exchange.body))  # the last piece's summary
+
+    def test_history_longer_than_the_window_is_summarized_in_order(self) -> None:
+        engine = Engine(Compaction(threshold=300, min_gain=0), window=1_000)  # 950 tokens per summary request
+        upstream = Upstream(*(summary(f"S{n}") for n in range(1, 17)))
+        history = [msg("developer", "rules"), msg("user", "task"), *(item for i in range(16) for item in step(i))]
+        exchange = engine.prepare(CODEC, HARNESS, body(*history), tenant="t", post=upstream)
+        self.assertTrue(exchange.compacted)
+        self.assertGreater(len(upstream.requests), 2)
+        self.assertEqual(pieces(upstream.requests), history[1:])
+        for request in upstream.requests:
+            self.assertEqual(request["input"][0], history[0])  # the initial context goes with every piece
+            self.assertLessEqual(sum(approx_tokens(CODEC.classify(i).text) for i in request["input"][:-1]), 950)
+        self.assertIn(f"S{len(upstream.requests)}", json.dumps(exchange.body))
+
+    def test_a_history_the_upstream_counts_as_fitting_is_summarized_in_one_request(self) -> None:
+        history = [msg("user", "task"), *(item for i in range(3) for item in step(i, size=1_500))]  # ~1,130 estimated
+        unmeasured, measured = Upstream(), Upstream()
+        engine = Engine(Compaction(threshold=600, min_gain=0), window=1_000)  # 950 per summary request
+        self.assertTrue(engine.prepare(CODEC, HARNESS, body(*history), tenant="t", post=unmeasured).compacted)
+        self.assertGreater(len(unmeasured.requests), 1)  # by the estimate alone, it does not fit
+        engine = Engine(Compaction(threshold=600, min_gain=0), window=1_000)
+        first = engine.prepare(CODEC, HARNESS, body(*history[:3]), tenant="t", post=measured)
+        engine.record(first, 100)  # the upstream counts fewer tokens than four bytes each
+        self.assertTrue(engine.prepare(CODEC, HARNESS, body(*history), tenant="t", post=measured).compacted)
+        self.assertEqual(len(measured.requests), 1)
+
+    def test_the_harness_compacting_itself_gets_the_stored_compaction_but_no_new_one(self) -> None:
+        upstream = Upstream()
+        history = [msg("user", "task"), *step(1), *step(2)]
+        first = self.engine.prepare(CODEC, Codex(), body(*history), tenant="t", post=upstream)
+        self.assertTrue(first.compacted)
+        trigger = {"type": "compaction_trigger"}  # Codex asking the server to compact, far above the threshold
+        request = body(*history, *step(3, size=4_000), trigger)
+        exchange = self.engine.prepare(CODEC, Codex(), request, tenant="t", post=upstream)
+        self.assertEqual((exchange.compacted, len(upstream.requests)), (False, 1))
+        self.assertEqual(exchange.body["input"][: len(first.body["input"])], first.body["input"])
+        self.assertEqual(exchange.body["input"][-1], trigger)
+        self.assertEqual(exchange.keys, [])  # its usage does not anchor the conversation's estimate
 
     def test_tenants_do_not_share_state(self) -> None:
         upstream = Upstream()

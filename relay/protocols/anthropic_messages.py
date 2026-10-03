@@ -10,7 +10,7 @@ import json
 from typing import Any
 
 from ..core.ir import Item, Kind
-from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, error_message
+from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, decoded, error_message
 
 SUMMARY_MAX_TOKENS = 32_000
 
@@ -35,11 +35,13 @@ class AnthropicMessages:
         if role == "system":
             return Item(Kind.SYSTEM, text)
         if role == "assistant":
+            # Redacted thinking is encrypted thinking; a thinking block's signature only verifies it.
+            opaque = sum(decoded(block.get("data")) for block in blocks if block.get("type") == "redacted_thinking")
             if "tool_use" in types:
-                return Item(Kind.TOOL_CALL, text)
+                return Item(Kind.TOOL_CALL, text, opaque=opaque)
             if types <= {"thinking", "redacted_thinking"}:
-                return Item(Kind.REASONING, text)
-            return Item(Kind.ASSISTANT, text)
+                return Item(Kind.REASONING, text, opaque=opaque)
+            return Item(Kind.ASSISTANT, text, opaque=opaque)
         if "tool_result" in types:
             return Item(Kind.TOOL_RESULT, text)
         return Item(Kind.USER, text, media=bool(types - {"text"}))

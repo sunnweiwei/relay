@@ -161,6 +161,20 @@ class EngineStateTests(unittest.TestCase):
         self.assertTrue(sent.index("Today's date") < sent.index('"next"') < sent.index("Plan mode"))
 
 
+class MaskedToolOutputTests(unittest.TestCase):
+    def test_gemini_cli_masking_an_old_tool_output_keeps_the_prefix(self) -> None:
+        codec = Gemini()
+        call = {"role": "model", "parts": [{"functionCall": {"name": "read_file", "id": "r1", "args": {"path": "a"}}}]}
+        result = {"role": "user", "parts": [{"functionResponse": {"name": "read_file", "id": "r1",
+                                                                  "response": {"output": "x" * 5000}}}]}
+        masked = {"role": "user", "parts": [{"functionResponse": {"name": "read_file", "id": "r1",
+                                                                  "response": {"output": "<tool_output_masked>..."}}}]}
+        task = {"role": "user", "parts": [{"text": "task"}]}
+        self.assertEqual(GeminiCli().identity(codec, [task, call, result]), GeminiCli().identity(codec, [task, call, masked]))
+        other = {**result, "parts": [{"functionResponse": {**result["parts"][0]["functionResponse"], "id": "r2"}}]}
+        self.assertNotEqual(GeminiCli().identity(codec, [task, call, result]), GeminiCli().identity(codec, [task, call, other]))
+
+
 class CacheTests(unittest.TestCase):
     """The prefix store: a stored compaction applies to every request that extends its history,
     and a request that rewrote that history is reported with where it diverged."""
@@ -178,6 +192,18 @@ class CacheTests(unittest.TestCase):
             missed = engine.prepare(CODEC, Harness(), {"model": "m", "input": rewritten}, tenant="t",
                                     post=lambda r: SUMMARY)
         self.assertEqual(missed.diverged, 3)
+
+    def test_a_rewind_finds_the_earlier_compaction(self) -> None:
+        engine = Engine(Compaction(threshold=300, min_gain=0))
+        post = lambda r: SUMMARY  # noqa: E731
+        early = [msg("user", "task"), *step(1), *step(2)]
+        first = engine.prepare(CODEC, Harness(), {"model": "m", "input": early}, tenant="t", post=post)
+        engine.record(first, 100)
+        late = [*early, msg("user", "more"), *step(3), *step(4)]
+        engine.record(engine.prepare(CODEC, Harness(), {"model": "m", "input": late}, tenant="t", post=post), 100)
+        rewound = engine.prepare(CODEC, Harness(), {"model": "m", "input": [*early, msg("user", "instead")]},
+                                 tenant="t", post=post)  # back to before the second compaction, then elsewhere
+        self.assertEqual((rewound.compacted, rewound.state["covered"], rewound.diverged), (False, first.state["covered"], None))
 
 
 if __name__ == "__main__":

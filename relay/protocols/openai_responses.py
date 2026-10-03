@@ -6,7 +6,7 @@ import json
 from typing import Any
 
 from ..core.ir import Item, Kind
-from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, error_message
+from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, decoded, error_message, json_text
 
 _ROLES = {
     "system": Kind.SYSTEM,
@@ -42,9 +42,9 @@ class OpenAIResponses:
             text, media = _content_text(item.get("content"))
             return Item(_ROLES.get(item.get("role"), Kind.OTHER), text, media=media)
         if kind == "reasoning":
-            return Item(Kind.REASONING, _content_text(item.get("summary"))[0])
+            return Item(Kind.REASONING, _content_text(item.get("summary"))[0], opaque=decoded(item.get("encrypted_content")))
         if kind == "compaction":  # opaque server-side compaction
-            return Item(Kind.SUMMARY)
+            return Item(Kind.SUMMARY, opaque=decoded(item.get("encrypted_content")))
         if kind.endswith("_output"):
             return Item(Kind.TOOL_RESULT, _output_text(item.get("output")))
         if kind.endswith("_call"):
@@ -54,10 +54,16 @@ class OpenAIResponses:
 
     def canonical(self, item: WireItem) -> bytes:
         """A reasoning item is its encrypted content: resumed sessions drop its display summary
-        (OpenClaw) or write absent content back as null or [] (Codex `exec resume`)."""
+        (OpenClaw) or write absent content back as null or [] (Codex `exec resume`). Item ids and
+        statuses are the API's metadata, which harnesses may drop (nanobot's compaction request),
+        and call arguments compare as JSON values."""
 
+        if item.get("type") != "item_reference":  # (a reference is its id)
+            item = {k: v for k, v in item.items() if k not in {"id", "status"}}
         if item.get("type") == "reasoning":
             item = {k: v for k, v in item.items() if k != "summary" and not (k == "content" and not v)}
+        if "arguments" in item:
+            item = {**item, "arguments": json_text(item["arguments"])}
         return canonical_json(item)
 
     def boundaries(self, items: list[WireItem]) -> frozenset[int]:

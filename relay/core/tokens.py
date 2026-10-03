@@ -2,11 +2,27 @@
 
 from __future__ import annotations
 
-BYTES_PER_TOKEN = 4
+import math
+
+from .ir import Item
+
+BYTES_PER_TOKEN = 4  # Codex's rule; OpenAI and Gemini tokenizers measured about 4.6, so it errs high
+DENSER = (("claude", 2.5),)  # Claude's tokenizer measured about 2.7 bytes a token
 
 
-def approx_tokens(text: str) -> int:
-    return (len(text.encode("utf-8")) + BYTES_PER_TOKEN - 1) // BYTES_PER_TOKEN
+def bytes_per_token(model: object) -> float:
+    name = model.rsplit("/", 1)[-1].lower() if isinstance(model, str) else ""
+    return next((size for prefix, size in DENSER if name.startswith(prefix)), BYTES_PER_TOKEN)
+
+
+def approx_tokens(text: str, per_token: float = BYTES_PER_TOKEN) -> int:
+    return math.ceil(len(text.encode("utf-8")) / per_token)
+
+
+def item_tokens(item: Item, per_token: float = BYTES_PER_TOKEN) -> int:
+    """An item's text and opaque content (encrypted reasoning or compaction, signatures)."""
+
+    return math.ceil((len(item.text.encode("utf-8")) + item.opaque) / per_token)
 
 
 def truncate_middle(text: str, max_tokens: int) -> str:

@@ -104,6 +104,12 @@ class Codex(Harness):
             return replace(item, kind=Kind.CONTEXT)
         return super().refine(item)
 
+    def compacting(self, codec: Codec, items: list[WireItem]) -> bool:
+        """Codex compacts on the server: its request ends with a `compaction_trigger` item, which
+        the API requires to stay last (so no summary of Relay's may be made from it)."""
+
+        return bool(items) and items[-1].get("type") == "compaction_trigger"
+
     def state(self, codec: Codec, items: list[WireItem]) -> State:
         """Re-render the initial context from the context updates in the history, like Codex:
         its per-request prefix stays first, the rendering joins the context block, and the

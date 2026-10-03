@@ -71,8 +71,12 @@ SUBAGENT2 = (f"Background notes, not needed for the task:\n{NOTES}\n\nNow have o
              f"(file_1.txt to file_8.txt) in order, comma-separated, and on a last line the project codename as "
              f"your project instructions state it now.")
 
-# `--native-compact`: the harness compacts its own history between the turns, as a user would.
-NATIVE_COMPACT = {"claude_code": 'claude -c -p "/compact" --model {model}'}
+# `--native-compact`: the harness compacts its own history between the turns, as a user would,
+# with this command sent through its own continue/resume.
+NATIVE_COMPACT = {"claude_code": "/compact", "codex": "/compact", "gemini_cli": "/compress", "pi": "/compact",
+                  "opencode": "/compact", "kilo": "/compact", "crush": "/compact", "openclaw": "/compact",
+                  "goose": "/compact", "kimi_code": "/compact", "hermes": "/compress", "nanobot": "/compact",
+                  "deepseek_harness": "/compact", "workbuddy": "/compact"}
 
 # `--probe`: what a harness keeps as state. Instruction files hold a codename that changes
 # between the turns; turn 2 asks for a sub-agent. Relay only records (no compaction).
@@ -159,7 +163,7 @@ def workbuddy_models(model: str, url: str, key: str, **extra: object) -> str:
 
 
 # WorkBuddy is a desktop app; its engine also ships as the CodeBuddy CLI, run here on ~/.workbuddy.
-WORKBUDDY = 'env CODEBUDDY_CONFIG_DIR=$HOME/.workbuddy codebuddy {}-p -y --model {} "$PROMPT"'
+WORKBUDDY = 'env CODEBUDDY_CONFIG_DIR=$HOME/.workbuddy codebuddy {}-p -y --disallowedTools EnterPlanMode --model {} "$PROMPT"'  # headless: a plan cannot be approved
 WORKBUDDY_GPT = f"{GPT} --settings '{{\"alwaysThinkingEnabled\": false}}'"
 
 
@@ -334,9 +338,33 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
     # 90% of a context window of that many tokens (and 95% always).
     trigger = {"RELAY_CONTEXT_WINDOW": str(window)} if window else {
         "RELAY_COMPACT_GROWTH": str(10**9 if probe else growth or GROWTH)}
-    env = {"PROMPT": first, "PROMPT2": second, **trigger,
-           "RELAY_COMPACT_MIN_GAIN": "0",
-           "RELAY_EVENT_LOG": "/home/agent/events.jsonl", "RELAY_TRACE": "/home/agent/trace.jsonl"}
+    env = {"PROMPT": first, "PROMPT2": second, **trigger, "RELAY_COMPACT_MIN_GAIN": "0"}
+    container(name, root, env, f"""
+        cd /project && timeout 600 {spec.command} > ~/harness.out 2> ~/harness.err < /dev/null
+        {f'export PROMPT="{NATIVE_COMPACT[harness]}" && cd /project && timeout 300 {spec.resume} > ~/compact.out 2>&1 < /dev/null' if native else ""}
+        export PROMPT="$PROMPT2"
+        sed -i s/ALPHA/BETA/ {" ".join(STATE_FILES)}
+        {f"cd /project && timeout 600 {spec.resume} > ~/harness2.out 2> ~/harness2.err < /dev/null" if spec.resume else ""}
+    """)
+    if probe:
+        return {"name": name, "home": str(home)}
+    # Relay's own trigger compacts less often; after the harness compacted itself, turn 2 starts small.
+    result = evaluate(name, home, need=(0, 0) if window else (2, 0) if native else None)
+    if not result["passed"] and result["transient"] and result["requests"] < 3 and not retried:
+        time.sleep(60)  # rate-limited before the task got going: try once more
+        return run(name, growth, retried=True, subagent=subagent, window=window, native=native)
+    return result
+
+
+def container(name: str, root: Path, env: dict[str, str], turns: str, timeout: int = 1500, install: bool = True) -> None:
+    """Run `turns` (shell) on a user's machine, in the image: HOME is root/home and /project is
+    root/project; the harness is configured as the user had it (`Spec.setup`), Relay serves (its
+    process id in ~/relay.pid) and, unless `install` is false, `relay install` points the
+    harness at it. Relay's events and trace land in HOME."""
+
+    spec, harness = SPECS[name], name.split(":")[0]
+    home, project = root / "home", root / "project"
+    env = {**env, "RELAY_EVENT_LOG": "/home/agent/events.jsonl", "RELAY_TRACE": "/home/agent/trace.jsonl"}
     passwd = root / "passwd"  # some harnesses look the user up (os.userInfo)
     passwd.write_text(f"root:x:0:0::/root:/bin/bash\nagent:x:{os.getuid()}:{os.getgid()}::/home/agent:/bin/bash\n")
     mounts = [f"{REPO}:/relay:ro", f"{home}:/home/agent", f"{project}:/project", f"{passwd}:/etc/passwd:ro"]
@@ -359,15 +387,12 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
         mounts.append(f"{Path(shutil.which('claude')).resolve()}:/usr/local/bin/claude:ro")
 
     script = f"""
-        cd /relay && python3 -m relay.cli serve > ~/relay.log 2>&1 &
+        cd /relay
+        python3 -m relay.cli serve > ~/relay.log 2>&1 & echo $! > ~/relay.pid
         until python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8787))' 2>/dev/null; do sleep 0.2; done
         cd ~ && {spec.setup}
-        cd /relay && python3 -m relay.cli install {harness} >> ~/relay.log 2>&1
-        cd /project && timeout 600 {spec.command} > ~/harness.out 2> ~/harness.err < /dev/null
-        export PROMPT="$PROMPT2"
-        sed -i s/ALPHA/BETA/ {" ".join(STATE_FILES)}
-        {f"cd /project && timeout 300 {NATIVE_COMPACT[harness].format(model=spec.command.split()[-1])} > ~/compact.out 2>&1 < /dev/null" if native else ""}
-        {f"cd /project && timeout 600 {spec.resume} > ~/harness2.out 2> ~/harness2.err < /dev/null" if spec.resume else ""}
+        {f"cd /relay && python3 -m relay.cli install {harness} >> ~/relay.log 2>&1" if install else ""}
+        {turns}
     """
     docker = ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "-w", "/project",
               "-e", "HOME=/home/agent", "-e", "PYTHONPATH=/relay"]
@@ -375,15 +400,7 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
         docker += ["-v", mount]
     for var, value in env.items():
         docker += ["-e", f"{var}={value}"]
-    subprocess.run([*docker, IMAGE, "bash", "-c", script], check=False, timeout=1500)
-    if probe:
-        return {"name": name, "home": str(home)}
-    # Relay's own trigger compacts less often; after the harness compacted itself, turn 2 starts small.
-    result = evaluate(name, home, need=(0, 0) if window else (2, 0) if native else None)
-    if not result["passed"] and result["transient"] and result["requests"] < 3 and not retried:
-        time.sleep(60)  # rate-limited before the task got going: try once more
-        return run(name, growth, retried=True, subagent=subagent, window=window, native=native)
-    return result
+    subprocess.run([*docker, IMAGE, "bash", "-c", script], check=False, timeout=timeout)
 
 
 CALL_ID = re.compile(r'"(?:tool_use_id|call_id|tool_call_id|id)":"([^"]+)"')
@@ -410,6 +427,14 @@ def files_read(codec, harness, items: list) -> list[int]:
     own = [n for n in calls if ids & set(CALL_ID.findall(codec.canonical(items[n]).decode()))] or calls[-1:]
     asked = " ".join(view[n].text for n in own)
     return [n for n in range(1, 9) if f"file {n} line 1:" in newest and f"file_{n}" in asked]
+
+
+def results(request: dict) -> list:
+    """The tool results a forwarded request carries."""
+
+    codec, harness = codec_for(request["path"]), detect({}, path=request["path"])
+    items = (harness.refine(codec.classify(item)) for item in codec.items(request.get("forwarded") or request["body"]))
+    return [item for item in items if item.kind is Kind.TOOL_RESULT]
 
 
 def name_of(keys: list[bytes]) -> tuple[bytes, ...]:
@@ -515,8 +540,8 @@ def evaluate(name: str, home: Path, need: tuple[int, int] | None = None) -> dict
             problems.append(f"request {n}: forwarded without the compacted context")
         elif sent.count(MARK) != 1 or json.dumps(summary)[1:200] not in sent:
             problems.append(f"request {n}: carries {sent.count(MARK)} summaries, not just the latest")
-        elif leaked := [c for c in read if f"CODE: {c}" in sent.replace(json.dumps(summary)[1:-1], "")]:
-            problems.append(f"request {n}: summarized tool output {leaked} still sent")
+        elif leaked := [c for c in read if any(f"CODE: {c}" in item.text for item in results(request))]:
+            problems.append(f"request {n}: summarized tool output {leaked} still sent")  # (summaries may quote it)
 
     # Relay's own record of each request's cache decision: a stored compaction that no longer
     # applies means the harness rewrote history in a way its profile's identity does not see through.

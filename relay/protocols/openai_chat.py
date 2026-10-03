@@ -10,7 +10,7 @@ import json
 from typing import Any
 
 from ..core.ir import Item, Kind
-from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, error_message
+from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, error_message, json_text
 
 
 # Message fields that reach the model, including common provider extensions for reasoning.
@@ -49,7 +49,7 @@ class OpenAIChat:
     def canonical(self, item: WireItem) -> bytes:
         """What the model reads of a message: no harness metadata (CodeBuddy adds `usage` and
         more on resume), no `cache_control`, string content as one text part, and no `name`
-        on tool results (Hermes drops it on resume)."""
+        on tool results (Hermes drops it on resume); call arguments compare as JSON values."""
 
         message = {k: v for k, v in item.items() if k in MESSAGE_FIELDS}
         if message.get("role") == "tool":
@@ -60,7 +60,10 @@ class OpenAIChat:
         if isinstance(content, list):
             content = [{k: v for k, v in part.items() if k != "cache_control"} for part in content
                        if isinstance(part, dict)]
-        return canonical_json({**message, "content": content})
+        calls = [{**call, "function": {**call["function"], "arguments": json_text(call["function"].get("arguments"))}}
+                 if isinstance(call, dict) and isinstance(call.get("function"), dict) else call
+                 for call in message.get("tool_calls") or []]
+        return canonical_json({**message, "content": content, **({"tool_calls": calls} if calls else {})})
 
     def boundaries(self, items: list[WireItem]) -> frozenset[int]:
         legal, pending = {0}, set()

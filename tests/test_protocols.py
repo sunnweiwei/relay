@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from relay.core.ir import Item, Kind
+from relay.core.tokens import bytes_per_token, item_tokens
 from relay.harnesses import ClaudeCode, Codex, detect
 from relay.protocols import AnthropicMessages, Gemini, OpenAIChat, OpenAIResponses
 
@@ -112,6 +113,16 @@ class OpenAIResponsesTests(unittest.TestCase):
         self.assertFalse(self.codec.is_overflow(400, {"error": {"message": "bad tool"}}))
 
 
+    def test_canonical_ignores_metadata_and_argument_formatting(self) -> None:
+        sent = {"type": "function_call", "id": "fc_1", "status": "completed", "call_id": "c1", "name": "read",
+                "arguments": '{"path":"a.txt","limit":20}'}
+        resent = {"type": "function_call", "call_id": "c1", "name": "read", "arguments": '{"limit": 20, "path": "a.txt"}'}
+        self.assertEqual(self.codec.canonical(sent), self.codec.canonical(resent))  # nanobot's compaction request
+        self.assertNotEqual(self.codec.canonical(sent), self.codec.canonical({**resent, "arguments": '{"path": "b.txt"}'}))
+        self.assertNotEqual(self.codec.canonical({"type": "item_reference", "id": "a"}),
+                            self.codec.canonical({"type": "item_reference", "id": "b"}))
+
+
 class AnthropicMessagesTests(unittest.TestCase):
     codec = AnthropicMessages()
 
@@ -186,6 +197,8 @@ class OpenAIChatTests(unittest.TestCase):
         call = {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": "{}"}}]}
         self.assertEqual(self.codec.canonical(call), self.codec.canonical({**call, "agent": "cli", "usage": {"total": 3}}))
         self.assertNotEqual(self.codec.canonical(call), self.codec.canonical({**call, "reasoning_content": "why"}))
+        spaced = {**call, "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": "{ }"}}]}
+        self.assertEqual(self.codec.canonical(call), self.codec.canonical(spaced))
         streamed = self.codec.stream_result([{"choices": [{"delta": {"content": "a"}}]},
                                              {"choices": [{"delta": {"content": "b"}}]}])
         self.assertEqual(self.codec.output_text(streamed), "ab")
@@ -240,6 +253,29 @@ class GeminiTests(unittest.TestCase):
                   {"candidates": [{"content": {"parts": [{"text": "mary"}]}}], "usageMetadata": {"promptTokenCount": 9}}]
         result = self.codec.stream_result(chunks)
         self.assertEqual((self.codec.output_text(result), self.codec.usage(result)), ("summary", 9))
+
+
+class OpaqueContentTests(unittest.TestCase):
+    """Encrypted reasoning, server-side compactions and signatures cost prompt tokens though
+    they carry no text: each codec reports their decoded size."""
+
+    def test_each_protocol_reports_opaque_content(self) -> None:
+        blob = "A" * 400  # base64: 300 bytes
+        cases = [
+            (OpenAIResponses(), {"type": "reasoning", "summary": [], "encrypted_content": blob}),
+            (OpenAIResponses(), {"type": "compaction", "encrypted_content": blob}),
+            (AnthropicMessages(), {"role": "assistant", "content": [{"type": "redacted_thinking", "data": blob}]}),
+            (Gemini(), {"role": "model", "parts": [{"functionCall": {"name": "f", "args": {}}, "thoughtSignature": blob}]}),
+        ]
+        for codec, item in cases:
+            self.assertEqual(codec.classify(item).opaque, 300, item)
+        signed = {"role": "assistant", "content": [{"type": "thinking", "thinking": "hm", "signature": blob}]}
+        self.assertEqual(AnthropicMessages().classify(signed).opaque, 0)  # a signature only verifies
+
+    def test_token_estimates_follow_the_model_and_count_opaque_bytes(self) -> None:
+        self.assertEqual((bytes_per_token("gpt-6-luna"), bytes_per_token("anthropic/claude-sonnet-5-5")), (4, 2.5))
+        self.assertEqual(item_tokens(Item(Kind.REASONING, "abcd", opaque=300)), 76)
+        self.assertEqual(item_tokens(Item(Kind.USER, "x" * 250), bytes_per_token("claude-x")), 100)
 
 
 class CompletionTests(unittest.TestCase):

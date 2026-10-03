@@ -17,22 +17,24 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from itertools import accumulate
 from typing import Any
 
 from ..harnesses import Harness
 from ..protocols.base import Body, Codec, WireItem
+from ..prompts import SUMMARY_PREFIX
 from ..providers import context_window
 from ..strategies.base import Strategy
 from .ir import CONTEXT_KINDS, Item, Kind, View
 from .store import PrefixStore
-from .tokens import approx_tokens
+from .tokens import approx_tokens, bytes_per_token, item_tokens
 
 log = logging.getLogger("relay")
 
 Post = Callable[[Body], tuple[int, Any]]  # send a body upstream -> (status, JSON payload)
-TRIM_NOTE = "(Earlier conversation history was omitted here to fit the context window.)"
 TRANSIENT = {429, 500, 502, 503, 504}  # summary request errors worth retrying
 RETRIES = 5  # Codex's default stream_max_retries
+SUMMARY_SHARE = 0.95  # of the context window: whatever Relay would forward uncompacted fits one summary request
 
 
 @dataclass(frozen=True)
@@ -46,7 +48,7 @@ class Exchange:
     compacted: bool = False  # this request produced a new rewrite
     estimate: int = 0  # Relay's own estimate of the forwarded prompt, if usage is never reported
     depth: int = 0  # leading items that matched a stored prefix
-    diverged: int | None = None  # where the request left its conversation's last compaction, if it did
+    diverged: int | None = None  # where a request that found no compaction left its conversation's last one
 
 
 class Engine:
@@ -86,15 +88,16 @@ class Engine:
         while end and harness.volatile(harness.refine(codec.classify(raw[end - 1]))):
             end -= 1
         raw, volatile = raw[:end], raw[end:]
-        if harness.compacting(codec, raw):  # the harness summarizing its own history: not ours to touch
-            return Exchange(body, b"", [], {})
+        # The harness summarizing its own history: it summarizes what the model has been seeing
+        # (the stored compaction still applies), but is never compacted anew or measured.
+        compacting = harness.compacting(codec, raw)
         keys = harness.identity(codec, raw)
         fingerprint = json.dumps(self.strategy.fingerprint(), sort_keys=True)
         partition = self.store.partition(tenant, codec.name, harness.name, fingerprint)
         depth, state = self.store.match(partition, keys) or (0, {})
         named = [key for key in keys if key not in (b"\0system", b"\0context")][:3]
         thread = partition + hashlib.sha256(b"\0".join(named)).digest()  # names the conversation
-        diverged = self._diverged(thread, keys, depth)
+        diverged = None if state.get("covered") or compacting else self._diverged(thread, keys, depth)
 
         def view_item(index: int) -> Item:
             return replace(harness.refine(codec.classify(raw[index])), ref=index)
@@ -108,11 +111,16 @@ class Engine:
             return items, wire
 
         items, wire = materialize(state)
-        if isinstance(state.get("tokens"), int):
-            tokens = state["tokens"] + sum(approx_tokens(view_item(i).text) for i in range(depth, len(raw)))
+        per_token = bytes_per_token(body.get("model"))  # the model's tokenizer, roughly
+
+        def size(items: list[Item]) -> int:  # the request's own preamble included
+            return approx_tokens(codec.preamble(body), per_token) + sum(item_tokens(i, per_token) for i in items)
+
+        volatile_items = [codec.classify(item) for item in volatile]
+        if isinstance(state.get("tokens"), int):  # the upstream's count for the stored prefix, then new items
+            tokens = state["tokens"] + sum(item_tokens(view_item(i), per_token) for i in range(depth, len(raw)))
         else:
-            tokens = approx_tokens(codec.preamble(body)) + sum(approx_tokens(i.text) for i in items)
-            tokens += sum(approx_tokens(codec.classify(item).text) for item in volatile)
+            tokens = size([*items, *volatile_items])
         # The strategy sees the conversation; what the harness wrote itself is its profile's.
         conversation = [n for n, item in enumerate(items) if item.kind not in CONTEXT_KINDS]
         legal = codec.boundaries(wire)
@@ -131,10 +139,13 @@ class Engine:
         leading = next((n for n, item in enumerate(items) if item.kind not in CONTEXT_KINDS), len(items))
 
         compacted = False
-        if force or time.monotonic() >= self._retry_at.get(thread, 0.0):
+        if not compacting and (force or time.monotonic() >= self._retry_at.get(thread, 0.0)):
             started = time.monotonic()
             try:
-                summarizer = _Summarizer(codec, body, lambda cut: wire[: position(cut)], leading, post)
+                # Per-item estimates, scaled to the upstream's count of the request when there is one.
+                scale = tokens / max(1, size([*items, *volatile_items]))
+                summarizer = _Summarizer(codec, body, lambda cut: wire[: position(cut)], leading, post,
+                                         view.window and view.window / scale, per_token)
                 rewrite = self.strategy.plan(view, summarizer)
                 if rewrite is not None:
                     state = _to_state(codec, harness, raw, items, legal, position(rewrite.cut), rewrite.head)
@@ -153,6 +164,7 @@ class Engine:
                             "items_before": len(view.items),
                             "items_after": len(items),
                             "seconds": round(time.monotonic() - started, 3),
+                            "summary_requests": summarizer.requests,
                         },
                         state,
                     )
@@ -162,9 +174,8 @@ class Engine:
 
         unchanged = not state.get("head") and not state.get("covered")
         forwarded = body if unchanged else codec.with_items(body, [*wire, *volatile])
-        estimate = approx_tokens(codec.preamble(body)) + sum(approx_tokens(i.text) for i in items)
-        estimate += sum(approx_tokens(codec.classify(item).text) for item in volatile)
-        return Exchange(forwarded, partition, keys, state, compacted, estimate, depth, diverged)
+        estimate = size([*items, *volatile_items])
+        return Exchange(forwarded, partition, [] if compacting else keys, state, compacted, estimate, depth, diverged)
 
     def record(self, exchange: Exchange, input_tokens: int | None) -> None:
         """Anchor future token estimates to the prompt tokens the upstream reported.
@@ -173,7 +184,7 @@ class Engine:
         report no usage (some gateways send zeros) fall back to Relay's own estimate."""
 
         if not exchange.keys:
-            return  # passed through untouched
+            return  # the harness compacting itself: its usage says nothing about the conversation
         state = {k: v for k, v in exchange.state.items() if k != "tokens"}
         if "base" not in state or (input_tokens and state.get("estimated")):
             state["base"], state["estimated"] = input_tokens or exchange.estimate, not input_tokens
@@ -188,9 +199,9 @@ class Engine:
             self._compacted.popitem(last=False)
 
     def _diverged(self, thread: bytes, keys: list[bytes], depth: int) -> int | None:
-        """Where a request left the history its conversation's last compaction covered, when it
-        no longer reaches it: the harness rewrote that history in a way its profile's identity
-        does not see through. None when the compaction applies (or there is none)."""
+        """Where a request that found no stored compaction left the history its conversation's
+        last compaction covered: the harness rewrote that history in a way its profile's
+        identity does not see through. (A rewind or a branch finds an earlier compaction.)"""
 
         covered, digests = self._compacted.get(thread, (0, []))
         if not covered or depth >= covered:
@@ -239,48 +250,67 @@ def _to_state(codec: Codec, harness: Harness, raw: list[WireItem], items: list[I
 
 
 class _Summarizer:
-    """Runs the summary request through the task's own upstream ("native continuation")."""
+    """Runs the summary request through the task's own upstream ("native continuation").
+
+    A history too long for one request (Relay joined a long session late, or lost its state,
+    while the harness kept every item) is summarized in order, a piece at a time, each piece
+    after the summary of what came before it: the compactions that were skipped, caught up.
+    Codex instead drops the oldest items until the request fits; nothing is dropped here."""
 
     def __init__(self, codec: Codec, body: Body, history: Callable[[int], list[WireItem]], keep: int,
-                 post: Post) -> None:
+                 post: Post, window: float | None, per_token: float) -> None:
         # `history(cut)`: the wire items a conversation cut replaces, the harness's own included;
-        # `keep`: the leading ones an overflow must not drop (Codex keeps the initial context).
+        # `keep`: the leading ones every piece carries (Codex keeps the initial context);
+        # `window`: in the per-item estimates' terms.
         self.codec, self.body, self.history, self.keep, self.post = codec, body, history, keep, post
+        self.budget = int(window * SUMMARY_SHARE) if window else None
+        self.per_token, self.requests = per_token, 0
 
     def summarize(self, cut: int, prompt: str) -> str:
-        items, keep = self.history(cut), self.keep
+        items = self.history(cut)
+        lead, rest, budget, summary = items[: self.keep], items[self.keep :], self.budget, ""
+        while True:
+            fixed = [*lead, self.codec.user_message(f"{SUMMARY_PREFIX}\n{summary}")] if summary else lead
+            overhead = approx_tokens(self.codec.preamble(self.body), self.per_token) + sum(map(self._tokens, fixed))
+            piece = _piece(self.codec, rest, budget - overhead, self._tokens) if budget else len(rest)
+            status, payload = self._request([*fixed, *rest[:piece]], prompt)
+            if self.codec.is_overflow(status, payload):
+                if piece <= _piece(self.codec, rest, 0, self._tokens):
+                    raise RuntimeError("a single turn of the history does not fit in a summary request")
+                budget = overhead + sum(map(self._tokens, rest[:piece])) // 2  # the estimate ran short
+                continue
+            if status >= 300:
+                raise RuntimeError(f"summary request failed with HTTP {status}: {payload!r:.300}")
+            if not (isinstance(payload, dict) and self.codec.finished(payload)):
+                raise RuntimeError(f"the summary response did not complete: {payload!r:.300}")  # never used, like Codex
+            if not (summary := self.codec.output_text(payload)):
+                raise RuntimeError("the summary response contained no text")
+            rest = rest[piece:]
+            if not rest:
+                return summary
+
+    def _request(self, items: list[WireItem], prompt: str) -> tuple[int, Any]:
+        """One summary request, retried while rate limited, overloaded or cut short."""
+
         attempt = 0
         while True:
+            self.requests += 1
             status, payload = self.post(self.codec.summary_request(self.body, items, prompt))
-            complete = status < 300 and isinstance(payload, dict) and self.codec.finished(payload)
-            if complete:
-                text = self.codec.output_text(payload)
-                if not text:
-                    raise RuntimeError("the summary response contained no text")
-                return text
-            # Like Codex, a summary that did not complete (a stream cut short, say) is never used.
-            if (status < 300 or status in TRANSIENT) and attempt < RETRIES:
-                attempt += 1
-                time.sleep(2**attempt)  # incomplete, rate limited or overloaded: back off and retry
-                continue
-            if status < 300:
-                raise RuntimeError(f"the summary response did not complete: {payload!r:.300}")
-            trimmed = _trim(self.codec, items, keep) if self.codec.is_overflow(status, payload) else None
-            if trimmed is None:
-                raise RuntimeError(f"summary request failed with HTTP {status}: {payload!r:.300}")
-            items = trimmed
+            incomplete = status < 300 and not (isinstance(payload, dict) and self.codec.finished(payload))
+            if not (incomplete or status in TRANSIENT) or attempt == RETRIES:
+                return status, payload
+            attempt += 1
+            time.sleep(2**attempt)
+
+    def _tokens(self, item: WireItem) -> int:
+        return item_tokens(self.codec.classify(item), self.per_token)
 
 
-def _trim(codec: Codec, items: list[WireItem], keep: int) -> list[WireItem] | None:
-    """Replace at least a tenth of the history after `keep` with a short note.
+def _piece(codec: Codec, items: list[WireItem], room: int, tokens: Callable[[WireItem], int]) -> int:
+    """The longest leading run of `items` that ends at a legal boundary and fits in `room`
+    tokens; at least the shortest one."""
 
-    The note (a user message) keeps the request well-formed wherever the cut falls,
-    e.g. Anthropic requires the first message to come from the user.
-    """
-
-    sizes = [approx_tokens(codec.classify(item).text) for item in items]
-    candidates = sorted(b for b in codec.boundaries(items) if keep < b < len(items))
-    if not candidates:
-        return None
-    boundary = next((b for b in candidates if sum(sizes[keep:b]) * 10 >= sum(sizes)), candidates[-1])
-    return [*items[:keep], codec.user_message(TRIM_NOTE), *items[boundary:]]
+    legal = sorted(b for b in codec.boundaries(items) if b > 0) or [len(items)]
+    total = [0, *accumulate(map(tokens, items))]
+    fitting = [b for b in legal if total[b] <= room]
+    return fitting[-1] if fitting else legal[0]

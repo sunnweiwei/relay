@@ -83,8 +83,9 @@ class Harness:
         return keys
 
     def compacting(self, codec: Codec, items: list[WireItem]) -> bool:
-        """Whether the request is the harness compacting its own history; it passes through as
-        sent (its prompt may sit inside history items a stored compaction would replace)."""
+        """Whether the request is the harness compacting its own history (its own prompt, or a
+        server-side trigger). It gets the stored compaction like any request, as only items before
+        the first changed one can be covered, but never a new one."""
 
         return False
 
