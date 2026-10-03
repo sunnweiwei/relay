@@ -36,6 +36,7 @@ class Item:
     ref: int | None = None  # index of the wire item in the request; None if Relay wrote it
     media: bool = False  # carries non-text content such as images or files
     wire: str | None = None  # JSON of the wire item Relay wrote, when not a plain user message
+    opaque: int = 0  # bytes of opaque content the model reads (encrypted reasoning, ...), decoded
 
 
 @dataclass(frozen=True)

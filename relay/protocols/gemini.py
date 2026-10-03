@@ -13,7 +13,7 @@ import re
 from typing import Any
 
 from ..core.ir import Item, Kind
-from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, error_message
+from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, decoded, error_message
 
 
 class Gemini:
@@ -33,11 +33,12 @@ class Gemini:
         parts = [part for part in item.get("parts") or [] if isinstance(part, dict)]
         text = "\n".join(filter(None, (_part_text(part) for part in parts)))
         if item.get("role") == "model":
+            opaque = sum(decoded(part.get("thoughtSignature") or part.get("thought_signature")) for part in parts)
             if any(_has(part, "functionCall") for part in parts):
-                return Item(Kind.TOOL_CALL, text)
+                return Item(Kind.TOOL_CALL, text, opaque=opaque)
             if parts and all(part.get("thought") for part in parts):
-                return Item(Kind.REASONING, text)
-            return Item(Kind.ASSISTANT, text)
+                return Item(Kind.REASONING, text, opaque=opaque)
+            return Item(Kind.ASSISTANT, text, opaque=opaque)
         if item.get("role") == "function" or any(_has(part, "functionResponse") for part in parts):
             return Item(Kind.TOOL_RESULT, text)
         return Item(Kind.USER, text, media=any(_has(p, "inlineData") or _has(p, "fileData") for p in parts))

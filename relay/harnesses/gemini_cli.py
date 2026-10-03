@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ..core.ir import Item, Kind
 from ..install import Setting
+from ..protocols.base import Codec, WireItem, canonical_json
 from .base import REMINDER, Harness
 
 CONTEXT_PREFIX = "This is the Gemini CLI. We are setting up the context"
@@ -28,6 +29,18 @@ class GeminiCli(Harness):
         if item.kind is Kind.USER and item.text.lstrip().startswith(CONTEXT_PREFIX):
             return replace(item, kind=Kind.CONTEXT)
         return super().refine(item)
+
+    def identity(self, codec: Codec, items: list[WireItem]) -> list[bytes]:
+        """Gemini CLI masks bulky old tool outputs in place (`<tool_output_masked>`; there is no
+        setting to stop it), so a tool result compares by the calls it answers, not its output."""
+
+        keys = super().identity(codec, items)
+        for index, item in enumerate(items):
+            calls = [(part["functionResponse"].get("name"), part["functionResponse"].get("id"))
+                     for part in item.get("parts") or [] if isinstance(part.get("functionResponse"), dict)]
+            if calls and all(id for _, id in calls):
+                keys[index] = b"\0result\0" + canonical_json(list(dict.fromkeys(calls)))
+        return keys
 
     def settings(self) -> list[Setting]:
         env = Path("~/.gemini/.env").expanduser()

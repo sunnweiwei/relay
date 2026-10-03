@@ -49,9 +49,10 @@ values are recorded in `~/.config/relay/installed.json` for `relay uninstall`.
 | mini-swe-agent | `OPENAI_BASE_URL` / `GEMINI_API_BASE` / `ANTHROPIC_BASE_URL` in its global `.env` (read by litellm) |
 
 `relay run <harness> -- <args>` runs Codex or Claude Code through a private, temporary
-Relay instead. Harness-side auto-compaction does not need to be disabled: harnesses size
-their context from the usage the API reports, which stays below their own thresholds
-once Relay compacts earlier (keep `RELAY_COMPACT_THRESHOLD` below the harness's limit).
+Relay instead. Most harnesses size their context from the usage the API reports, which
+stays below their own auto-compaction thresholds once Relay compacts earlier: keep Relay's
+trigger below the harness's (at a tie, Codex compacts first). Hermes Agent measures its
+own history, which keeps growing behind Relay; see [Support](#support).
 
 ## Architecture
 
@@ -72,7 +73,7 @@ Three layers keep strategies free of harness and protocol details:
   harness's current state (`state`: its instructions, environment, modes at their latest
   version, and the history items that state supersedes), where that state goes in a
   rewritten history (`place`), and which requests are the harness compacting itself
-  (`compacting`, passed through);
+  (`compacting`: they get the stored compaction but never a new one);
 - the **strategy** sees only the conversation (user, assistant, tool items and summaries)
   and decides what to keep and what to write. Every rewrite gets the harness's current
   state placed into it, so a new strategy inherits that, and cache hits, for free.
@@ -93,8 +94,13 @@ Relay never translates between protocols: a request is forwarded in the protocol
 harness spoke. Models are reached through any provider that serves that protocol.
 
 Token counts come from the usage the upstream reported for the previous request of the
-same conversation plus an estimate of the new items (four bytes per token, as in
-Codex), so no extra token-counting calls are made. If the upstream still rejects a
+same conversation plus an estimate of the new items, so no extra token-counting calls are
+made. The estimate (all of it when nothing was reported yet: a conversation's first
+request, or after Relay joined late, restarted, or the harness compacted itself) counts
+four bytes of text per token, as Codex does (OpenAI and Gemini tokenizers measured about
+4.6, so it errs high), or 2.5 for Claude (measured 2.7), and counts opaque content the
+model still reads (encrypted reasoning and compactions, redacted thinking, thought
+signatures) at its decoded size. If the upstream still rejects a
 request as too long, Relay compacts and retries it once.
 
 ## Compaction
@@ -109,8 +115,11 @@ Behavior follows `codex-rs/core/src/compact.rs`; prompts are vendored verbatim i
   tools disabled). It shares the previous request's prefix, so provider prompt caching
   applies. Like Codex's `drain_to_completed`, a summary counts only if its response
   completed: a stream cut short or a response stopped by a token limit is retried (up to
-  5 times) and never used. If the request overflows, the oldest history is dropped and
-  the request retried.
+  5 times) and never used. A history too long for one summary request (Relay joined a
+  long session late, dropped out for a while, or restarted and lost its state, while the
+  harness kept and resends everything) is summarized in order, a piece at a time, each
+  piece after the summary so far: the skipped compactions, caught up. The same happens if
+  the upstream reports an overflow.
 - The new context follows Codex's replacement history: the newest real user messages up
   to `RELAY_RETAIN_USER_TOKENS` (the oldest one kept is truncated in the middle; media is
   reduced to text; earlier summaries are dropped) and the summary as a user message
@@ -154,9 +163,9 @@ Deliberate differences from Codex: a compaction that would free less than
 `RELAY_COMPACT_MIN_GAIN` of the threshold is skipped, so a threshold set close to the
 fixed prompt overhead (system prompt and tools) does not trigger a summary on every
 request; the summary request keeps the tool definitions with tool calls disabled
-(Anthropic rejects tool history without them) where Codex sends none; on overflow the
-oldest history is dropped a tenth at a time behind a short note instead of one item per
-retry; and an empty summary is a failed compaction rather than "(no summary available)".
+(Anthropic rejects tool history without them) where Codex sends none; a history too long
+for one summary request is summarized piece by piece instead of dropping its oldest items;
+and an empty summary is a failed compaction rather than "(no summary available)".
 
 ## Configuration
 
@@ -255,7 +264,30 @@ carries the old version), so they answer with the old codename;
 `gemini-2.5-flash-lite` on Kimi Code sometimes re-reads files and writes summaries that miss
 facts, with or without earlier summaries in view.
 
-Known limitations: state lives in memory, so a restart costs one extra summary per
+Realistic sessions (`tests/docker/session.py`): a real repository (more-itertools with a
+planted bug) and four turns over the harness's own resume: a tour of the code, a bug fix
+with a regression test, a feature after a changelog rule is added to the instructions, and
+a summary of the session; hidden checks then test the fix (beyond the repository's own
+tests), the feature, its stub, tests and changelog entry, the full suite, and that the
+summary recalls both changes. Every harness that resumes a session passed with compaction
+on (WorkBuddy with plan mode off: run headless, it waits for a plan approval that cannot
+come, with or without Relay), as did Codex and
+Claude Code with Relay joining late, dropping out for a turn, or restarting before every
+turn (histories up to five times the window were caught up in pieces); with the tickets
+coming from an MCP server, a mockup image to look at and a release to look up; with the
+session forked after turn 3 and, in Claude Code, rewound to the end of turn 2 (each branch
+found the compaction of the history it shares); and with the harness's own compaction
+firing first (Codex's server-side `compaction_trigger`, Claude Code's `/compact`).
+
+Harness-side context management changes history Relay has stored: OpenCode prunes old
+tool outputs, which `relay install` turns off, and Gemini CLI masks them, which no setting
+stops, so its profile compares tool results by their call and the prefix still matches.
+A harness's own auto-compaction fires first when its trigger is at or below Relay's (Codex
+compacts before the request that would cross a tie), or when it measures its own history,
+which keeps growing behind Relay (Hermes Agent, at half its window by default); the
+session then goes on correctly, but with the harness's summaries rather than Relay's.
+
+Known limitations: state lives in memory, so a restart costs a catch-up summary per
 conversation; WebSocket transports are refused (Codex falls back to HTTP); an overflow
 reported inside an already-started stream is not retried; token-counting endpoints are
 passed through unchanged; Gemini CLI's Google-login mode (Code Assist API) is not
@@ -309,3 +341,12 @@ just its latest summary and none of the summarized tool output; the harness's la
 instructions reach the model; no conversation read a file twice; both answers are right;
 no compaction failed; and the upstream accepted every model call. `--probe` records a
 session without compacting, to see where a harness keeps its state.
+
+```bash
+RELAY_TEST_KEYS=keys.env python tests/docker/session.py codex:gpt-api --repo PATH --window 32000
+    # --baseline | --transition late-join|drop-out|restart | --tools | --branch | --harness-compact N
+```
+
+runs the realistic session described under [Support](#support) and
+prints its hidden checks with Relay's record of it (compactions per turn, summary requests
+per compaction, cache hits, divergences, the harness's own compactions).

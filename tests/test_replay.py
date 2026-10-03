@@ -51,8 +51,9 @@ class ReplayTests(unittest.TestCase):
             exchange = engine.prepare(codec, harness, body, tenant="t", post=post)
             engine.record(exchange, approx_tokens(json.dumps(exchange.body)))
             items = codec.items(body)
-            if harness.compacting(codec, items):  # the harness summarizing itself passes through as sent
-                self.assertIs(exchange.body, body)
+            if harness.compacting(codec, items):  # the harness summarizing itself: no new compaction,
+                self.assertFalse(exchange.compacted)  # and its request (prompt or trigger last) stays intact
+                self.assertTrue(harness.compacting(codec, codec.items(exchange.body)), f"request {n} lost its prompt")
                 continue
             thread = tuple(k for k in harness.identity(codec, items) if k not in (b"\0system", b"\0context"))[:3]
             # The prefix store: a conversation that compacted finds its compaction again.
