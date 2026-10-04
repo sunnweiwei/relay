@@ -184,6 +184,12 @@ and an empty summary is a failed compaction rather than "(no summary available)"
 | `RELAY_HOST`, `RELAY_PORT` | `127.0.0.1`, `8787` | Server address for `relay serve`. |
 | `RELAY_CACHE_MAX_ENTRIES`, `RELAY_CACHE_MAX_BYTES`, `RELAY_CACHE_TTL_SECONDS`, `RELAY_CACHE_SECRET` | `4096`, 256 MiB, 6 h, random | Limits of the in-memory prefix store. |
 
+Set `RELAY_CONTEXT_WINDOW` to the window the harness itself uses (Codex's catalog gives the
+gpt-5.6 and gpt-6 families 272k by default, shown as 258k usable): the table covers older
+models only, an unknown model falls back to 128k, and the 95% limit uses the same window, so
+setting only a threshold is not enough. Relay's threshold must also stay below the
+harness's own trigger (see [Harness auto-compaction](#harness-auto-compaction)).
+
 Other providers are configured by endpoint, for example
 `RELAY_OPENAI_BASE_URL=https://api.x.ai/v1` for Grok, or
 `RELAY_OPENAI_BASE_URL=https://openrouter.ai/api/v1` /
@@ -278,6 +284,16 @@ session forked after turn 3 and, in Claude Code, rewound to the end of turn 2 (e
 found the compaction of the history it shares); and with the harness's own compaction
 firing first (Codex's server-side `compaction_trigger`, Claude Code's `/compact`).
 
+Remote Control: Codex's (`codex app-server --remote-control`, driven from the ChatGPT app)
+reaches its service at `chatgpt_base_url` and the model at `openai_base_url`, so it works
+through Relay. `check.py codex:remote` runs the session through `tests/docker/codex_remote.py`,
+a stand-in for the service and the app (nothing is enrolled with the account; the rest of
+the ChatGPT backend is passed through to chatgpt.com); it passed, and the app shows the full
+conversation, its context meter the compacted size. Claude Code's (`claude remote-control`)
+refuses to start while `ANTHROPIC_BASE_URL` points anywhere but api.anthropic.com, so it
+does not run through Relay as installed; sessions that an already-running one spawns read
+`settings.json` afresh, so `relay install` sends them through Relay.
+
 Harness-side context management changes history Relay has stored: OpenCode prunes old
 tool outputs, which `relay install` turns off, and Gemini CLI masks them, which no setting
 stops, so its profile compares tool results by their call and the prefix still matches.
@@ -292,7 +308,7 @@ switch where there is one and otherwise by moving the trigger out of reach (10�
 
 | Harness | Its own trigger | `relay install` sets |
 | --- | --- | --- |
-| Codex | `model_auto_compact_token_limit`, capped at 90% of `model_context_window` (server-side `compaction_trigger`) | both to 10⁹ (the context-left meter then reads near 100%) |
+| Codex | `model_auto_compact_token_limit`, capped at 90% of `model_context_window` (server-side `compaction_trigger`) | both to 10⁹; Codex caps the window at the model's maximum, so its trigger moves to 90% of that: 784.8k for the gpt-6 family, but 244.8k for gpt-5.5, whose maximum is its default (keep Relay's threshold below it) |
 | Claude Code | near the window | `env.DISABLE_AUTO_COMPACT=1` in `settings.json` (`/compact` still works) |
 | WorkBuddy, CodeBuddy | forced at 92% of a model's `contextWindow` or `maxInputTokens` (this build runs no other) | `autoCompactEnabled: false`, `env.CODEBUDDY_AUTOCOMPACT_PCT_OVERRIDE=100` |
 | Gemini CLI | 50% of the window | `model.compressionThreshold: 10⁹` |
@@ -311,6 +327,12 @@ Each was checked in Docker (`check.py --harness-compaction`): with the user's co
 set to make the harness compact itself at about 20k tokens, it did; after `relay install`
 it did not, and the task still finished. Hermes Agent, which refuses windows under 64k, was
 checked in the realistic session, where it had compacted itself before.
+
+Codex measures its context as the usage reported for its last request plus what it has added
+since; that request is the one Relay compacted, so its trigger stays out of reach even when
+its own history passes it. Checked with Codex's trigger at 25k and Relay's threshold at 16k:
+Codex's history grew to 34k, the usage it was told stayed under 22k, and it never compacted
+itself (in `codex exec` and under Remote Control); with Relay not compacting, it did.
 
 Known limitations: state lives in memory, so a restart costs a catch-up summary per
 conversation; WebSocket transports are refused (Codex falls back to HTTP); an overflow
@@ -357,7 +379,8 @@ RELAY_TEST_KEYS=keys.env python tests/docker/check.py --matrix        # all of t
 ```
 
 `keys.env` holds `OPENAI_API_KEY`, `GEMINI_API_KEY` and `ANTHROPIC_API_KEY`; Codex uses
-the host's ChatGPT login. Each run is two turns of one session (the second through the
+a copy of the host's ChatGPT login with its refresh token voided, so a container can never
+rotate the token the host holds. Each run is two turns of one session (the second through the
 harness's own continue/resume), so Relay compacts mid-turn and at the start of a turn.
 A run passes only if, for every compaction, the summary contains every code read so far,
 the new context has Codex's layout and keeps the initial context (at its latest state) and
