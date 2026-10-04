@@ -49,10 +49,9 @@ values are recorded in `~/.config/relay/installed.json` for `relay uninstall`.
 | mini-swe-agent | `OPENAI_BASE_URL` / `GEMINI_API_BASE` / `ANTHROPIC_BASE_URL` in its global `.env` (read by litellm) |
 
 `relay run <harness> -- <args>` runs Codex or Claude Code through a private, temporary
-Relay instead. Most harnesses size their context from the usage the API reports, which
-stays below their own auto-compaction thresholds once Relay compacts earlier: keep Relay's
-trigger below the harness's (at a tie, Codex compacts first). Hermes Agent measures its
-own history, which keeps growing behind Relay; see [Support](#support).
+Relay instead. `relay install` also turns the harness's own auto-compaction off, so Relay's
+strategy is the one that runs (see [Harness auto-compaction](#harness-auto-compaction));
+`relay uninstall` restores it.
 
 ## Architecture
 
@@ -282,10 +281,36 @@ firing first (Codex's server-side `compaction_trigger`, Claude Code's `/compact`
 Harness-side context management changes history Relay has stored: OpenCode prunes old
 tool outputs, which `relay install` turns off, and Gemini CLI masks them, which no setting
 stops, so its profile compares tool results by their call and the prefix still matches.
-A harness's own auto-compaction fires first when its trigger is at or below Relay's (Codex
-compacts before the request that would cross a tie), or when it measures its own history,
-which keeps growing behind Relay (Hermes Agent, at half its window by default); the
-session then goes on correctly, but with the harness's summaries rather than Relay's.
+
+### Harness auto-compaction
+
+Left on, a harness's own compaction runs first wherever its trigger is at or below Relay's
+(Codex compacts before the request that would cross a tie), or where it measures its own
+history, which keeps growing behind Relay (Hermes Agent); the session still goes on, but
+with the harness's summaries instead of Relay's. `relay install` turns it off, through a
+switch where there is one and otherwise by moving the trigger out of reach (10⁹ tokens):
+
+| Harness | Its own trigger | `relay install` sets |
+| --- | --- | --- |
+| Codex | `model_auto_compact_token_limit`, capped at 90% of `model_context_window` (server-side `compaction_trigger`) | both to 10⁹ (the context-left meter then reads near 100%) |
+| Claude Code | near the window | `env.DISABLE_AUTO_COMPACT=1` in `settings.json` (`/compact` still works) |
+| WorkBuddy, CodeBuddy | forced at 92% of a model's `contextWindow` or `maxInputTokens` (this build runs no other) | `autoCompactEnabled: false`, `env.CODEBUDDY_AUTOCOMPACT_PCT_OVERRIDE=100` |
+| Gemini CLI | 50% of the window | `model.compressionThreshold: 10⁹` |
+| pi | the window minus a reserve | `compaction.enabled: false` |
+| OpenCode, Kilo | the input limit minus a reserve | `compaction.auto: false` (and `compaction.prune: false`) |
+| Crush | near the window | `options.disable_auto_summarize: true` |
+| OpenClaw | the window minus a reserve | `agents.defaults.compaction.enabled: false` (overflow recovery and `/compact` stay) |
+| Goose | 80% of the context limit | `GOOSE_AUTO_COMPACT_THRESHOLD: 0.99` (no switch; values outside (0, 1) may mean the default) |
+| Kimi Code | 85% of a model's `max_context_size`, or within 50k of it | every model's `max_context_size: 10⁹` (it must be positive) |
+| Hermes Agent | half its window (at least 75% below 512k), measured on its own history | `compression.enabled: false` |
+| nanobot | `contextWindowTokens` | `agents.defaults.contextWindowTokens: 10⁹` (0 would starve its memory archive) |
+| DeepSeek Harness | `compaction-basic` at 80%, with tool results trimmed first | `compaction-basic` `auto: false`, `tool-result-pruner` `thresholdChars: 10⁹` |
+| mini-swe-agent | none | nothing |
+
+Each was checked in Docker (`check.py --harness-compaction`): with the user's configuration
+set to make the harness compact itself at about 20k tokens, it did; after `relay install`
+it did not, and the task still finished. Hermes Agent, which refuses windows under 64k, was
+checked in the realistic session, where it had compacted itself before.
 
 Known limitations: state lives in memory, so a restart costs a catch-up summary per
 conversation; WebSocket transports are refused (Codex falls back to HTTP); an overflow

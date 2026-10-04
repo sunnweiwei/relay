@@ -32,7 +32,11 @@ class WorkBuddy(Harness):
         ]
         if not settings:
             raise ValueError(f"add a custom model with a `url` to {config} first")
-        return settings
+        # Automatic compaction off, and the forced one (at 92% of a model's contextWindow or
+        # maxInputTokens, the only one this build runs) moved to the window's edge.
+        user = config.with_name("settings.json")
+        return [*settings, Setting(user, ("autoCompactEnabled",), False),
+                Setting(user, ("env", "CODEBUDDY_AUTOCOMPACT_PCT_OVERRIDE"), "100")]
 
 
 class CodeBuddy(WorkBuddy):

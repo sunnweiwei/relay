@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 from ..install import Setting
-from .base import Harness
+from .base import NEVER, Harness
 
 DEFAULTS = {
     "openai": "https://api.openai.com/v1",
@@ -33,4 +33,5 @@ class Nanobot(Harness):
         if "openai" in names and "api.openai.com" in (openai.get("apiBase") or DEFAULTS["openai"]) \
                 and openai.get("apiType", "auto") == "auto":
             settings.append(Setting(config, ("providers", "openai", "apiType"), value="responses"))
-        return settings
+        # Its checkpoints follow contextWindowTokens (0 would starve its memory archive).
+        return [*settings, Setting(config, ("agents", "defaults", "contextWindowTokens"), NEVER)]

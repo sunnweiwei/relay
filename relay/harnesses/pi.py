@@ -26,6 +26,7 @@ class Pi(Harness):
         # A provider entry with only `baseUrl` keeps pi's built-in models and logins.
         models = Path(os.getenv("PI_CODING_AGENT_DIR", "~/.pi/agent")).expanduser() / "models.json"
         return [
+            Setting(models.with_name("settings.json"), ("compaction", "enabled"), False),
             Setting(models, ("providers", "openai", "baseUrl"), endpoint="https://api.openai.com/v1"),
             Setting(models, ("providers", "anthropic", "baseUrl"), endpoint="https://api.anthropic.com"),
             Setting(models, ("providers", "google", "baseUrl"),

@@ -36,4 +36,5 @@ class Hermes(Harness):
         if "generativelanguage.googleapis.com" in base_url and not base_url.endswith("/openai"):
             base_url += "/openai"
             settings.append(Setting(config, ("model", "base_url"), value=base_url))
-        return [*settings, Setting(config, ("model", "base_url"), endpoint=base_url)]
+        return [*settings, Setting(config, ("model", "base_url"), endpoint=base_url),
+                Setting(config, ("compression", "enabled"), False)]

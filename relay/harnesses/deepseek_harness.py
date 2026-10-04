@@ -15,7 +15,7 @@ from pathlib import Path
 
 from ..core.ir import Item, Kind
 from ..install import Setting, yaml_keys
-from .base import Harness
+from .base import NEVER, Harness
 
 DEEPSEEK = ("[id=llm-deepseek]", "config", "baseURL")
 ROUTES = ("[id=llm-pi-ai]", "config", "providers")
@@ -56,4 +56,8 @@ class DeepSeekHarness(Harness):
         return [Setting(patch, DEEPSEEK, endpoint=deepseek)] + [
             Setting(patch, (*ROUTES, route, "baseURL"), endpoint=DEFAULTS.get(route, ""))
             for route in yaml_keys(patch, ROUTES)
+        ] + [
+            Setting(patch, ("[id=compaction-basic]", "config", "auto"), False),
+            # It trims old tool results in place under token pressure.
+            Setting(patch, ("[id=tool-result-pruner]", "config", "thresholdChars"), NEVER),
         ]

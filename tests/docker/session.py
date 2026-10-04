@@ -28,7 +28,7 @@ import tempfile
 import zlib
 from pathlib import Path
 
-from check import SPECS, codec_for, container, detect
+from check import SPECS, container, self_compactions
 
 TURNS = [
     "I just cloned this repo (more-itertools) and I'm new to it. Give me a short tour: how the package is "
@@ -276,10 +276,7 @@ def report(name: str, home: Path, window: int) -> dict:
         "cache_hits": sum(1 for r in requests if r.get("cache", {}).get("covered") and not r["compacted"]),
         "diverged": sum(1 for r in requests if r.get("cache", {}).get("diverged") is not None),
         "failed_compactions": log.count("failed; forwarding"),
-        # The harness compacting itself: Codex's server-side endpoint, or a request its profile recognizes.
-        "harness_compactions": log.count("/responses/compact ") + sum(
-            detect({}, path=r["path"]).compacting(codec_for(r["path"]), codec_for(r["path"]).items(r["body"]))
-            for r in requests),
+        "harness_compactions": log.count("/responses/compact ") + len(self_compactions(requests)),  # the harness's own
         "rejected": sum(r["status"] >= 400 for r in trace if "status" in r),
         "answers": [" ".join(lines(f"turn{n}.out"))[-300:] for n in range(1, len(TURNS) + 1)],
         # `--branch`: each branch's first request and the stored compaction it found

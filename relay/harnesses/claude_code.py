@@ -58,7 +58,8 @@ class ClaudeCode(Harness):
 
     def settings(self) -> list[Setting]:
         home = Path(os.getenv("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser()
-        return [Setting(home / "settings.json", ("env", "ANTHROPIC_BASE_URL"), endpoint="https://api.anthropic.com")]
+        return [Setting(home / "settings.json", ("env", "ANTHROPIC_BASE_URL"), endpoint="https://api.anthropic.com"),
+                Setting(home / "settings.json", ("env", "DISABLE_AUTO_COMPACT"), "1")]  # `/compact` still works
 
     def launch(self, relay_url: str, args: list[str]) -> tuple[list[str], dict[str, str]]:
         return ["claude", *args], {"ANTHROPIC_BASE_URL": relay_url}
