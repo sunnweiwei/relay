@@ -6,8 +6,9 @@
 Each run gets a throwaway HOME: the harness's own config is written there (the "user's
 existing setup"), `relay install <harness>` edits it, Relay runs in the background, and
 the harness is used as a user would. Host configs are never mounted. Codex and
-`claude_code:login` use the host's login (copied in); everything else uses API keys from
-the file named by RELAY_TEST_KEYS. Requires the image built from tests/docker/Dockerfile.
+`claude_code:login` use a copy of the host's login that cannot refresh (see `copy_login`);
+everything else uses API keys from the file named by RELAY_TEST_KEYS. Requires the image
+built from tests/docker/Dockerfile.
 
 The task takes two turns of one session. Turn 1 reads file_1..4 one tool call at a time
 and reports their codes; turn 2 (the harness's own continue/resume) brings a long note,
@@ -253,6 +254,7 @@ until python3 -c 'import socket; socket.create_connection(("127.0.0.1", 4000))' 
 
 
 CLAUDE_ARGS = '-p "$PROMPT" --permission-mode bypassPermissions --model'
+REMOTE = "/relay/tests/docker/codex_remote.py"
 ONBOARDED = """echo '{"hasCompletedOnboarding": true}' > ~/.claude.json"""
 GEMINI_AUTH = json_file("~/.gemini/settings.json", {"security": {"auth": {"selectedType": "gemini-api-key"}}})
 OPENCLAW = json_file("~/.openclaw/openclaw.json", {"agents": {"defaults": {"workspace": "/project"}}})
@@ -268,6 +270,14 @@ SPECS = {
     "codex:gpt": spec(
         'codex exec --skip-git-repo-check "$PROMPT"', 'codex exec --skip-git-repo-check resume --last "$PROMPT"',
         setup=f"""mkdir -p ~/.codex && printf 'model = "{GPT}"\\nmodel_reasoning_effort = "low"\\nsandbox_mode = "danger-full-access"\\n' > ~/.codex/config.toml""",
+        login=True,
+    ),
+    # Remote Control: the user drives Codex from the ChatGPT app. codex_remote.py stands in for the
+    # service and the app, so nothing is enrolled with the account; Relay is on the model path only.
+    "codex:remote": spec(
+        f'python3 {REMOTE} say "$PROMPT"', f'python3 {REMOTE} say "$PROMPT"',
+        setup=f"""mkdir -p ~/.codex && printf 'model = "{GPT}"\\nmodel_reasoning_effort = "low"\\nsandbox_mode = "danger-full-access"\\napproval_policy = "never"\\nchatgpt_base_url = "https://127.0.0.1:8900/backend-api/"\\n' > ~/.codex/config.toml
+        python3 {REMOTE} serve > ~/remote.log 2>&1 &""",
         login=True,
     ),
     # API key with reasoning items in the history: `exec resume` rewrites them (PR #2's finding).
@@ -412,11 +422,9 @@ def container(name: str, root: Path, env: dict[str, str], turns: str, timeout: i
         alias = {"GEMINI_API_KEY": gemini[sum(map(ord, name)) % len(gemini)]} if gemini else {}
         env.update({var: keys[alias.get(key, key)] for var, key in spec.keys.items()})
     if spec.login and harness == "codex":
-        (home / ".codex").mkdir()
-        shutil.copy(Path("~/.codex/auth.json").expanduser(), home / ".codex/auth.json")
-    if spec.login and harness == "claude_code":  # a copy: a refresh inside never touches the host
-        (home / ".claude").mkdir()
-        shutil.copy(Path("~/.claude/.credentials.json").expanduser(), home / ".claude/.credentials.json")
+        copy_login("~/.codex/auth.json", home / ".codex/auth.json", "tokens", "refresh_token")
+    if spec.login and harness == "claude_code":
+        copy_login("~/.claude/.credentials.json", home / ".claude/.credentials.json", "claudeAiOauth", "refreshToken")
     if harness == "codex":  # the standalone package: codex plus its helper binaries
         mounts.append(f"{Path(shutil.which('codex')).resolve().parents[1]}:/opt/codex:ro")
         env["PATH"] = "/opt/codex/bin:/opt/codex/codex-path:/usr/local/bin:/usr/bin:/bin"
@@ -439,6 +447,18 @@ def container(name: str, root: Path, env: dict[str, str], turns: str, timeout: i
     for var, value in env.items():
         docker += ["-e", f"{var}={value}"]
     subprocess.run([*docker, IMAGE, "bash", "-c", script], check=False, timeout=timeout)
+
+
+
+def copy_login(source: str, target: Path, *refresh: str) -> None:
+    """Copy the host's login with its refresh token voided: the container uses the access token
+    but cannot refresh it, which would rotate the token the host (and its Remote Control) holds."""
+
+    login = json.loads(Path(source).expanduser().read_text())
+    login[refresh[0]][refresh[1]] = "voided-by-relay-tests"
+    target.parent.mkdir()
+    target.write_text(json.dumps(login))
+    target.chmod(0o600)
 
 
 CALL_ID = re.compile(r'"(?:tool_use_id|call_id|tool_call_id|id)":"([^"]+)"')
