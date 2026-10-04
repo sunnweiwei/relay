@@ -37,4 +37,4 @@ class OpenClaw(Harness):
             if api and "api" not in providers.get(name, {}):
                 # An entry with a baseUrl but no api would fall back to openai-completions.
                 settings.append(Setting(config, ("models", "providers", name, "api"), value=api))
-        return settings
+        return [*settings, Setting(config, ("agents", "defaults", "compaction", "enabled"), False)]

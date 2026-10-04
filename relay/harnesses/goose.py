@@ -20,4 +20,6 @@ class Goose(Harness):
 
     def settings(self) -> list[Setting]:
         config = Path(os.getenv("XDG_CONFIG_HOME", "~/.config")).expanduser() / "goose/config.yaml"
-        return [Setting(config, (key,), endpoint=url) for key, url in DEFAULTS.items()]
+        return [*(Setting(config, (key,), endpoint=url) for key, url in DEFAULTS.items()),
+                # No switch, and values outside (0, 1) may mean the default: the window's edge.
+                Setting(config, ("GOOSE_AUTO_COMPACT_THRESHOLD",), 0.99)]

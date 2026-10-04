@@ -26,7 +26,8 @@ class Crush(Harness):
         configured = json.loads(config.read_text()).get("providers", {}) if config.exists() else {}
         providers = {name: DEFAULTS.get(name) or DEFAULTS.get(p.get("type"), "") for name, p in configured.items()}
         return [
-            Setting(config, ("providers", name, "base_url"), endpoint=url)
-            for name, url in (providers or DEFAULTS).items()
-            if url or configured.get(name, {}).get("base_url")
+            *(Setting(config, ("providers", name, "base_url"), endpoint=url)
+              for name, url in (providers or DEFAULTS).items()
+              if url or configured.get(name, {}).get("base_url")),
+            Setting(config, ("options", "disable_auto_summarize"), True),
         ]

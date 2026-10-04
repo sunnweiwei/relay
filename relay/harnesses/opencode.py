@@ -22,6 +22,7 @@ class OpenCode(Harness):
             *(Setting(config, tuple(k.format(name) for k in provider), endpoint=url) for name, url in defaults.items()),
             # Pruning rewrites old tool outputs, which would break prefix reuse.
             Setting(config, ("compaction", "prune"), False),
+            Setting(config, ("compaction", "auto"), False),
         ]
 
 

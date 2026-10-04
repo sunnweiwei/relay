@@ -8,7 +8,7 @@ from pathlib import Path
 
 from ..core.ir import Item
 from ..install import Setting
-from .base import Harness
+from .base import NEVER, Harness
 
 DEFAULTS = {  # by provider type, for providers without an explicit base_url
     "kimi": "https://api.moonshot.ai/v1",
@@ -33,9 +33,11 @@ class KimiCode(Harness):
 
     def settings(self) -> list[Setting]:
         config = Path(os.getenv("KIMI_CODE_HOME", "~/.kimi-code")).expanduser() / "config.toml"
-        providers = tomllib.loads(config.read_text()).get("providers", {}) if config.exists() else {}
+        current = tomllib.loads(config.read_text()) if config.exists() else {}
         return [
-            Setting(config, ("providers", name, "base_url"), endpoint=DEFAULTS.get(provider.get("type"), ""))
-            for name, provider in providers.items()
-            if provider.get("base_url") or provider.get("type") in DEFAULTS
+            *(Setting(config, ("providers", name, "base_url"), endpoint=DEFAULTS.get(provider.get("type"), ""))
+              for name, provider in current.get("providers", {}).items()
+              if provider.get("base_url") or provider.get("type") in DEFAULTS),
+            # Kimi Code compacts near a model's max_context_size, which must be positive.
+            *(Setting(config, ("models", name, "max_context_size"), NEVER) for name in current.get("models", {})),
         ]

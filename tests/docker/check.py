@@ -71,6 +71,42 @@ SUBAGENT2 = (f"Background notes, not needed for the task:\n{NOTES}\n\nNow have o
              f"(file_1.txt to file_8.txt) in order, comma-separated, and on a last line the project codename as "
              f"your project instructions state it now.")
 
+# `--harness-compaction`: the user's configuration makes the harness compact itself at about 20k
+# tokens; `relay install` must turn that off (Relay itself never compacts in this scenario).
+JSON_MERGE = """python3 -c 'import json, pathlib, sys; p = pathlib.Path(sys.argv[1]).expanduser(); p.parent.mkdir(parents=True, exist_ok=True)
+c = json.loads(p.read_text()) if p.exists() else {{}}; n = c
+for k in sys.argv[2].split(".")[:-1]: n = n.setdefault(k, {{}})
+n[sys.argv[2].split(".")[-1]] = json.loads(sys.argv[3]); p.write_text(json.dumps(c))' {} {} '{}'"""
+EARLY = {
+    "codex": "printf 'model_context_window = 16000\\n' >> ~/.codex/config.toml",
+    "claude_code": "export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=10",
+    # (the forced compaction at 92% of 47k; at 100% it is out of this task's reach)
+    "workbuddy": "python3 -c 'import json, pathlib; "
+                 "p = pathlib.Path.home() / \".workbuddy/models.json\"; c = json.loads(p.read_text()); "
+                 "c[\"models\"][0][\"maxInputTokens\"] = 47000; p.write_text(json.dumps(c))'",
+    "gemini_cli": JSON_MERGE.format("~/.gemini/settings.json", "model.compressionThreshold", "0.02"),
+    "pi": JSON_MERGE.format("~/.pi/agent/settings.json", "compaction", '{"reserveTokens": 252000, "keepRecentTokens": 4000}'),
+    "opencode": JSON_MERGE.format("~/.config/opencode/opencode.json", "provider.openai.models.gpt-6-luna",
+                                  '{"limit": {"context": 28000, "input": 24000, "output": 4000}}'),
+    "kilo": JSON_MERGE.format("~/.config/kilo/config.json", "provider.openai.models.gpt-6-luna",
+                              '{"limit": {"context": 28000, "input": 24000, "output": 4000}}'),
+    "crush": "sed -i 's/\"context_window\": 200000/\"context_window\": 30000/' ~/.config/crush/crush.json",
+    "goose": "echo 'GOOSE_AUTO_COMPACT_THRESHOLD: 0.01' >> ~/.config/goose/config.yaml",
+    "openclaw": JSON_MERGE.format("~/.openclaw/openclaw.json", "models.providers.openai.models",
+                                  '[{"id": "gpt-6-luna", "name": "gpt-6-luna", "contextWindow": 32000, "maxTokens": 8000}]'),
+    "kimi_code": "sed -i 's/^max_context_size = 200000/max_context_size = 30000/' ~/.kimi-code/config.toml",
+    "hermes": "sed -i 's/^model:/model:\\n  context_length: 30000/' ~/.hermes/config.yaml",
+    "nanobot": JSON_MERGE.format("~/.nanobot/config.json", "agents.defaults.contextWindowTokens", "30000"),
+    "deepseek_harness": "printf -- '- id: compaction-basic\\n  config:\\n    thresholdRatio: 0.06\\n    retainRatio: 0.02\\n' "
+                        ">> ~/.dsh/cordis.patch.yml",
+}
+# How harnesses ask for their own summary (each words it differently; Codex and Claude Code are
+# recognized by their profiles): WorkBuddy, pi, OpenCode/Kilo, Crush, Kimi Code, nanobot, Gemini
+# CLI, DeepSeek Harness, Hermes Agent, Goose.
+COMPACT_ASK = re.compile(r"structured summary|<conversation>|summary of our conversation|run out of context|"
+                         r"compact replacement checkpoint|state_snapshot|compaction engine|summarization agent|"
+                         r"summarize the conversation|\\[User\\]:", re.I)
+
 # `--native-compact`: the harness compacts its own history between the turns, as a user would,
 # with this command sent through its own continue/resume.
 NATIVE_COMPACT = {"claude_code": "/compact", "codex": "/compact", "gemini_cli": "/compress", "pi": "/compact",
@@ -318,7 +354,7 @@ SPECS = {
 
 
 def run(name: str, growth: int | None = None, retried: bool = False, probe: bool = False,
-        subagent: bool = False, window: int | None = None, native: bool = False) -> dict:
+        subagent: bool = False, window: int | None = None, native: bool = False, selfcompact: bool = False) -> dict:
     spec, harness = SPECS[name], name.split(":")[0]
     root = Path(tempfile.mkdtemp(prefix=f"relay-{name.replace(':', '-')}-", dir=os.getenv("TMPDIR")))
     home, project = root / "home", root / "project"
@@ -337,7 +373,7 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
     # Growth (every GROWTH new tokens) by default; `window` instead uses Relay's own trigger,
     # 90% of a context window of that many tokens (and 95% always).
     trigger = {"RELAY_CONTEXT_WINDOW": str(window)} if window else {
-        "RELAY_COMPACT_GROWTH": str(10**9 if probe else growth or GROWTH)}
+        "RELAY_COMPACT_GROWTH": str(10**9 if probe or selfcompact else growth or GROWTH)}
     env = {"PROMPT": first, "PROMPT2": second, **trigger, "RELAY_COMPACT_MIN_GAIN": "0"}
     container(name, root, env, f"""
         cd /project && timeout 600 {spec.command} > ~/harness.out 2> ~/harness.err < /dev/null
@@ -345,18 +381,19 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
         export PROMPT="$PROMPT2"
         sed -i s/ALPHA/BETA/ {" ".join(STATE_FILES)}
         {f"cd /project && timeout 600 {spec.resume} > ~/harness2.out 2> ~/harness2.err < /dev/null" if spec.resume else ""}
-    """)
+    """, setup=EARLY[harness] if selfcompact else "")
     if probe:
         return {"name": name, "home": str(home)}
     # Relay's own trigger compacts less often; after the harness compacted itself, turn 2 starts small.
-    result = evaluate(name, home, need=(0, 0) if window else (2, 0) if native else None)
+    result = evaluate(name, home, need=(0, 0) if window else (2, 0) if native else None, selfcompact=selfcompact)
     if not result["passed"] and result["transient"] and result["requests"] < 3 and not retried:
         time.sleep(60)  # rate-limited before the task got going: try once more
-        return run(name, growth, retried=True, subagent=subagent, window=window, native=native)
+        return run(name, growth, retried=True, subagent=subagent, window=window, native=native, selfcompact=selfcompact)
     return result
 
 
-def container(name: str, root: Path, env: dict[str, str], turns: str, timeout: int = 1500, install: bool = True) -> None:
+def container(name: str, root: Path, env: dict[str, str], turns: str, timeout: int = 1500, install: bool = True,
+              setup: str = "") -> None:
     """Run `turns` (shell) on a user's machine, in the image: HOME is root/home and /project is
     root/project; the harness is configured as the user had it (`Spec.setup`), Relay serves (its
     process id in ~/relay.pid) and, unless `install` is false, `relay install` points the
@@ -391,6 +428,7 @@ def container(name: str, root: Path, env: dict[str, str], turns: str, timeout: i
         python3 -m relay.cli serve > ~/relay.log 2>&1 & echo $! > ~/relay.pid
         until python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8787))' 2>/dev/null; do sleep 0.2; done
         cd ~ && {spec.setup}
+        {setup}
         {f"cd /relay && python3 -m relay.cli install {harness} >> ~/relay.log 2>&1" if install else ""}
         {turns}
     """
@@ -429,6 +467,23 @@ def files_read(codec, harness, items: list) -> list[int]:
     return [n for n in range(1, 9) if f"file {n} line 1:" in newest and f"file_{n}" in asked]
 
 
+def self_compactions(requests: list[dict]) -> list[str]:
+    """Requests in which the harness compacts its own history: those its profile recognizes, and
+    those whose last message asks for a summary (each harness words its own)."""
+
+    found = []
+    for n, request in enumerate(requests):
+        codec, harness = codec_for(request["path"]), detect({}, path=request["path"])
+        items = codec.items(request["body"])
+        last = harness.refine(codec.classify(items[-1])) if items else None
+        text = harness.visible(last.text) if last else ""  # not what the harness injects (skills, memory)
+        asks = last and last.kind is Kind.USER and COMPACT_ASK.search(text) \
+            and not re.match(r"\W*(Read the files|Background notes)", text)
+        if items and (harness.compacting(codec, items) or asks):
+            found.append(f"{n}: {text[:70]!r}")
+    return found
+
+
 def results(request: dict) -> list:
     """The tool results a forwarded request carries."""
 
@@ -448,8 +503,9 @@ MARK = json.dumps(SUMMARY_PREFIX)[1:61]  # how every summary starts inside a JSO
 MODEL_CALLS = ("/responses", "/chat/completions", "/messages", ":generateContent", ":streamGenerateContent")
 
 
-def evaluate(name: str, home: Path, need: tuple[int, int] | None = None) -> dict:
-    """Check a run; `need` is the (mid-turn, turn-start) compactions it must show, at least one."""
+def evaluate(name: str, home: Path, need: tuple[int, int] | None = None, selfcompact: bool = False) -> dict:
+    """Check a run; `need` is the (mid-turn, turn-start) compactions it must show, at least one
+    (with `selfcompact`, none: the harness must not compact itself either)."""
 
     def text(file: str) -> str:
         path = home / file
@@ -561,7 +617,10 @@ def evaluate(name: str, home: Path, need: tuple[int, int] | None = None) -> dict
         if "codename is BETA" in injected and "codename is BETA" not in json.dumps(request["forwarded"]):
             problems.append(f"request {n}: the latest instructions (BETA) were dropped")
     need_mid, need_start = need or (2, int(two_turns))
-    if mids < need_mid or starts < need_start or not mids + starts:
+    own = self_compactions(requests)
+    if selfcompact and own:
+        problems.append(f"the harness compacted itself {len(own)}×: {own[:2]}")
+    if not selfcompact and (mids < need_mid or starts < need_start or not mids + starts):
         problems.append(f"compacted {mids}× mid-turn and {starts}× at a turn start (need {need_mid} and {need_start})")
     # A conversation reading a file it already read (agents splitting work may overlap: not a re-read).
     first_read: dict[tuple, str] = {}  # (conversation, file) -> the tool result that returned it
@@ -594,6 +653,7 @@ def evaluate(name: str, home: Path, need: tuple[int, int] | None = None) -> dict
         "resume_reused": resume_reused,
         "other_conversations": others,
         "cache_hits": hits,  # requests that found their conversation's stored compaction (Relay's record)
+        "self_compactions": len(own),
         "sub_compactions": sum("CODE: amber" not in json.dumps(r["body"]) for r in compacting),  # e.g. in sub-agents
         # The codename the harness itself last sent (Kimi Code keeps a session's instructions).
         "told": next((c for r in reversed(requests) for c in ("BETA", "ALPHA") if f"codename is {c}" in json.dumps(r["body"])), None),
@@ -608,7 +668,7 @@ def evaluate(name: str, home: Path, need: tuple[int, int] | None = None) -> dict
 
 def show(result: dict) -> None:
     print(f"\n== {result['name']}: {'PASS' if result['passed'] else 'FAIL'}  ({result['home']})")
-    for key in ("requests", "mid_turn", "turn_start", "resume_reused", "cache_hits", "other_conversations", "sub_compactions", "told", "codename",
+    for key in ("requests", "mid_turn", "turn_start", "resume_reused", "cache_hits", "other_conversations", "self_compactions", "sub_compactions", "told", "codename",
                 "tokens_before", "transient", "answers", "problems", "errors"):
         if result[key] or key not in {"problems", "errors"}:
             print(f"  {key}: {result[key]}")
@@ -623,12 +683,14 @@ def main() -> int:
     parser.add_argument("--subagent", action="store_true", help="turn 2 hands three files to a sub-agent")
     parser.add_argument("--window", type=int, help="use Relay's own trigger for a context window of this size")
     parser.add_argument("--native-compact", action="store_true", help="the harness compacts itself between the turns")
+    parser.add_argument("--harness-compaction", action="store_true",
+                        help="the harness's own auto-compaction set to fire early; it must stay off")
     options = parser.parse_args()
     names = options.names or (list(SPECS) if options.matrix else parser.error("name a spec or use --matrix"))
     results = []
     for name in names:
         results.append(run(name, options.growth, probe=options.probe, subagent=options.subagent, window=options.window,
-                           native=options.native_compact))
+                           native=options.native_compact, selfcompact=options.harness_compaction))
         if options.probe:
             print(f"== {name}: probe recorded  ({results[-1]['home']})")
         else:

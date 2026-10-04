@@ -19,7 +19,7 @@ from ..core.ir import Item, Kind
 from ..install import Setting
 from ..prompts import SUMMARY_PREFIX
 from ..protocols.base import Codec, WireItem
-from .base import Harness, State
+from .base import NEVER, Harness, State
 
 CONTEXT_MARKERS = (
     "<environment_context>",
@@ -140,7 +140,11 @@ class Codex(Harness):
         auth = home / "auth.json"
         chatgpt = auth.exists() and json.loads(auth.read_text()).get("auth_mode") == "chatgpt"
         default = "https://chatgpt.com/backend-api/codex" if chatgpt else "https://api.openai.com/v1"
-        return [Setting(home / "config.toml", ("openai_base_url",), endpoint=default)]
+        # Codex compacts at its limit, capped at 90% of the context window it assumes: both out of
+        # reach (its context-left meter then reads near 100%).
+        return [Setting(home / "config.toml", ("openai_base_url",), endpoint=default),
+                Setting(home / "config.toml", ("model_auto_compact_token_limit",), NEVER),
+                Setting(home / "config.toml", ("model_context_window",), NEVER)]
 
     def launch(self, relay_url: str, args: list[str]) -> tuple[list[str], dict[str, str]]:
         provider = (

@@ -20,6 +20,9 @@ from ..protocols.base import Codec, WireItem
 # Claude Code and the harnesses modelled on it (Kimi Code, CodeBuddy, OpenCode, DeepSeek
 # Harness) inject context as user messages made of these blocks, at times with attributes.
 REMINDER = re.compile(r"<system-reminder\b[^>]*>.*?</system-reminder>", re.S)
+# A size no session reaches. `relay install` turns each harness's own auto-compaction off (Relay
+# compacts instead); where the harness has no switch, its trigger size is set to this.
+NEVER = 10**9
 
 
 @dataclass(frozen=True)

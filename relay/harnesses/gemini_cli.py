@@ -10,7 +10,7 @@ from pathlib import Path
 from ..core.ir import Item, Kind
 from ..install import Setting
 from ..protocols.base import Codec, WireItem, canonical_json
-from .base import REMINDER, Harness
+from .base import NEVER, REMINDER, Harness
 
 CONTEXT_PREFIX = "This is the Gemini CLI. We are setting up the context"
 
@@ -43,5 +43,6 @@ class GeminiCli(Harness):
         return keys
 
     def settings(self) -> list[Setting]:
-        env = Path("~/.gemini/.env").expanduser()
-        return [Setting(env, ("GOOGLE_GEMINI_BASE_URL",), endpoint="https://generativelanguage.googleapis.com")]
+        env, settings = Path("~/.gemini/.env").expanduser(), Path("~/.gemini/settings.json").expanduser()
+        return [Setting(env, ("GOOGLE_GEMINI_BASE_URL",), endpoint="https://generativelanguage.googleapis.com"),
+                Setting(settings, ("model", "compressionThreshold"), NEVER)]  # a share of the window

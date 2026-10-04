@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from relay import install
+from relay.harnesses import HARNESSES
 from relay.install import Setting
 from relay.providers import route, upstreams_from_env
 
@@ -51,6 +53,34 @@ class InstallTests(unittest.TestCase):
             self.assertEqual((self.root / name).read_text().strip(), text.strip() if name != "a.json"
                              else json.dumps(json.loads(text), indent=2))
         self.assertEqual(install.mounts(), {})
+
+    def test_harness_auto_compaction_is_turned_off_and_restored(self) -> None:
+        """Relay compacts instead: each harness's own trigger is switched off (or set beyond reach)
+        in its own format, next to what the user had, and uninstall puts it back."""
+
+        files = {
+            "codex/config.toml": 'model = "gpt-6-luna"\n\n[mcp_servers.docs]\ncommand = "docs"\n',
+            "kimi/config.toml": '[providers.test]\ntype = "openai_responses"\n\n[models.test]\nprovider = "test"\n'
+                                'max_context_size = 200000\n',
+            "hermes/config.yaml": "model:\n  default: gpt-6-luna\n  provider: openai-api\n",
+            "dsh/cordis.patch.yml": "- id: compaction-basic\n  config:\n    thresholdRatio: 0.7\n",
+        }
+        for name, text in files.items():
+            (self.root / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / name).write_text(text)
+        env = {"CODEX_HOME": "codex", "KIMI_CODE_HOME": "kimi", "HERMES_HOME": "hermes", "DSH_HOME": "dsh"}
+        with patch.dict(os.environ, {key: str(self.root / value) for key, value in env.items()}):
+            for name in ("codex", "kimi_code", "hermes", "deepseek_harness"):
+                install.install(name, "http://127.0.0.1:8787", HARNESSES[name].settings())
+            codex = tomllib.loads((self.root / "codex/config.toml").read_text())
+            self.assertEqual((codex["model_auto_compact_token_limit"], codex["mcp_servers"]), (10**9, {"docs": {"command": "docs"}}))
+            self.assertIn("max_context_size = 1000000000", (self.root / "kimi/config.toml").read_text())
+            self.assertIn("compression:\n  enabled: false", (self.root / "hermes/config.yaml").read_text())
+            self.assertIn("thresholdRatio: 0.7\n    auto: false", (self.root / "dsh/cordis.patch.yml").read_text())
+            for name in ("deepseek_harness", "hermes", "kimi_code", "codex"):
+                install.uninstall(name)
+        for name, text in files.items():
+            self.assertEqual((self.root / name).read_text(), text, name)
 
     def test_nested_yaml_and_list_items(self) -> None:
         patch_file = self.root / "cordis.patch.yml"
