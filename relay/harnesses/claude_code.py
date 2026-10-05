@@ -25,6 +25,10 @@ SUMMARY_PREFIX = "This session is being continued from a previous conversation"
 COMPACT_PROMPT = "Your task is to create a detailed summary of the conversation so far"  # `/compact`, auto-compact
 
 
+def settings_file() -> Path:
+    return Path(os.getenv("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser() / "settings.json"
+
+
 class ClaudeCode(Harness):
     name = "claude_code"
     injected = (REMINDER, COMMAND)
@@ -57,9 +61,8 @@ class ClaudeCode(Harness):
         return None
 
     def settings(self) -> list[Setting]:
-        home = Path(os.getenv("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser()
-        return [Setting(home / "settings.json", ("env", "ANTHROPIC_BASE_URL"), endpoint="https://api.anthropic.com"),
-                Setting(home / "settings.json", ("env", "DISABLE_AUTO_COMPACT"), "1")]  # `/compact` still works
+        return [Setting(settings_file(), ("env", "ANTHROPIC_BASE_URL"), endpoint="https://api.anthropic.com"),
+                Setting(settings_file(), ("env", "DISABLE_AUTO_COMPACT"), "1")]  # `/compact` still works
 
     def launch(self, relay_url: str, args: list[str]) -> tuple[list[str], dict[str, str]]:
         return ["claude", *args], {"ANTHROPIC_BASE_URL": relay_url}

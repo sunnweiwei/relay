@@ -1,0 +1,5 @@
+{
+  "name": "relay",
+  "owner": {"name": "Relay"},
+  "plugins": [{"name": "relay", "source": "./relay", "description": "Relay's context strategy as Claude Code's compaction."}]
+}

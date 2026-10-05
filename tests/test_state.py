@@ -82,17 +82,16 @@ class StateTests(unittest.TestCase):
         mode = msg("user", "<system-reminder>\nAuto permission mode is active.\n</system-reminder>")
         return [msg("user", "task"), date, mode, *step(1), msg("assistant", "done"), *extra]
 
-    def test_the_latest_restated_state_and_what_it_supersedes(self) -> None:
+    def test_the_latest_restated_state(self) -> None:
         plan = msg("user", "<system-reminder>\nPlan mode is active.\n</system-reminder>")
         state = KimiCode().state(CODEC, self.kimi(msg("user", "next"), plan, *step(2)))
         self.assertEqual([i.ref for i in state.items], [1, 7])  # the date, and the newest mode
-        self.assertEqual(state.supersedes, {1, 2, 7})
 
     def test_without_named_state_the_context_before_the_first_action_is_kept(self) -> None:
         items = [msg("developer", "rules"), msg("user", "<system-reminder>cwd /p</system-reminder>"),
                  msg("user", "task"), *step(1), msg("user", "<system-reminder>later</system-reminder>")]
         state = Harness().state(CODEC, items)
-        self.assertEqual(([i.ref for i in state.items], state.supersedes), ([0, 1], frozenset()))
+        self.assertEqual([i.ref for i in state.items], [0, 1])
 
     def test_deepseek_runtime_snapshots_and_instruction_updates(self) -> None:
         items = [msg("developer", "rules"), msg("user", "task"),

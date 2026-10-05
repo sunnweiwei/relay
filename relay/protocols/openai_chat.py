@@ -9,8 +9,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..core.ir import Item, Kind
-from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, error_message, json_text
+from ..core.ir import Item, Kind, Media
+from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, data_media, data_url, error_message, json_text
 
 
 # Message fields that reach the model, including common provider extensions for reasoning.
@@ -37,7 +37,7 @@ class OpenAIChat:
         if role in {"system", "developer"}:
             return Item(Kind.SYSTEM, text)
         if role in {"tool", "function"}:
-            return Item(Kind.TOOL_RESULT, text)
+            return Item(Kind.TOOL_RESULT, text, media=media)
         if role == "assistant":
             calls = [c.get("function") or {} for c in item.get("tool_calls") or []]
             if calls:
@@ -82,6 +82,50 @@ class OpenAIChat:
     def user_message(self, text: str) -> WireItem:
         return {"role": "user", "content": text}
 
+    def write(self, item: Item) -> WireItem:
+        if item.kind is Kind.ASSISTANT and not item.media:
+            return {"role": "assistant", "content": item.text}
+        if item.kind in (Kind.USER, Kind.SUMMARY, Kind.CONTEXT):
+            return {"role": "user", "content": _content(item.text, item.media)}
+        raise ValueError(f"Relay cannot write a {item.kind.value} item")
+
+    def edit(self, wire: WireItem, text: str, media: tuple[Media, ...]) -> WireItem:
+        if wire.get("tool_calls") or wire.get("function_call") or (media and wire.get("role") == "assistant"):
+            raise ValueError("the content of a tool call cannot change on its own")
+        return {**wire, "content": _content(text, media)}
+
+    def legal(self, items: list[WireItem]) -> str | None:
+        """The tool messages answering an assistant message's calls follow it, and only them."""
+
+        waiting: set[str] = set()
+        for index, item in enumerate(items):
+            if item.get("role") == "tool":
+                if item.get("tool_call_id") not in waiting:
+                    return f"message {index} answers a tool call that is not waiting for it"
+                waiting.discard(item.get("tool_call_id"))
+                continue
+            if waiting:
+                return f"tool calls {sorted(waiting)} are not answered"
+            if item.get("role") == "assistant":
+                waiting = {call.get("id") for call in item.get("tool_calls") or []}
+        return f"tool calls {sorted(waiting)} are not answered" if waiting else None
+
+    def note(self, items: list[WireItem], text: str) -> list[WireItem]:
+        return [*items, self.user_message(text)]
+
+    def offers_tools(self, body: Body) -> bool:
+        return bool(body.get("tools"))
+
+    def with_instructions(self, body: Body, text: str) -> Body:
+        messages = list(body.get("messages") or [])
+        if messages and messages[0].get("role") in ("system", "developer"):
+            content = messages[0].get("content")
+            content = [*content, {"type": "text", "text": text}] if isinstance(content, list) else f"{content}\n\n{text}"
+            messages[0] = {**messages[0], "content": content}
+        else:
+            messages.insert(0, {"role": "system", "content": text})
+        return {**body, "messages": messages}
+
     def preamble(self, body: Body) -> str:
         return json.dumps(body.get("tools") or [], ensure_ascii=False)
 
@@ -121,13 +165,38 @@ class OpenAIChat:
         )
 
 
-def _content_text(content: Any) -> tuple[str, bool]:
+def _content_text(content: Any) -> tuple[str, tuple[Media, ...]]:
     if isinstance(content, str):
-        return content, False
-    texts, media = [], False
+        return content, ()
+    texts, media = [], []
     for part in content or []:
-        if isinstance(part, dict) and isinstance(part.get("text"), str):
+        if not isinstance(part, dict):
+            continue
+        if isinstance(part.get("text"), str):
             texts.append(part["text"])
-        elif isinstance(part, dict):
-            media = True
-    return "\n".join(texts), media
+        elif part.get("type") == "image_url":
+            url = part.get("image_url")
+            media.append(data_media("image", url.get("url", "") if isinstance(url, dict) else str(url or "")))
+        elif part.get("type") == "input_audio" and isinstance(part.get("input_audio"), dict):
+            audio = part["input_audio"]
+            media.append(Media("audio", f"audio/{audio.get('format', '')}", audio.get("data") or ""))
+        elif part.get("type") == "file" and isinstance(part.get("file"), dict):
+            file = part["file"]
+            media.append(data_media("file", file.get("file_data") or file.get("file_id") or ""))
+        else:
+            media.append(Media(str(part.get("type"))))
+    return "\n".join(texts), tuple(media)
+
+
+def _content(text: str, media: tuple[Media, ...]) -> str | list[dict[str, Any]]:
+    if not media:
+        return text
+    parts: list[dict[str, Any]] = [{"type": "text", "text": text}] if text else []
+    for m in media:
+        if m.type == "image":
+            parts.append({"type": "image_url", "image_url": {"url": data_url(m)}})
+        elif m.type == "audio":
+            parts.append({"type": "input_audio", "input_audio": {"data": m.data, "format": m.mime.split("/")[-1]}})
+        else:
+            parts.append({"type": "file", "file": {"file_data": data_url(m)} if m.data else {"file_id": m.url}})
+    return parts

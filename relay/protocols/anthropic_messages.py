@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..core.ir import Item, Kind
+from ..core.ir import Item, Kind, Media
 from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, decoded, error_message
 
 SUMMARY_MAX_TOKENS = 32_000
@@ -42,9 +42,10 @@ class AnthropicMessages:
             if types <= {"thinking", "redacted_thinking"}:
                 return Item(Kind.REASONING, text, opaque=opaque)
             return Item(Kind.ASSISTANT, text, opaque=opaque)
+        media = tuple(m for block in blocks for m in _media(block))
         if "tool_result" in types:
-            return Item(Kind.TOOL_RESULT, text)
-        return Item(Kind.USER, text, media=bool(types - {"text"}))
+            return Item(Kind.TOOL_RESULT, text, media=media)
+        return Item(Kind.USER, text, media=media)
 
     def canonical(self, item: WireItem) -> bytes:
         """Clients move `cache_control` to the newest message and may resend a
@@ -69,6 +70,60 @@ class AnthropicMessages:
 
     def user_message(self, text: str) -> WireItem:
         return {"role": "user", "content": [{"type": "text", "text": text}]}
+
+    def write(self, item: Item) -> WireItem:
+        if item.kind is Kind.ASSISTANT and not item.media:
+            return {"role": "assistant", "content": [{"type": "text", "text": item.text}]}
+        if item.kind in (Kind.USER, Kind.SUMMARY, Kind.CONTEXT):
+            return {"role": "user", "content": _content(item.text, item.media)}
+        raise ValueError(f"Relay cannot write a {item.kind.value} item")
+
+    def edit(self, wire: WireItem, text: str, media: tuple[Media, ...]) -> WireItem:
+        """The text blocks become one; thinking stays as it was (its signature verifies it).
+        A user message's tool results share the new content: the first carries it."""
+
+        blocks = _blocks(wire.get("content"))
+        if wire.get("role") == "assistant":
+            if media or any(b.get("type") in {"tool_use", "server_tool_use"} for b in blocks):
+                raise ValueError("the content of a tool call cannot change on its own")
+            thinking = [b for b in blocks if b.get("type") in {"thinking", "redacted_thinking"}]
+            return {**wire, "content": [*thinking, {"type": "text", "text": text}]}
+        results = [b for b in blocks if b.get("type") == "tool_result"]
+        if not results:
+            return {**wire, "content": _content(text, media)}
+        content = [{**results[0], "content": _content(text, media)},
+                   *({**b, "content": ""} for b in results[1:])]
+        return {**wire, "content": content}
+
+    def legal(self, items: list[WireItem]) -> str | None:
+        """Each tool use is answered in the very next message, and each result answers one."""
+
+        asked: set[str] = set()
+        for index, item in enumerate(items):
+            blocks = _blocks(item.get("content"))
+            answered = {b.get("tool_use_id") for b in blocks if b.get("type") == "tool_result"}
+            if not answered <= asked:
+                return f"message {index} answers a tool use the message before it does not make"
+            if asked - answered:
+                return f"tool uses {sorted(asked - answered)} are not answered in the next message"
+            asked = {b.get("id") for b in blocks if b.get("type") == "tool_use"} if item.get("role") == "assistant" else set()
+        return f"tool uses {sorted(asked)} are not answered" if asked else None
+
+    def note(self, items: list[WireItem], text: str) -> list[WireItem]:
+        if not items or items[-1].get("role") != "user":
+            return [*items, self.user_message(text)]
+        content = items[-1].get("content")
+        blocks = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
+        return [*items[:-1], {**items[-1], "content": [*blocks, {"type": "text", "text": text}]}]
+
+    def offers_tools(self, body: Body) -> bool:
+        return bool(body.get("tools"))
+
+    def with_instructions(self, body: Body, text: str) -> Body:
+        system = body.get("system")
+        if isinstance(system, list):
+            return {**body, "system": [*system, {"type": "text", "text": text}]}
+        return {**body, "system": f"{system}\n\n{text}" if system else text}
 
     def preamble(self, body: Body) -> str:
         system = body.get("system") or ""
@@ -148,6 +203,30 @@ def _block_text(block: dict[str, Any]) -> str:
             return content
         return "\n".join(_block_text(inner) for inner in _blocks(content))
     return ""
+
+
+def _media(block: dict[str, Any]) -> list[Media]:
+    """The images and documents of a block, a tool result's included."""
+
+    kind = block.get("type")
+    if kind == "tool_result":
+        content = block.get("content")
+        return [m for inner in _blocks(content) for m in _media(inner)] if isinstance(content, list) else []
+    if kind not in {"image", "document"}:
+        return []
+    source = block.get("source") or {}
+    media_type = "image" if kind == "image" else "file"
+    return [Media(media_type, source.get("media_type", ""), source.get("data", "") if source.get("type") == "base64" else "",
+                  source.get("url") or source.get("file_id") or "")]
+
+
+def _content(text: str, media: tuple[Media, ...]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = [{"type": "text", "text": text}] if text or not media else []
+    for m in media:
+        source = ({"type": "base64", "media_type": m.mime, "data": m.data} if m.data
+                  else {"type": "url", "url": m.url} if "://" in m.url else {"type": "file", "file_id": m.url})
+        blocks.append({"type": "image" if m.type == "image" else "document", "source": source})
+    return blocks
 
 
 def _without_cache_control(block: dict[str, Any]) -> dict[str, Any]:

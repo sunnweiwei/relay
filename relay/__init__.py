@@ -1,6 +1,6 @@
 """Relay: transparent context management between agent harnesses and model APIs."""
 
-from .core import Engine, Item, Kind, PrefixStore, Rewrite, View
+from .core import Context, Engine, Item, Kind, Media, PrefixStore, Request
 from .harnesses import HARNESSES, Harness
 from .protocols import CODECS, Codec
 from .providers import Upstream
@@ -12,15 +12,16 @@ __all__ = [
     "HARNESSES",
     "Codec",
     "Compaction",
+    "Context",
     "Engine",
     "Harness",
     "Item",
     "Kind",
+    "Media",
     "PrefixStore",
     "ProxyConfig",
-    "Rewrite",
+    "Request",
     "Strategy",
     "Upstream",
-    "View",
     "create_app",
 ]

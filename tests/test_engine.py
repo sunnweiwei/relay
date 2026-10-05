@@ -6,7 +6,7 @@ import unittest.mock
 from typing import Any
 
 from relay.core.engine import Engine
-from relay.core.ir import Rewrite
+from relay.core.ir import Context
 from relay.core.tokens import approx_tokens
 from relay.harnesses import ClaudeCode, Codex, Harness
 from relay.prompts import SUMMARY_PREFIX
@@ -159,21 +159,25 @@ class EngineTests(unittest.TestCase):
         self.engine.prepare(CODEC, HARNESS, request, tenant="other", post=upstream)
         self.assertEqual(len(upstream.requests), 2)
 
-    def test_invalid_rewrites_are_rejected(self) -> None:
+    def test_a_context_the_api_would_reject_is_not_sent(self) -> None:
         class Broken:
             name = "broken"
 
             def fingerprint(self) -> dict[str, Any]:
                 return {}
 
-            def plan(self, view, summarizer):  # noqa: ANN001
-                return Rewrite(1, ())  # splits a call from its output
+            def plan(self, request, summarizer):  # noqa: ANN001
+                return Context(request.current[1:])  # an output without its call
 
         engine = Engine(Broken())
         request = body(*step(1))
         with self.assertLogs("relay", "WARNING"):
             exchange = engine.prepare(CODEC, HARNESS, request, tenant="t", post=Upstream())
         self.assertIs(exchange.body, request)
+        # A history the check would refuse as the harness sent it (an output whose call an
+        # aborted turn lost) is the API's to judge: the strategy's context goes through.
+        orphan = body(msg("user", "task"), step(0)[1], *step(1))
+        self.assertTrue(engine.prepare(CODEC, HARNESS, orphan, tenant="t", post=Upstream()).compacted)
 
 
 if __name__ == "__main__":

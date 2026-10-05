@@ -8,7 +8,8 @@ Relay is a context-management layer between agent harnesses and model APIs. It
 runs as a local proxy: the harness keeps its normal append-only loop and sends its
 whole history on every request; Relay decides what the model actually sees and
 forwards that instead. One strategy written against Relay's protocol-neutral view
-therefore works for every supported harness and model.
+therefore works for every supported harness and model. Where a harness offers a native
+hook, the same strategy can run through it instead (see [Integration paths](#integration-paths)).
 
 The first strategy is **Codex-style context compaction**: when the prompt reaches a
 threshold, the history is summarized with Codex's own compaction prompt and replaced
@@ -23,6 +24,7 @@ relay install codex        # or: claude, gemini_cli, pi, opencode, kilo, crush,
                            #     openclaw, kimi_code, goose
 codex                      # use the harness exactly as before
 relay uninstall codex      # restore its configuration
+relay install claude --via hook   # Claude Code: its compaction hook instead of the proxy
 ```
 
 `relay install` edits the harness's own configuration file. It wraps whatever endpoint
@@ -56,38 +58,101 @@ strategy is the one that runs (see [Harness auto-compaction](#harness-auto-compa
 ## Architecture
 
 ```
- harness request ─► codec (protocol) ─► harness profile ─► View ─► strategy ─► Rewrite
-                    items, legal cuts    injected context,   the conversation   cut + head
-                                         identity, state     only
- upstream ◄─ codec (legal placement) ◄─ harness profile (state placed into the head) ◄─┘
+ harness request ─► codec (protocol) ─► harness profile ─► Request ─► strategy ─► Context
+                    items, media,        injected context,   the conversation:    the items the
+                    legal cuts           identity, state     as sent, as seen     model sees
+ upstream ◄─ codec (written, checked) ◄─ harness profile (its own items placed) ◄────┘
 ```
 
 Three layers keep strategies free of harness and protocol details:
 
-- the **codec** knows the wire protocol: items, legal cuts, how a message is written, and
-  where the protocol allows system messages;
+- the **codec** knows the wire protocol: items (their text and media), legal cuts, how a
+  message is written, how an item gets new content with its structure kept (a tool result
+  still answers its call), what the API would reject, and where it allows system messages;
 - the **harness profile** knows what the harness writes itself: which items are injected
   context (`refine`), what makes two requests the same conversation for the prefix store
   (`identity`, robust to instructions re-rendered in place and resumed histories), the
   harness's current state (`state`: its instructions, environment, modes at their latest
-  version, and the history items that state supersedes), where that state goes in a
-  rewritten history (`place`), and which requests are the harness compacting itself
-  (`compacting`: they get the stored compaction but never a new one);
+  version), where that state goes after a compaction (`place`), and which requests are the
+  harness compacting itself (`compacting`: they get the stored context but never a new one);
 - the **strategy** sees only the conversation (user, assistant, tool items and summaries)
-  and decides what to keep and what to write. Every rewrite gets the harness's current
-  state placed into it, so a new strategy inherits that, and cache hits, for free.
+  and decides, on every request, what the model sees. The harness's own items are put back
+  into every answer where the harness sent them (after a summary, where the harness puts its
+  state after its own compaction), so a new strategy inherits that, and cache hits, for free.
 
 | Module | Responsibility |
 | --- | --- |
-| `relay/core/ir.py` | The protocol-neutral `Item` / `View` / `Rewrite` a strategy works with. Items keep a reference to their wire item, so whatever a strategy keeps is forwarded byte-for-byte. |
+| `relay/core/ir.py` | The strategy contract: `Item` (kind, text, media), `Request` and `Context`. Items keep a reference to their wire item, so whatever a strategy keeps is forwarded byte-for-byte. |
 | `relay/protocols/` | One codec per wire protocol (OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, Gemini): item kinds and text, legal cut points (never between a tool call and its result), prefix canonicalization, synthetic messages, summary requests, usage and overflow errors. |
 | `relay/harnesses/` | Harness profiles: injected context, conversation identity, current state and its placement, the harness's own compaction requests, detection from request headers, and the settings `relay install` writes. |
 | `relay/install.py` | `relay install` / `uninstall`: reversible edits of JSON, TOML, YAML and `.env` config files, and the endpoint mounts Relay forwards. |
-| `relay/strategies/` | Strategies. `compaction.py` ports Codex's local compaction. |
-| `relay/core/engine.py` | Per-request orchestration: restore the stored rewrite, estimate tokens, plan on the conversation, place the harness's state, remember. It records each request's cache decision (matched depth) and warns when a request no longer reaches its conversation's last compaction, with the item where it diverged. Strategy failures never reach the harness; the request is forwarded with the last good rewrite. |
-| `relay/core/store.py` | Exact-prefix store (a trie over item identities): a rewrite computed for one request is found again by every later request that extends the same history, including other conversations forked from it (sub-agents). Relay keeps no other session state. |
+| `relay/strategies/` | Strategies. `compaction.py` ports Codex's local compaction; `clm.py` lets the model edit its own context (Context Language Models). |
+| `relay/core/engine.py` | Per-request orchestration: restore the stored context, estimate tokens, ask the strategy, place the harness's own items, check the result, remember. It records each request's cache decision (matched depth) and warns when a request no longer reaches its conversation's last stored context, with the item where it diverged. Strategy failures never reach the harness; the request is forwarded with the last good context. |
+| `relay/core/store.py` | Exact-prefix store (a trie over item identities): a context computed for one request is found again by every later request that extends the same history, including other conversations forked from it (sub-agents). Relay keeps no other session state. |
 | `relay/providers.py` | Upstream routing (installed mounts, else by path) and model context windows. |
 | `relay/transport/proxy.py` | The HTTP proxy. Responses, including streams, are relayed unchanged. |
+| `relay/integrations/` | Integration paths: the proxy, and native hooks (Claude Code's compaction hook and its plugin). Each maps a strategy onto a harness: what `relay install` writes, and for a hook, the harness's transcript as a `Request`. |
+| `relay/transport/hooks.py` | The endpoint hooks call (`/relay/v1/compact`), served by `relay serve` next to the proxy. |
+
+### Integration paths
+
+A strategy is written once, against the `Request`, and decides on every request; an integration
+path decides how that runs inside a harness. Every path shows the strategy the conversation before
+every request, makes its context take effect, and makes the summaries it asks for. The **proxy**
+does it in every harness: the harness keeps its full history, Relay stores the context and applies
+it to each request. A **hook** runs inside the harness and leaves its model endpoint alone; a
+compaction hook writes the context into the harness's own history, which then serves as the store
+(there `history` is the transcript as it stands, so it equals `current`).
+The paths differ in what they can see and write, never in what the strategy decides: a compaction
+hook sees the harness's transcript (not its system prompt, tools or injected context), keeps
+messages whole or writes text messages, and every change is a real compaction to the harness (it
+re-injects its context, shows it, keeps it on resume). What a path cannot carry fails loudly
+instead of being dropped. Each harness lists its paths in order of preference,
+and `relay install --via auto` takes the first; `--via proxy|hook` names one.
+
+**Claude Code's compaction hook** (`relay install claude --via hook`, Claude Code 2.1.274+): the
+install enables a function-hook plugin (an early-access feature, switched on by
+`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`), moves Claude Code's auto-compaction trigger to the bottom
+(`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=0.01`, its window left as it is), and leaves `ANTHROPIC_BASE_URL`
+alone, so Remote Control (which refuses any other endpoint) and every login keep working. Claude
+Code then compacts, through the hook, before every request: the plugin posts the transcript and the
+size of Claude Code's last request to Relay, and the strategy decides on it as it would through
+the proxy, on that size plus what was added since. "Not now" skips the compaction (it leaves
+nothing in the transcript or the requests); a new context is kept by Claude Code, which
+re-injects its own context after it. Claude Code would have compacted at the latest 33k tokens below
+its window and blocks a few thousand later, so past that the strategy decides as if forced. The summary
+request is `$.model.fork`: the conversation as Claude Code last sent it (system prompt, tools,
+history, its latest reply) with Codex's prompt after it, which is Codex's own summary request;
+tool results not sent yet (mid-turn) follow in that prompt as text. The fork reaches the trigger
+too and runs uncompacted, as Codex's summary request does. A history a fork cannot see (a
+sub-agent's, or one a resumed process compacts before its first request) is summarized from a
+rendering in a plain completion. When Relay does not answer, nothing happens, unless Claude Code is
+near its own limit, where its own compaction runs. The hook carries the conversation and the
+strategy's state (kept by Relay per session and agent); a strategy's instructions, its notes (see
+CLM) and new content for a message Claude Code keeps make the hook fail, so such a strategy runs
+through the proxy. Claude Code's function hooks could carry instructions too (`prompt.section`
+adds to a system-prompt section); that is not used yet. Proxy stays Claude Code's
+default path: it follows Codex's timing exactly and continues each sub-agent's own conversation
+for its summary. Whether Claude Code's interactive UI shows a low-context warning with the trigger
+at the bottom is not verified.
+
+Checked in Docker (`check.py --via hook claude_code:gpt`, Relay off the model path and a second,
+non-compacting Relay recording it): Claude Code asked before every request and the strategy
+compacted only at its own threshold (30k: at 31.0k, 32.7k and 31.0k; with the current contract
+again at 31.0k at a turn start, and at 30.8k and 33.4k mid-turn with `--file-lines 200`), at a turn
+start and mid-turn (`--file-lines 240`), each with one summary request, a fork of the whole conversation (at a turn
+start in a process that had already sent requests; `claude -c` starts a new one, which fell back to
+the rendering); every summary kept the codes read, later requests carried only the latest summary
+and none of the summarized output, Claude Code never compacted on its own, nothing was read twice,
+and both answers were right.
+
+Other harnesses' native interfaces, for later paths: OpenClaw's `contextEngine` plugin slot
+(`assemble` builds each request, `compact` owns compaction), pi's extensions (`context` and
+`before_provider_request` rewrite each request, `session_before_compact`), Hermes Agent's context
+engine and request middleware, OpenCode and Kilo's `experimental.chat.messages.transform`, DeepSeek
+Harness's compaction backends, mini-swe-agent's model class. Codex, Gemini CLI, Kimi Code,
+CodeBuddy, Goose and Crush only offer hooks that observe or block (Gemini CLI's `BeforeModel` sees
+text parts only), so they run through the proxy.
 
 Relay never translates between protocols: a request is forwarded in the protocol the
 harness spoke. Models are reached through any provider that serves that protocol.
@@ -166,15 +231,62 @@ request; the summary request keeps the tool definitions with tool calls disabled
 for one summary request is summarized piece by piece instead of dropping its oldest items;
 and an empty summary is a failed compaction rather than "(no summary available)".
 
+## Context Language Models
+
+`RELAY_STRATEGY=clm` lets the model manage its own context, as in
+[Context Language Models](https://arxiv.org/abs/2609.37725) (`relay/strategies/clm.py`). Before
+every request the conversation is mirrored to a file; the model edits it with its ordinary tools
+(a Python one-liner, `sed`, its file-edit tool); on the next request the edited file is its
+context. What the model reads follows the paper's harness (facebookresearch/context-language-models):
+its "Managing your context" section added to the system prompt, the size readout ending every
+request (`[context: ~N/limit tokens]`), nudges at 25%, 50% and 75% of the budget (from 50% with the
+paper's note contract: copy facts forward, mark values verified, end with a NEXT line; at 75% "do
+not wipe"), an urgent nudge on every request past 90% of the limit, and the paper's default edit
+gate, which refuses an edit that grows the context past the limit. The system prompt and the
+original task are protected, as there: they stay out of the file. The file's format follows pi-clm,
+the authors' adaptation of CLM to a coding harness: a metadata line, then one
+`[[CTX_TURN ... id=...]]` block per turn. Untouched blocks stay the original items, byte for byte
+(tool calls, reasoning and images intact); an edited user, assistant or tool-result turn keeps its
+place with the new text (a result still answers its call, and keeps its images); an edited tool
+call or reasoning item, and every block the model adds (`id=new-*`, any role label), becomes a
+user-role note labelled with the role; a tool call left without its result (or the reverse) becomes
+a note as well, and reasoning stays only right before the item it preceded, so the request stays
+legal for its protocol. A file without block headers replaces everything after the task with one
+note. The edited context is stored like any other, so it holds for every later request of the
+conversation; the harness's own context (instructions, environment, reminders) stays out of the
+file and where the harness sent it, which also keeps the system prompt's cache. Two changes adapt the paper's loop, which ran until the task was submitted, to
+chat harnesses, which end the turn on the first reply without a tool call: the instructions say
+that receipts, readouts and nudges come from the context manager and that the user's request
+goes on after them, and the urgent nudge says "compact … before anything else, … then continue
+the task" where the paper says "do nothing else". Requests that offer no tools (titles, quota
+checks) are left alone, and each conversation (a sub-agent's too) has its own file.
+
+Verified in Docker (`tests/docker/check.py --strategy clm`, the two-turn file-reading task with a
+26k budget): Codex made 7 edits over 27 requests and Claude Code 6 over 21, both answered both
+turns right, and no request or edit was refused. The models mostly shortened old tool results in
+place (Codex's first edit: four of them, their calls still structured calls). Every accepted edit
+held exactly on the requests up to the next one: kept turns were the original items, turns with
+new text carried it, removed turns stayed gone, the model's notes were there, and the harness's
+own items kept their places.
+
+Limits: Relay must run on the machine whose files the harness's tools edit (the paper's sandbox
+mirror); the edit is read back at the next request, so the turn that made it stays in the context
+until the model removes it (as in pi-clm); revisions live in Relay's in-memory store, so a restart
+returns the model to its raw history; through Claude Code's hook the instructions and notes cannot
+be delivered, so CLM runs through the proxy.
+
 ## Configuration
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
+| `RELAY_STRATEGY` | `compaction` | The strategy: `compaction` (Codex's) or `clm` (the model edits its own context). |
 | `RELAY_COMPACT_THRESHOLD` | `RELAY_COMPACT_RATIO` × context window | Prompt tokens that trigger compaction. |
 | `RELAY_COMPACT_RATIO` | `0.9` | Share of the model's context window used when no threshold is set. |
 | `RELAY_COMPACT_GROWTH` | unset | Instead of a threshold, compact after this many tokens were added since the context window began (Codex's `BodyAfterPrefix` scope); independent of each harness's fixed prompt overhead. |
 | `RELAY_CONTEXT_WINDOW` | from the model name | Overrides the context window table in `relay/providers.py`. |
 | `RELAY_RETAIN_USER_TOKENS` | `20000` | Budget for recent user messages kept verbatim. |
+| `RELAY_CLM_BUDGET` | context window | CLM: the context budget the model is told about; its limit is this less `RELAY_CLM_RESERVE` (`2048`). |
+| `RELAY_CLM_DIR` | `/tmp/.live_ctx` | CLM: where the context files live; the harness's tools must be able to edit files there. |
 | `RELAY_COMPACT_MIN_GAIN` | `0.1` | Skip compactions that free less than this share of the threshold (or growth). |
 | `RELAY_OPENAI_BASE_URL` | `https://api.openai.com/v1` | Upstream for the Responses API. |
 | `RELAY_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Upstream for the Messages API. |
@@ -240,6 +352,16 @@ thinking was turned off; nanobot likewise needs a reasoning effort set to stop s
 
 ⁴ One turn: mini cannot continue a session, so the turn-start path is not exercised.
 
+After the strategy contract became `Request` → `Context` the matrix ran again: every GPT row
+passed (Hermes on a second run: its first ended while a background sub-agent was still working),
+and so did Gemini CLI, pi (second run, after a 503 from Gemini), Crush, Goose, Hermes, nanobot,
+DeepSeek Harness and WorkBuddy on Gemini. The other Gemini runs failed for the model or the
+harness, not the context Relay sent: OpenCode as in ¹; Kilo, an OpenCode fork, the same way
+(answers of nothing but a thought) and once on a summary response that never finished (Relay
+kept the last context); OpenClaw only on when it crossed the budget (four compactions, all
+mid-turn); and Kimi Code's gemini-2.5-flash-lite and Kilo's gemini-3.8-flash dropped codes when
+re-summarizing a summary that held them, so the model read those files again.
+
 Resumed sessions keep their compaction: several harnesses rewrite their history when a
 session is resumed without changing what the model reads (Codex writes absent reasoning
 content as null, Gemini CLI repeats tool results and replaces thought signatures, OpenClaw
@@ -290,9 +412,9 @@ through Relay. `check.py codex:remote` runs the session through `tests/docker/co
 a stand-in for the service and the app (nothing is enrolled with the account; the rest of
 the ChatGPT backend is passed through to chatgpt.com); it passed, and the app shows the full
 conversation, its context meter the compacted size. Claude Code's (`claude remote-control`)
-refuses to start while `ANTHROPIC_BASE_URL` points anywhere but api.anthropic.com, so it
-does not run through Relay as installed; sessions that an already-running one spawns read
-`settings.json` afresh, so `relay install` sends them through Relay.
+refuses to start while `ANTHROPIC_BASE_URL` points anywhere but api.anthropic.com, so it does
+not run through the proxy; `relay install claude --via hook` leaves the endpoint alone and runs
+the strategy through Claude Code's compaction hook instead (see [Integration paths](#integration-paths)).
 
 Harness-side context management changes history Relay has stored: OpenCode prunes old
 tool outputs, which `relay install` turns off, and Gemini CLI masks them, which no setting
@@ -352,9 +474,38 @@ covered yet.
   the model, the request stays well-formed).
 - **Protocol**: implement the `Codec` interface in `relay/protocols/base.py` and register
   it in `CODECS`; add an upstream for it in `relay/providers.py`.
-- **Strategy**: implement `Strategy` (`fingerprint` and `plan(view, summarizer)`), returning
-  a `Rewrite` that replaces `view.items[:cut]` with `head`. The view holds the conversation
-  only; never put harness context into `head`, the profile places the current state.
+- **Strategy**: implement `Strategy`: `fingerprint()` and `plan(request, summarizer)`, which
+  returns the `Context` the model sees from now on, or None to keep `request.current`. The
+  `Request` holds the conversation only (no system or context items): `history`, every item as
+  the harness sent it, and `current`, what the model sees if nothing changes (the last context,
+  then what came since); `boundaries`, the cuts that keep each tool call with its result; the
+  token count, window, `force` and the strategy's own `state` from the previous request. The
+  `Context` is a tuple of items, in any order: items from the request, as they are or
+  `dataclasses.replace`d with new text or media (a tool result stays the answer to its call),
+  and new ones; a new SYSTEM item joins the system prompt, and a SUMMARY marks a compaction (the
+  harness's state goes where the harness puts it after its own). Add `state` for the next
+  request and `notes` for this one only. `summarizer.summarize(cut, prompt)` asks the task's
+  own model about `current[:cut]`. Register it in `STRATEGIES` (`RELAY_STRATEGY`).
+
+```python
+@dataclass(frozen=True)
+class DropMiddle:  # keep the task and the last 20 items once the context is large
+    threshold: int = 100_000
+    name: str = "drop_middle"
+
+    def fingerprint(self):
+        return {"name": self.name, "threshold": self.threshold}
+
+    def plan(self, request, summarizer):
+        if request.tokens < self.threshold:
+            return None
+        task = next(n for n, item in enumerate(request.current) if item.kind is Kind.USER)
+        cut = max(b for b in request.boundaries if b <= len(request.current) - 20)
+        if cut <= task + 1:
+            return None
+        note = Item(Kind.USER, f"[{cut - task - 1} earlier items were removed]")
+        return Context((*request.current[: task + 1], note, *request.current[cut:]))
+```
 
 The earlier strategies (checkpoint, sliding window, rolling memory, RLM, context
 folding, AgentFold, AutoCompact, selective discard, PRO-LONG, multi-granularity
@@ -388,7 +539,9 @@ user messages, and every later request of that conversation that Relay forwarded
 just its latest summary and none of the summarized tool output; the harness's latest
 instructions reach the model; no conversation read a file twice; both answers are right;
 no compaction failed; and the upstream accepted every model call. `--probe` records a
-session without compacting, to see where a harness keeps its state.
+session without compacting, to see where a harness keeps its state. `--via hook` installs
+through the harness's hook (Claude Code), with a second Relay recording the model calls;
+`--file-lines N` makes the files longer.
 
 ```bash
 RELAY_TEST_KEYS=keys.env python tests/docker/session.py codex:gpt-api --repo PATH --window 32000

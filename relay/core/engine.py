@@ -1,11 +1,17 @@
-"""Per-request orchestration.
+"""Running a strategy on every request: through the proxy (`prepare`) or a harness hook (`answer`).
 
-For each request the engine restores the stored rewrite for the longest known
-prefix (compared by the harness's `identity`), builds the view of the conversation the
-strategy sees, puts the harness's current `state` into the strategy's rewrite where the
-harness `place`s it, lets the codec make it legal, and remembers the result (and later the
-prompt tokens the upstream reported) under the request's prefix. Strategy failures never
-reach the harness: the request is forwarded with the last good rewrite instead.
+For each request the engine restores the context stored for the longest known prefix (compared
+by the harness's `identity`): what the model saw last time, followed by what the harness sent
+since. The strategy gets the conversation (`Request`) and answers with the context the model sees
+from now on (`Context`). The engine puts the harness's own items into it (where they were, or
+where the harness puts them after its own compaction when the answer has a summary), checks that
+the API would accept it, and remembers it, and later the prompt tokens the upstream reported,
+under the request's prefix. Strategy failures never reach the harness: the request is forwarded
+with the last good context instead.
+
+A harness hook hands over its whole conversation before a request instead (`answer`): the
+strategy decides on it, and the harness keeps the context, so only the strategy's state is
+stored here.
 """
 
 from __future__ import annotations
@@ -16,7 +22,7 @@ import logging
 import time
 from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from itertools import accumulate
 from typing import Any
 
@@ -24,8 +30,8 @@ from ..harnesses import Harness
 from ..protocols.base import Body, Codec, WireItem
 from ..prompts import SUMMARY_PREFIX
 from ..providers import context_window
-from ..strategies.base import Strategy
-from .ir import CONTEXT_KINDS, Item, Kind, View
+from ..strategies.base import Strategy, Summarizer
+from .ir import CONTEXT_KINDS, Context, Item, Kind, Media, Request
 from .store import PrefixStore
 from .tokens import approx_tokens, bytes_per_token, item_tokens
 
@@ -44,11 +50,11 @@ class Exchange:
     body: Body
     partition: bytes
     keys: list[bytes]  # canonical identities of the request's wire items
-    state: dict[str, Any]  # stored rewrite applied to this request
-    compacted: bool = False  # this request produced a new rewrite
+    state: dict[str, Any]  # stored context applied to this request
+    compacted: bool = False  # the strategy changed the context on this request
     estimate: int = 0  # Relay's own estimate of the forwarded prompt, if usage is never reported
     depth: int = 0  # leading items that matched a stored prefix
-    diverged: int | None = None  # where a request that found no compaction left its conversation's last one
+    diverged: int | None = None  # where a request that found no stored context left its conversation's last one
 
 
 class Engine:
@@ -67,7 +73,7 @@ class Engine:
         self.event_log = event_log
         self.retry_after = retry_after
         self._retry_at: dict[bytes, float] = {}  # per conversation, after a failure
-        # Each conversation's last stored compaction (covered items, digests of their identities),
+        # Each conversation's last stored context (items covered, digests of their identities),
         # to tell a request that should have found it but did not, and where it diverged.
         self._compacted: OrderedDict[bytes, tuple[int, list[bytes]]] = OrderedDict()
 
@@ -83,13 +89,13 @@ class Engine:
     ) -> Exchange:
         raw = codec.items(body)
         # Trailing items the harness regenerates on every request (live status, say) are
-        # forwarded as they are, but kept out of prefix matching and compaction.
+        # forwarded as they are, but kept out of prefix matching and the strategy's view.
         end = len(raw)
         while end and harness.volatile(harness.refine(codec.classify(raw[end - 1]))):
             end -= 1
         raw, volatile = raw[:end], raw[end:]
         # The harness summarizing its own history: it summarizes what the model has been seeing
-        # (the stored compaction still applies), but is never compacted anew or measured.
+        # (the stored context still applies), but the strategy is not asked, nor the usage kept.
         compacting = harness.compacting(codec, raw)
         keys = harness.identity(codec, raw)
         fingerprint = json.dumps(self.strategy.fingerprint(), sort_keys=True)
@@ -98,17 +104,11 @@ class Engine:
         named = [key for key in keys if key not in (b"\0system", b"\0context")][:3]
         thread = partition + hashlib.sha256(b"\0".join(named)).digest()  # names the conversation
         diverged = None if state.get("covered") or compacting else self._diverged(thread, keys, depth)
-
-        def view_item(index: int) -> Item:
-            return replace(harness.refine(codec.classify(raw[index])), ref=index)
+        originals = [replace(harness.refine(codec.classify(item)), ref=index) for index, item in enumerate(raw)]
 
         def materialize(state: dict[str, Any]) -> tuple[list[Item], list[WireItem]]:
-            head = [view_item(h["ref"]) if "ref" in h else Item(Kind(h["kind"]), h["text"], wire=h.get("wire"))
-                    for h in state.get("head", [])]
-            items = head + [view_item(i) for i in range(state.get("covered", 0), len(raw))]
-            wire = [raw[i.ref] if i.ref is not None else json.loads(i.wire) if i.wire else codec.user_message(i.text)
-                    for i in items]
-            return items, wire
+            items = [_item(h, originals) for h in state.get("head", [])] + originals[state.get("covered", 0):]
+            return items, [_wire(codec, raw, originals, item) for item in items]
 
         items, wire = materialize(state)
         per_token = bytes_per_token(body.get("model"))  # the model's tokenizer, roughly
@@ -118,7 +118,7 @@ class Engine:
 
         volatile_items = [codec.classify(item) for item in volatile]
         if isinstance(state.get("tokens"), int):  # the upstream's count for the stored prefix, then new items
-            tokens = state["tokens"] + sum(item_tokens(view_item(i), per_token) for i in range(depth, len(raw)))
+            tokens = state["tokens"] + sum(item_tokens(originals[i], per_token) for i in range(depth, len(raw)))
         else:
             tokens = size([*items, *volatile_items])
         # The strategy sees the conversation; what the harness wrote itself is its profile's.
@@ -128,60 +128,99 @@ class Engine:
         def position(cut: int) -> int:  # a cut of the conversation, as a cut of `items`
             return conversation[cut] if cut < len(conversation) else len(items)
 
-        view = View(
-            tuple(items[n] for n in conversation),
-            frozenset(cut for cut in range(len(conversation) + 1) if position(cut) in legal),
+        current = tuple(items[n] for n in conversation)
+        request = Request(
+            tuple(item for item in originals if item.kind not in CONTEXT_KINDS),
+            current,
+            frozenset(cut for cut in range(len(current) + 1) if position(cut) in legal),
             tokens,
             self.window or context_window(body.get("model")),
             force,
             state.get("base"),
+            state.get("strategy"),
+            hashlib.sha256(thread).hexdigest()[:16],
+            codec.offers_tools(body),
         )
         leading = next((n for n, item in enumerate(items) if item.kind not in CONTEXT_KINDS), len(items))
 
-        compacted = False
+        changed, notes, instructions = False, (), list(state.get("instructions", []))
         if not compacting and (force or time.monotonic() >= self._retry_at.get(thread, 0.0)):
             started = time.monotonic()
             try:
                 # Per-item estimates, scaled to the upstream's count of the request when there is one.
                 scale = tokens / max(1, size([*items, *volatile_items]))
                 summarizer = _Summarizer(codec, body, lambda cut: wire[: position(cut)], leading, post,
-                                         view.window and view.window / scale, per_token)
-                rewrite = self.strategy.plan(view, summarizer)
-                if rewrite is not None:
-                    state = _to_state(codec, harness, raw, items, legal, position(rewrite.cut), rewrite.head)
-                    self.store.put(partition, keys, state)
-                    self._remember(thread, state["covered"], keys)
-                    items, wire = materialize(state)
-                    compacted = True
-                    self._emit(
-                        {
-                            "strategy": self.strategy.name,
-                            "protocol": codec.name,
-                            "harness": harness.name,
-                            "model": body.get("model"),
-                            "forced": force,
-                            "tokens_before": tokens,
-                            "items_before": len(view.items),
-                            "items_after": len(items),
-                            "seconds": round(time.monotonic() - started, 3),
-                            "summary_requests": summarizer.requests,
-                        },
-                        state,
-                    )
+                                         request.window and request.window / scale, per_token)
+                if (context := self.strategy.plan(request, summarizer)) is not None:
+                    answer = tuple(item for item in context.items if not _instruction(item))
+                    answered = [item.text for item in context.items if _instruction(item)]
+                    stored = dict(state)
+                    if answer != current:
+                        placed = _place(codec, harness, raw, originals, answer)
+                        stored = {"covered": len(raw), "head": [_entry(item, originals) for item in placed]}
+                        new_items, new_wire = materialize(stored)
+                        # Judged only where the check holds for the harness's own request (the APIs
+                        # accept some histories it would not, Gemini CLI's resumed ones).
+                        if (problem := codec.legal([*new_wire, *volatile])) and not codec.legal(raw):
+                            raise ValueError(f"the context would be rejected: {problem}")
+                        self._remember(thread, len(raw), keys)
+                        items, wire, changed = new_items, new_wire, True
+                        self.emit(
+                            {
+                                "strategy": self.strategy.name,
+                                "protocol": codec.name,
+                                "harness": harness.name,
+                                "model": body.get("model"),
+                                "forced": force,
+                                "tokens_before": tokens,
+                                "items_before": len(current),
+                                "items_after": len(answer),
+                                "seconds": round(time.monotonic() - started, 3),
+                                "summary_requests": summarizer.requests,
+                            },
+                            stored,
+                        )
+                    if changed or context.state != request.state or answered != instructions:
+                        stored = {k: v for k, v in stored.items() if k not in ("strategy", "instructions")}
+                        stored.update({"strategy": context.state} if context.state is not None else {})
+                        stored.update({"instructions": answered} if answered else {})
+                        self.store.put(partition, keys, stored)
+                        state = stored
+                    notes, instructions = context.notes, answered
             except Exception:
-                log.warning("%s failed; forwarding the request unchanged", self.strategy.name, exc_info=True)
+                log.warning("%s failed; forwarding the last context", self.strategy.name, exc_info=True)
                 self._retry_at[thread] = time.monotonic() + self.retry_after
 
-        unchanged = not state.get("head") and not state.get("covered")
-        forwarded = body if unchanged else codec.with_items(body, [*wire, *volatile])
-        estimate = size([*items, *volatile_items])
-        return Exchange(forwarded, partition, [] if compacting else keys, state, compacted, estimate, depth, diverged)
+        # Notes for this request alone at the end; the strategy's instructions join the system
+        # prompt (the same on every request, so the prompt cache still holds).
+        sent = [*wire, *volatile]
+        if notes:
+            sent = codec.note(sent, "\n\n".join(notes))
+        unchanged = not state.get("head") and not state.get("covered") and not notes
+        forwarded = body if unchanged else codec.with_items(body, sent)
+        if instructions:
+            forwarded = codec.with_instructions(forwarded, "\n\n".join(instructions))
+        estimate = size([*items, *volatile_items]) + approx_tokens(" ".join([*notes, *instructions]), per_token)
+        return Exchange(forwarded, partition, [] if compacting else keys, state, changed, estimate, depth, diverged)
+
+    def answer(self, request: Request, summarizer: Summarizer) -> Context | None:
+        """The strategy's answer on a conversation a harness hook hands over before a request; the
+        harness keeps the context, the strategy's state is kept here by conversation."""
+
+        partition = self.store.partition("hook", json.dumps(self.strategy.fingerprint(), sort_keys=True))
+        key = [request.conversation.encode()]
+        _, state = self.store.match(partition, key) or (0, {})
+        request = replace(request, state=state.get("strategy"))
+        context = self.strategy.plan(request, summarizer)
+        if context is not None and context.state != request.state:
+            self.store.put(partition, key, {"strategy": context.state})
+        return context
 
     def record(self, exchange: Exchange, input_tokens: int | None) -> None:
         """Anchor future token estimates to the prompt tokens the upstream reported.
 
-        The first size after a rewrite (or ever) starts a new context window. Upstreams that
-        report no usage (some gateways send zeros) fall back to Relay's own estimate."""
+        The first size after a change of context (or ever) starts a new context window. Upstreams
+        that report no usage (some gateways send zeros) fall back to Relay's own estimate."""
 
         if not exchange.keys:
             return  # the harness compacting itself: its usage says nothing about the conversation
@@ -199,20 +238,20 @@ class Engine:
             self._compacted.popitem(last=False)
 
     def _diverged(self, thread: bytes, keys: list[bytes], depth: int) -> int | None:
-        """Where a request that found no stored compaction left the history its conversation's
-        last compaction covered: the harness rewrote that history in a way its profile's
-        identity does not see through. (A rewind or a branch finds an earlier compaction.)"""
+        """Where a request that found no stored context left the history its conversation's last
+        one covered: the harness rewrote that history in a way its profile's identity does not
+        see through. (A rewind or a branch finds an earlier context.)"""
 
         covered, digests = self._compacted.get(thread, (0, []))
         if not covered or depth >= covered:
             return None
         index = next((i for i, digest in enumerate(digests) if i >= len(keys) or hashlib.sha256(keys[i]).digest() != digest),
                      len(digests))
-        log.warning("a stored compaction no longer applies: the request diverges from it at item %d", index)
+        log.warning("a stored context no longer applies: the request diverges from it at item %d", index)
         return index
 
-    def _emit(self, event: dict[str, Any], state: dict[str, Any]) -> None:
-        log.info("rewrote context: %s", event)
+    def emit(self, event: dict[str, Any], state: dict[str, Any]) -> None:
+        log.info("changed the context: %s", event)
         if self.event_log:
             record = {"time": time.time(), **event, **state}
             try:
@@ -222,31 +261,69 @@ class Engine:
                 log.warning("could not write the event log %s", self.event_log, exc_info=True)
 
 
-def _to_state(codec: Codec, harness: Harness, raw: list[WireItem], items: list[Item], legal: frozenset[int],
-              cut: int, head: tuple[Item, ...]) -> dict[str, Any]:
-    """Express a strategy's rewrite of the conversation (`items[:cut]` become `head`) as a stored
-    rewrite of the request: the harness's current state placed into the head, the context it
-    supersedes right after the cut absorbed, and the protocol's rules applied."""
+def _instruction(item: Item) -> bool:
+    """A SYSTEM item the strategy wrote: it joins the system prompt."""
 
-    if cut not in legal:
-        raise ValueError(f"rewrite cut {cut} splits an atomic group")
-    current = harness.state(codec, raw)
-    while cut < len(items) and items[cut].ref in current.supersedes and cut + 1 in legal:
-        cut += 1  # e.g. the context updates that open the pending turn
-    if cut < len(items) and items[cut].ref is None:
-        raise ValueError("rewrite cut falls inside Relay's own items")
-    covered = items[cut].ref if cut < len(items) else len(raw)
-    mid_turn = cut == len(items)
-    kept = tuple(item for item in current.items if item.ref is None or item.ref < covered)  # the rest is still there
-    entries = []
-    for item in codec.arrange(harness.place(head, kept, mid_turn), mid_turn):
-        if item.ref is None:
-            entries.append({"kind": item.kind.value, "text": item.text, **({"wire": item.wire} if item.wire else {})})
-        elif item.ref < covered:
-            entries.append({"ref": item.ref})
-        else:
-            raise ValueError("rewrite keeps an item that it does not replace")
-    return {"covered": covered, "head": entries}
+    return item.kind is Kind.SYSTEM and item.ref is None
+
+
+def _place(codec: Codec, harness: Harness, raw: list[WireItem], originals: list[Item],
+           answer: tuple[Item, ...]) -> list[Item]:
+    """The answer with the harness's own items put in. They stay where the harness sent them,
+    those before the conversation in front; but what a summary stands in for is replaced by the
+    harness's current state, placed as the harness places it after its own compaction."""
+
+    own = [item for item in originals if item.kind in CONTEXT_KINDS]
+    summary = max((n for n, item in enumerate(answer) if item.kind is Kind.SUMMARY), default=None)
+    if summary is None:
+        first = next((item.ref for item in originals if item.kind not in CONTEXT_KINDS), len(raw))
+        return [*(item for item in own if item.ref < first), *_merge(answer, [i for i in own if i.ref >= first])]
+    head, tail = answer[: summary + 1], answer[summary + 1 :]
+    cut = min((item.ref for item in tail if item.ref is not None), default=len(raw))
+    state = tuple(item for item in harness.state(codec, raw).items if item.ref is None or item.ref < cut)
+    mid_turn = cut == len(raw)
+    return [*codec.arrange(harness.place(head, state, mid_turn), mid_turn), *_merge(tail, [i for i in own if i.ref >= cut])]
+
+
+def _merge(items: tuple[Item, ...], own: list[Item]) -> list[Item]:
+    """The harness's items back among the answer's, each before the first answer item from
+    later in the request; those after every one at the end."""
+
+    merged, pending = [], list(own)
+    for item in items:
+        while item.ref is not None and pending and pending[0].ref < item.ref:
+            merged.append(pending.pop(0))
+        merged.append(item)
+    return merged + pending
+
+
+def _entry(item: Item, originals: list[Item]) -> dict[str, Any]:
+    """How a context item is stored: a request item by index (with new content if it has any),
+    or an item Relay writes."""
+
+    media = {"media": [asdict(m) for m in item.media]}
+    if item.ref is not None:
+        original = originals[item.ref]
+        return {"ref": item.ref} if (item.text, item.media) == (original.text, original.media) else {
+            "ref": item.ref, "text": item.text, **media}
+    return {"kind": item.kind.value, "text": item.text, **(media if item.media else {}),
+            **({"wire": item.wire} if item.wire else {})}
+
+
+def _item(entry: dict[str, Any], originals: list[Item]) -> Item:
+    media = tuple(Media(**m) for m in entry.get("media", []))
+    if "ref" in entry:
+        original = originals[entry["ref"]]
+        return replace(original, text=entry["text"], media=media) if "text" in entry else original
+    return Item(Kind(entry["kind"]), entry["text"], media=media, wire=entry.get("wire"))
+
+
+def _wire(codec: Codec, raw: list[WireItem], originals: list[Item], item: Item) -> WireItem:
+    if item.ref is not None:
+        original = originals[item.ref]
+        unchanged = (item.text, item.media) == (original.text, original.media)
+        return raw[item.ref] if unchanged else codec.edit(raw[item.ref], item.text, item.media)
+    return json.loads(item.wire) if item.wire else codec.write(item)
 
 
 class _Summarizer:

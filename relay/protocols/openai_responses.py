@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..core.ir import Item, Kind
-from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, decoded, error_message, json_text
+from ..core.ir import Item, Kind, Media
+from .base import (OVERFLOW_PHRASES, Body, WireItem, canonical_json, data_media, data_url, decoded, error_message,
+                   json_text)
 
 _ROLES = {
     "system": Kind.SYSTEM,
@@ -46,7 +47,8 @@ class OpenAIResponses:
         if kind == "compaction":  # opaque server-side compaction
             return Item(Kind.SUMMARY, opaque=decoded(item.get("encrypted_content")))
         if kind.endswith("_output"):
-            return Item(Kind.TOOL_RESULT, _output_text(item.get("output")))
+            text, media = _content_text(item.get("output"))
+            return Item(Kind.TOOL_RESULT, text, media=media)
         if kind.endswith("_call"):
             fields = (item.get(key) for key in ("name", "arguments", "input", "action"))
             return Item(Kind.TOOL_CALL, " ".join(_string(value) for value in fields if value))
@@ -86,6 +88,55 @@ class OpenAIResponses:
 
     def user_message(self, text: str) -> WireItem:
         return {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
+
+    def write(self, item: Item) -> WireItem:
+        if item.kind is Kind.ASSISTANT and not item.media:
+            return {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": item.text}]}
+        if item.kind in (Kind.USER, Kind.SUMMARY, Kind.CONTEXT):
+            return {"type": "message", "role": "user", "content": _content(item.text, item.media)}
+        raise ValueError(f"Relay cannot write a {item.kind.value} item")
+
+    def edit(self, wire: WireItem, text: str, media: tuple[Media, ...]) -> WireItem:
+        kind = wire.get("type", "message")
+        if kind == "message" and wire.get("role") == "assistant" and not media:
+            return {**wire, "content": [{"type": "output_text", "text": text}]}
+        if kind == "message" and wire.get("role") != "assistant":
+            return {**wire, "content": _content(text, media)}
+        if kind.endswith("_output"):
+            return {**wire, "output": _content(text, media) if media else text}
+        raise ValueError(f"the content of a {kind} item cannot change on its own")
+
+    def legal(self, items: list[WireItem]) -> str | None:
+        called, waiting = set(), set()
+        for index, item in enumerate(items):
+            kind, call_id = item.get("type", "message"), item.get("call_id")
+            if call_id and kind.endswith("_output"):
+                if call_id not in called:
+                    return f"item {index} answers a tool call the request does not make"
+                waiting.discard(call_id)
+            elif call_id and kind.endswith("_call"):
+                called.add(call_id)
+                waiting.add(call_id)
+        if waiting:
+            return f"tool calls {sorted(waiting)} have no output"
+        if items and items[-1].get("type") == "reasoning":
+            return "the request ends with a reasoning item, without the item it preceded"
+        return None
+
+    def note(self, items: list[WireItem], text: str) -> list[WireItem]:
+        return [*items, self.user_message(text)]
+
+    def with_instructions(self, body: Body, text: str) -> Body:
+        if body.get("instructions"):
+            return {**body, "instructions": f"{_string(body['instructions'])}\n\n{text}"}
+        # Codex sends its instructions as developer messages instead: one more after them.
+        items = list(body.get("input") or [])
+        at = next((n for n, item in enumerate(items) if item.get("role") not in ("developer", "system")), len(items))
+        message = {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": text}]}
+        return {**body, "input": [*items[:at], message, *items[at:]]}
+
+    def offers_tools(self, body: Body) -> bool:  # Codex lists its tools in an `additional_tools` item
+        return bool(body.get("tools")) or any(item.get("type") == "additional_tools" for item in body.get("input") or [])
 
     def preamble(self, body: Body) -> str:
         return _string(body.get("instructions") or "") + _string(body.get("tools") or "")
@@ -135,22 +186,43 @@ class OpenAIResponses:
         )
 
 
-def _content_text(content: Any) -> tuple[str, bool]:
-    if isinstance(content, str):
-        return content, False
-    texts, media = [], False
+def _content_text(content: Any) -> tuple[str, tuple[Media, ...]]:
+    """Text and media of a message's content, or of a tool output."""
+
+    if not isinstance(content, list):
+        return content if isinstance(content, str) else "", ()
+    texts, media = [], []
     for part in content or []:
         if not isinstance(part, dict):
             continue
-        if part.get("type") in _TEXT_PARTS and isinstance(part.get("text"), str):
+        kind = part.get("type")
+        if kind in _TEXT_PARTS and isinstance(part.get("text"), str):
             texts.append(part["text"])
+        elif kind == "input_image":
+            media.append(data_media("image", part.get("image_url") or part.get("file_id") or ""))
+        elif kind == "input_file":
+            media.append(data_media("file", part.get("file_data") or part.get("file_url") or part.get("file_id") or ""))
+        elif kind == "input_audio" and isinstance(part.get("input_audio"), dict):
+            audio = part["input_audio"]
+            media.append(Media("audio", f"audio/{audio.get('format', '')}", audio.get("data") or ""))
         else:
-            media = True
-    return "\n".join(texts), media
+            media.append(Media(str(kind)))
+    return "\n".join(texts), tuple(media)
 
 
-def _output_text(output: Any) -> str:
-    return output if isinstance(output, str) else _content_text(output)[0]
+def _content(text: str, media: tuple[Media, ...]) -> list[dict[str, Any]]:
+    parts: list[dict[str, Any]] = [{"type": "input_text", "text": text}] if text or not media else []
+    for m in media:
+        if m.type == "image":
+            parts.append({"type": "input_image", "image_url": data_url(m)} if m.data or "://" in m.url
+                         else {"type": "input_image", "file_id": m.url})
+        elif m.type == "audio":
+            parts.append({"type": "input_audio", "input_audio": {"data": m.data, "format": m.mime.split("/")[-1]}})
+        elif m.data or "://" in m.url:
+            parts.append({"type": "input_file", **({"file_data": data_url(m)} if m.data else {"file_url": m.url})})
+        else:
+            parts.append({"type": "input_file", "file_id": m.url})
+    return parts
 
 
 def _string(value: Any) -> str:
