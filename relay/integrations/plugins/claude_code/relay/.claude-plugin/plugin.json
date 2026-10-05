@@ -1,0 +1,5 @@
+{
+  "name": "relay",
+  "version": "0.1.0",
+  "description": "Relay's context strategy as Claude Code's compaction: Claude Code decides when, Relay what into."
+}

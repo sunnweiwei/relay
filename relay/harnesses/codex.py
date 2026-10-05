@@ -112,8 +112,7 @@ class Codex(Harness):
 
     def state(self, codec: Codec, items: list[WireItem]) -> State:
         """Re-render the initial context from the context updates in the history, like Codex:
-        its per-request prefix stays first, the rendering joins the context block, and the
-        updates folded into it are superseded."""
+        its per-request prefix stays first, and the rendering joins the context block."""
 
         rendering = rebuild(items) if codec.name == "openai_responses" else None
         if rendering is None:
@@ -129,7 +128,6 @@ class Codex(Harness):
                   else Item(Kind.CONTEXT, codec.classify(part).text, wire=json.dumps(part, ensure_ascii=False))
                   for part in rendering.context),
             ),
-            rendering.updates,
         )
 
     def settings(self) -> list[Setting]:
@@ -161,7 +159,6 @@ class Rendering:
 
     pinned: tuple[int, ...]  # per-request prefix (`additional_tools`, base instructions)
     context: tuple[int | WireItem, ...]  # the re-rendered initial context
-    updates: frozenset[int]  # the context updates in the history it folds in
 
 
 def section(text: str) -> str | None:
@@ -202,11 +199,10 @@ def rebuild(items: list[WireItem]) -> Rendering | None:
 
     last_agent = agent[-1]
     pending = any(_is_user_turn(item) for item in items[last_agent + 1 :])
-    model_switch, updates = None, set()
+    model_switch = None
     for index in range(end, len(items)):
         if not is_context(items[index]):
             continue
-        folded = True  # every part is a world-state section (not an event such as <turn_aborted>)
         for text in _parts(items[index]) or []:
             key = section(text)
             if key == "model_switch":
@@ -216,14 +212,10 @@ def rebuild(items: list[WireItem]) -> Rendering | None:
                 _apply(render, key, text)
             elif text.startswith(PREFIX_SAVED):
                 _approve(render, _prefix_list(text[len(PREFIX_SAVED):]) or [])
-            else:
-                folded = False
-        if folded:
-            updates.add(index)
     if model_switch is not None:
         _apply(render, "model_switch", model_switch)
     context = tuple(message.wire() for message in render if message.parts)
-    return Rendering(tuple(pinned), context, frozenset(updates))
+    return Rendering(tuple(pinned), context)
 
 
 @dataclass

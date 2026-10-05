@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Protocol
 
-from ..core.ir import Item
+from ..core.ir import Item, Media
 
 Body = dict[str, Any]
 WireItem = dict[str, Any]
@@ -31,6 +31,27 @@ class Codec(Protocol):
     def boundaries(self, items: list[WireItem]) -> frozenset[int]: ...
 
     def user_message(self, text: str) -> WireItem: ...
+
+    def write(self, item: Item) -> WireItem:
+        """The wire item for an item Relay writes: a user message (with its media), or an
+        assistant one. ValueError for any other kind."""
+
+    def edit(self, wire: WireItem, text: str, media: tuple[Media, ...]) -> WireItem:
+        """`wire` with `text` and `media` as its content, its structure (role, the tool call a
+        result answers) kept. ValueError where content cannot change on its own (a tool call)."""
+
+    def legal(self, items: list[WireItem]) -> str | None:
+        """Why the API would reject `items` (a tool call without its result, a result without
+        its call), or None."""
+
+    def note(self, items: list[WireItem], text: str) -> list[WireItem]:
+        """`items` with `text` added at the end, for the model to read before it answers."""
+
+    def with_instructions(self, body: Body, text: str) -> Body:
+        """`body` with `text` added to its system prompt."""
+
+    def offers_tools(self, body: Body) -> bool:
+        """Whether the request lets the model call tools: an agent's turn, not a side call (a title)."""
 
     def arrange(self, head: tuple[Item, ...], mid_turn: bool) -> tuple[Item, ...]:
         """Move or drop system items of a rewritten head where the protocol requires it."""
@@ -58,6 +79,19 @@ class Codec(Protocol):
 
 def canonical_json(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def data_media(kind: str, url: str, mime: str = "") -> Media:
+    """Media from a URL, which may be a `data:` URL carrying the content."""
+
+    if url.startswith("data:") and ";base64," in url:
+        head, data = url[5:].split(";base64,", 1)
+        return Media(kind, head or mime, data)
+    return Media(kind, mime, url=url)
+
+
+def data_url(media: Media) -> str:
+    return f"data:{media.mime};base64,{media.data}" if media.data else media.url
 
 
 def decoded(value: Any) -> int:

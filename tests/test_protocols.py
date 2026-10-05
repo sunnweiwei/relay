@@ -6,7 +6,7 @@ import json
 import unittest
 from pathlib import Path
 
-from relay.core.ir import Item, Kind
+from relay.core.ir import Item, Kind, Media
 from relay.core.tokens import bytes_per_token, item_tokens
 from relay.harnesses import ClaudeCode, Codex, detect
 from relay.protocols import AnthropicMessages, Gemini, OpenAIChat, OpenAIResponses
@@ -305,3 +305,94 @@ class CompletionTests(unittest.TestCase):
         text = {"candidates": [{"content": {"parts": [{"text": "sum"}]}}]}
         self.check(Gemini(), [text, {"candidates": [{"content": {"parts": []}, "finishReason": "STOP"}]}],
                    {"candidates": [{"content": {"parts": []}, "finishReason": "MAX_TOKENS"}]})
+
+
+class StrategyAdditionsTests(unittest.TestCase):
+    """What a strategy may put into a request: items of its own (with media), new content for a
+    request item, a note at the end, a section of the system prompt; each written legally for its
+    protocol, and what the API would reject found before it is sent."""
+
+    IMAGE = Media("image", "image/png", "iVBORw0KGgo=")
+    # A tool call and its result in each protocol.
+    CALLS = {
+        "openai_responses": ({"type": "function_call", "call_id": "c1", "name": "sh", "arguments": "{}"},
+                             {"type": "function_call_output", "call_id": "c1", "output": "a long output"}),
+        "anthropic_messages": ({"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "s"},
+                                                                {"type": "tool_use", "id": "t1", "name": "sh", "input": {}}]},
+                               {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                                             "content": "a long output"}]}),
+        "openai_chat": ({"role": "assistant", "content": None,
+                         "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "sh", "arguments": "{}"}}]},
+                        {"role": "tool", "tool_call_id": "c1", "content": "a long output"}),
+        "gemini": ({"role": "model", "parts": [{"functionCall": {"name": "sh", "args": {}}}]},
+                   {"role": "user", "parts": [{"functionResponse": {"name": "sh", "response": {"output": "a long output"}}}]}),
+    }
+    CODECS = (OpenAIResponses(), AnthropicMessages(), OpenAIChat(), Gemini())
+
+    def test_written_items_read_back_with_their_media(self) -> None:
+        for codec in self.CODECS:
+            user = codec.classify(codec.write(Item(Kind.USER, "look", media=(self.IMAGE,))))
+            self.assertEqual((user.kind, user.text, user.media), (Kind.USER, "look", (self.IMAGE,)), codec.name)
+            assistant = codec.classify(codec.write(Item(Kind.ASSISTANT, "noted")))
+            self.assertEqual((assistant.kind, assistant.text), (Kind.ASSISTANT, "noted"), codec.name)
+            with self.assertRaises(ValueError):
+                codec.write(Item(Kind.TOOL_CALL, "sh {}"))
+
+    def test_an_edited_tool_result_still_answers_its_call(self) -> None:
+        for codec in self.CODECS:
+            call, result = self.CALLS[codec.name]
+            edited = codec.edit(result, "short", ())
+            self.assertIsNone(codec.legal([codec.user_message("go"), call, edited]), codec.name)
+            self.assertIn("short", codec.classify(edited).text)
+            self.assertNotIn("a long output", json.dumps(edited))
+            with self.assertRaises(ValueError):
+                codec.edit(call, "another call", ())
+
+    def test_legal_finds_a_call_without_its_result_and_a_result_without_its_call(self) -> None:
+        for codec in self.CODECS:
+            call, result = self.CALLS[codec.name]
+            go = codec.user_message("go")
+            self.assertIsNotNone(codec.legal([go, call]), codec.name)
+            self.assertIsNotNone(codec.legal([go, result]), codec.name)
+            if codec.name != "openai_responses":  # the Responses API pairs items by call id, not position
+                self.assertIsNotNone(codec.legal([go, call, go, result]), codec.name)
+
+    def test_tool_results_carry_their_images(self) -> None:
+        source = {"type": "base64", "media_type": "image/png", "data": self.IMAGE.data}
+        result = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                               "content": [{"type": "text", "text": "screen"},
+                                                           {"type": "image", "source": source}]}]}
+        self.assertEqual(AnthropicMessages().classify(result).media, (self.IMAGE,))
+        output = {"type": "function_call_output", "call_id": "c1",
+                  "output": [{"type": "input_image", "image_url": f"data:image/png;base64,{self.IMAGE.data}"}]}
+        self.assertEqual(OpenAIResponses().classify(output).media, (self.IMAGE,))
+        # Dropping a screenshot keeps the result and its text.
+        kept = AnthropicMessages().edit(result, "screen", ())
+        self.assertEqual(AnthropicMessages().classify(kept).media, ())
+        self.assertEqual(kept["content"][0]["tool_use_id"], "t1")
+
+    def test_an_assistant_turn_keeps_its_thinking_when_its_text_changes(self) -> None:
+        reply = {"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "s"},
+                                                  {"type": "text", "text": "a long answer"}]}
+        self.assertEqual(AnthropicMessages().edit(reply, "short", ())["content"],
+                         [reply["content"][0], {"type": "text", "text": "short"}])
+
+    def test_notes_join_a_trailing_user_turn_where_roles_must_alternate(self) -> None:
+        result = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "ok"}]}
+        self.assertEqual(AnthropicMessages().note([result], "size")[-1]["content"][-1], {"type": "text", "text": "size"})
+        response = {"role": "user", "parts": [{"functionResponse": {"name": "sh", "response": {}}}]}
+        self.assertEqual(Gemini().note([response], "size"), [{**response, "parts": [*response["parts"], {"text": "size"}]}])
+        self.assertEqual(OpenAIResponses().note([], "size"), [OpenAIResponses().user_message("size")])
+        self.assertEqual(OpenAIChat().note([{"role": "tool", "content": "ok"}], "size")[-1], {"role": "user", "content": "size"})
+
+    def test_instructions_extend_each_protocols_system_prompt(self) -> None:
+        self.assertEqual(OpenAIResponses().with_instructions({"instructions": "base"}, "more")["instructions"], "base\n\nmore")
+        blocks = [{"type": "text", "text": "base", "cache_control": {"type": "ephemeral"}}]
+        self.assertEqual(AnthropicMessages().with_instructions({"system": blocks}, "more")["system"],
+                         [*blocks, {"type": "text", "text": "more"}])
+        self.assertEqual(AnthropicMessages().with_instructions({}, "more")["system"], "more")
+        chat = OpenAIChat().with_instructions({"messages": [{"role": "system", "content": "base"}]}, "more")
+        self.assertEqual(chat["messages"], [{"role": "system", "content": "base\n\nmore"}])
+        self.assertEqual(OpenAIChat().with_instructions({"messages": []}, "more")["messages"], [{"role": "system", "content": "more"}])
+        gemini = Gemini().with_instructions({"system_instruction": {"parts": [{"text": "base"}]}}, "more")
+        self.assertEqual(gemini, {"system_instruction": {"parts": [{"text": "base"}, {"text": "more"}]}})

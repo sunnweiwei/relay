@@ -2,6 +2,8 @@
 
     python tests/docker/check.py pi:gpt [--growth N]       one harness × model
     python tests/docker/check.py --matrix [names...]       several; prints a results table
+    python tests/docker/check.py --via hook claude_code:gpt   the harness compacts through Relay's hook
+    python tests/docker/check.py --strategy clm codex:gpt     the model edits its own context (CLM)
 
 Each run gets a throwaway HOME: the harness's own config is written there (the "user's
 existing setup"), `relay install <harness>` edits it, Relay runs in the background, and
@@ -36,6 +38,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,7 +46,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 from relay.core.ir import AGENT_KINDS, CONTEXT_KINDS, Kind  # noqa: E402
 from relay.harnesses import detect  # noqa: E402
-from relay.prompts import SUMMARY_PREFIX  # noqa: E402
+from relay.prompts import SUMMARIZATION_PROMPT, SUMMARY_PREFIX  # noqa: E402
 from relay.protocols import codec_for  # noqa: E402
 
 IMAGE = "relay-harness-test"
@@ -130,6 +133,19 @@ PROBE = (
 GPT, GEMINI, CLAUDE = "gpt-6-luna", "gemini-3.8-flash", "claude-sonnet-5-5"
 GEMINI_OPENAI = "https://generativelanguage.googleapis.com/v1beta/openai"
 GROWTH = 5_000  # each file adds about 2k tokens
+# `--via hook`: the harness asks Relay before every request, and Relay's strategy compacts at this
+# size. Relay is off the model path, so a second Relay that never compacts records it, in front of
+# whatever endpoint the user's configuration names.
+HOOK_THRESHOLD = 30_000
+# `--strategy clm`: the model edits its own context through a mirror file; this budget is below what
+# the task needs unedited (its reminders and readout are what make the model edit).
+CLM_BUDGET = 26_000
+RECORDER = f"""UPSTREAM=$(python3 -c 'import json, pathlib; p = pathlib.Path("~/.claude/settings.json").expanduser()
+print((json.loads(p.read_text()) if p.exists() else {{}}).get("env", {{}}).get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"))')
+(cd /relay && RELAY_PORT=8788 RELAY_COMPACT_GROWTH=1000000000 RELAY_HARNESS=claude_code RELAY_ANTHROPIC_BASE_URL=$UPSTREAM \
+  python3 -m relay.cli serve > ~/recorder.log 2>&1 &)
+until python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8788))' 2>/dev/null; do sleep 0.2; done
+{JSON_MERGE.format("~/.claude/settings.json", "env.ANTHROPIC_BASE_URL", '"http://127.0.0.1:8788"')}"""
 
 
 @dataclass
@@ -364,15 +380,16 @@ SPECS = {
 
 
 def run(name: str, growth: int | None = None, retried: bool = False, probe: bool = False,
-        subagent: bool = False, window: int | None = None, native: bool = False, selfcompact: bool = False) -> dict:
+        subagent: bool = False, window: int | None = None, native: bool = False, selfcompact: bool = False,
+        via: str = "proxy", lines: int = 120, strategy: str = "compaction") -> dict:
     spec, harness = SPECS[name], name.split(":")[0]
     root = Path(tempfile.mkdtemp(prefix=f"relay-{name.replace(':', '-')}-", dir=os.getenv("TMPDIR")))
     home, project = root / "home", root / "project"
     home.mkdir()
     project.mkdir()
     for n, code in enumerate(CODES, start=1):
-        lines = [f"file {n} line {i}: the quick brown fox jumps over the lazy dog" for i in range(1, 121)]
-        (project / f"file_{n}.txt").write_text("\n".join([*lines, f"CODE: {code}"]) + "\n")
+        text = [f"file {n} line {i}: the quick brown fox jumps over the lazy dog" for i in range(1, lines + 1)]
+        (project / f"file_{n}.txt").write_text("\n".join([*text, f"CODE: {code}"]) + "\n")
     for file in STATE_FILES:  # the harness's own instructions, changed between the turns
         (project / file).write_text("# Project instructions\n\nThe project codename is ALPHA.\n")
 
@@ -384,6 +401,10 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
     # 90% of a context window of that many tokens (and 95% always).
     trigger = {"RELAY_CONTEXT_WINDOW": str(window)} if window else {
         "RELAY_COMPACT_GROWTH": str(10**9 if probe or selfcompact else growth or GROWTH)}
+    if via == "hook":
+        trigger = {"RELAY_COMPACT_THRESHOLD": str(HOOK_THRESHOLD)}
+    if strategy == "clm":  # the files in HOME, where the run can be inspected
+        trigger = {"RELAY_STRATEGY": "clm", "RELAY_CLM_BUDGET": str(CLM_BUDGET), "RELAY_CLM_DIR": "/home/agent/live_ctx"}
     env = {"PROMPT": first, "PROMPT2": second, **trigger, "RELAY_COMPACT_MIN_GAIN": "0"}
     container(name, root, env, f"""
         cd /project && timeout 600 {spec.command} > ~/harness.out 2> ~/harness.err < /dev/null
@@ -391,19 +412,24 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
         export PROMPT="$PROMPT2"
         sed -i s/ALPHA/BETA/ {" ".join(STATE_FILES)}
         {f"cd /project && timeout 600 {spec.resume} > ~/harness2.out 2> ~/harness2.err < /dev/null" if spec.resume else ""}
-    """, setup=EARLY[harness] if selfcompact else "")
+    """, setup="\n".join([EARLY[harness] if selfcompact else "", RECORDER if via == "hook" else ""]), via=via)
     if probe:
         return {"name": name, "home": str(home)}
+    if via == "hook":
+        return evaluate_hook(name, home)
+    if strategy == "clm":
+        return evaluate_clm(name, home)
     # Relay's own trigger compacts less often; after the harness compacted itself, turn 2 starts small.
     result = evaluate(name, home, need=(0, 0) if window else (2, 0) if native else None, selfcompact=selfcompact)
     if not result["passed"] and result["transient"] and result["requests"] < 3 and not retried:
         time.sleep(60)  # rate-limited before the task got going: try once more
-        return run(name, growth, retried=True, subagent=subagent, window=window, native=native, selfcompact=selfcompact)
+        return run(name, growth, retried=True, subagent=subagent, window=window, native=native, selfcompact=selfcompact,
+                   via=via, lines=lines, strategy=strategy)
     return result
 
 
 def container(name: str, root: Path, env: dict[str, str], turns: str, timeout: int = 1500, install: bool = True,
-              setup: str = "") -> None:
+              setup: str = "", via: str = "proxy") -> None:
     """Run `turns` (shell) on a user's machine, in the image: HOME is root/home and /project is
     root/project; the harness is configured as the user had it (`Spec.setup`), Relay serves (its
     process id in ~/relay.pid) and, unless `install` is false, `relay install` points the
@@ -437,7 +463,7 @@ def container(name: str, root: Path, env: dict[str, str], turns: str, timeout: i
         until python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8787))' 2>/dev/null; do sleep 0.2; done
         cd ~ && {spec.setup}
         {setup}
-        {f"cd /relay && python3 -m relay.cli install {harness} >> ~/relay.log 2>&1" if install else ""}
+        {f"cd /relay && python3 -m relay.cli install {harness} --via {via} >> ~/relay.log 2>&1" if install else ""}
         {turns}
     """
     docker = ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "-w", "/project",
@@ -520,6 +546,15 @@ def name_of(keys: list[bytes]) -> tuple[bytes, ...]:
 
 LAYOUT = {Kind.SYSTEM: "S", Kind.CONTEXT: "C", Kind.USER: "U", Kind.SUMMARY: "Y"}
 MARK = json.dumps(SUMMARY_PREFIX)[1:61]  # how every summary starts inside a JSON body
+
+
+ASKED = json.dumps(SUMMARIZATION_PROMPT[:80])[1:-1]  # Codex's summary prompt inside a JSON body
+
+
+def own_words(summary: str) -> str:
+    """A summary's own words as they appear inside a JSON body (its start is the fixed prefix)."""
+
+    return json.dumps(summary)[-201:-1]
 MODEL_CALLS = ("/responses", "/chat/completions", "/messages", ":generateContent", ":streamGenerateContent")
 
 
@@ -560,18 +595,19 @@ def evaluate(name: str, home: Path, need: tuple[int, int] | None = None, selfcom
         def kind(entry: dict) -> Kind:
             return Kind(entry["kind"]) if "kind" in entry else harness.refine(codec.classify(raw[entry["ref"]])).kind
 
-        layout = "".join(LAYOUT.get(kind(entry), "?") for entry in event["head"])
-        kept = {e["ref"] for e in event["head"] if "ref" in e}
+        head, covered = split(event["head"], kind, len(raw))
+        layout = "".join(LAYOUT.get(kind(entry), "?") for entry in head)
+        kept = {e["ref"] for e in head if "ref" in e}
         first_action = next((i for i in range(len(raw)) if kind({"ref": i}) in AGENT_KINDS), len(raw))
         initial = {i for i in range(first_action) if kind({"ref": i}) in CONTEXT_KINDS}
-        start = event["covered"] < len(raw)
+        start = covered < len(raw)
         if start and codec.name == "anthropic_messages":  # no legal place for a system message there
             initial = {i for i in initial if kind({"ref": i}) is not Kind.SYSTEM}
         rendered = harness.state(codec, raw)  # the harness's state now: all of it must be in the new context
         if rendered.items:
-            wires = [json.loads(e["wire"]) for e in event["head"] if "wire" in e]
+            wires = [json.loads(e["wire"]) for e in head if "wire" in e]
             expected = [i for i in rendered.items
-                        if (i.ref is None or i.ref < event["covered"])  # later state is still in the tail
+                        if (i.ref is None or i.ref < covered)  # later state is still in the tail
                         and not (start and codec.name == "anthropic_messages" and i.kind is Kind.SYSTEM)]
             missing = [i.ref if i.ref is not None else i.text[:60] for i in expected
                        if (i.ref not in kept if i.ref is not None else json.loads(i.wire) not in wires)]
@@ -588,11 +624,11 @@ def evaluate(name: str, home: Path, need: tuple[int, int] | None = None, selfcom
             pattern = r"S*U*YC*" if start else r"S*U*C*U?YS*"
         if not re.fullmatch(pattern, layout):
             problems.append(f"compaction {k}: layout {layout} is not Codex's")
-        summary = next((e["text"] for e in event["head"] if e.get("kind") == "summary"), "")
-        read = [c for c in CODES if f"CODE: {c}" in json.dumps(raw[: event["covered"]])]
+        summary = next((e["text"] for e in head if e.get("kind") == "summary"), "")
+        read = [c for c in CODES if f"CODE: {c}" in json.dumps(raw[:covered])]
         if lost := [c for c in read if c not in summary.lower()]:
             problems.append(f"compaction {k}: the summary lost {lost} of the {len(read)} codes read")
-        users = {i for i in range(event["covered"]) if harness.refine(codec.classify(raw[i])).kind is Kind.USER}
+        users = {i for i in range(covered) if harness.refine(codec.classify(raw[i])).kind is Kind.USER}
         if dropped := users - kept:
             problems.append(f"compaction {k}: user messages {sorted(dropped)} not kept verbatim")
         replaced.append((summary, read))
@@ -614,7 +650,7 @@ def evaluate(name: str, home: Path, need: tuple[int, int] | None = None, selfcom
         sent = json.dumps(request.get("forwarded") or request["body"])
         if request.get("forwarded") is None:
             problems.append(f"request {n}: forwarded without the compacted context")
-        elif sent.count(MARK) != 1 or json.dumps(summary)[1:200] not in sent:
+        elif sent.count(MARK) != 1 or own_words(summary) not in sent:
             problems.append(f"request {n}: carries {sent.count(MARK)} summaries, not just the latest")
         elif leaked := [c for c in read if any(f"CODE: {c}" in item.text for item in results(request))]:
             problems.append(f"request {n}: summarized tool output {leaked} still sent")  # (summaries may quote it)
@@ -686,12 +722,191 @@ def evaluate(name: str, home: Path, need: tuple[int, int] | None = None, selfcom
     }
 
 
+def evaluate_hook(name: str, home: Path) -> dict:
+    """Check a run in which the harness compacted through Relay's hook (`--via hook`), against
+    what the model received (the recorder's trace). Every compaction: Codex's replacement layout
+    (the user messages, then the summary), and a summary that kept every code the model had read
+    before it; the requests after it carry exactly that summary and none of the tool output it
+    replaced. Also: the harness never compacted on its own (no hook failure fell back to it),
+    no file was read twice, both answers are right, and every model call was accepted."""
+
+    def records(file: str) -> list[dict]:
+        path = home / file
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    events, trace = records("events.jsonl"), records("trace.jsonl")
+    requests = [r for r in trace if "body" in r]
+    answers = [(home / f).read_text(errors="replace").strip() if (home / f).exists() else "" for f in ("harness.out", "harness2.out")]
+    log = (home / "relay.log").read_text(errors="replace") if (home / "relay.log").exists() else ""
+    problems: list[str] = []
+
+    def view(request: dict) -> list:
+        codec, harness = codec_for(request["path"]), detect({}, path=request["path"])
+        return [harness.refine(codec.classify(item)) for item in codec.items(request["body"])]
+
+    def task(request: dict) -> str:  # a conversation, by its first user message (kept by every compaction)
+        return next((harness_visible(i.text) for i in view(request) if i.kind is Kind.USER), "")[:200]
+
+    def codes(items: list) -> set[str]:
+        return {c for c in CODES for i in items if i.kind is Kind.TOOL_RESULT and f"CODE: {c}" in i.text}
+
+    mids = starts = 0
+    for k, event in enumerate(events, start=1):
+        last = max((n for n, e in enumerate(event["head"]) if e.get("kind") == "summary"), default=len(event["head"]))
+        layout = "".join("Y" if e.get("kind") == "summary" else "U" for e in event["head"][: last + 1])
+        if not re.fullmatch(r"U*Y", layout):
+            problems.append(f"compaction {k}: layout {layout} is not Codex's")
+        if event["tokens_before"] < HOOK_THRESHOLD and not event.get("forced"):
+            problems.append(f"compaction {k}: at {event['tokens_before']} tokens, below the strategy's {HOOK_THRESHOLD}")
+        summary = next((e["text"] for e in event["head"] if e.get("kind") == "summary"), "")
+        start = any("ref" in e for e in event["head"][last + 1:])  # the new turn follows the summary
+        starts, mids = starts + start, mids + (not start)
+        first = next((n for n, r in enumerate(requests) if own_words(summary) in json.dumps(r["body"])), None)
+        if first is None:
+            problems.append(f"compaction {k}: its summary never reached the model")
+            continue
+        conversation = task(requests[first])
+        before = [r for r in requests[:first] if task(r) == conversation]
+        read = codes([i for r in before for i in view(r)])
+        if lost := sorted(c for c in read if c not in summary.lower()):
+            problems.append(f"compaction {k}: the summary lost {lost} of the {len(read)} codes read")
+        for n in range(first, len(requests)):  # later compactions replace the summary, never bring back the output
+            if task(requests[n]) != conversation or ASKED in json.dumps(requests[n]["body"]):
+                continue  # another conversation, or a fork making a summary (and its continuations)
+            sent = json.dumps(requests[n]["body"])
+            if sent.count(MARK) != 1:
+                problems.append(f"request {n}: carries {sent.count(MARK)} summaries, not just the latest")
+            elif leaked := sorted(codes(view(requests[n])) & read):
+                problems.append(f"request {n}: summarized tool output {leaked} still sent")
+    own = self_compactions(requests)
+    if own:
+        problems.append(f"the harness compacted on its own {len(own)}×: {own[:2]}")
+    if not events:
+        problems.append("the harness never compacted through the hook")
+    first_read: dict[tuple, str] = {}
+    for request in requests:
+        codec, harness = codec_for(request["path"]), detect({}, path=request["path"])
+        items, newest = codec.items(request["body"]), codec.canonical(codec.items(request["body"])[-1]).decode()
+        if reread := [n for n in files_read(codec, harness, items)
+                      if not same_call(first_read.setdefault((task(request), n), newest), newest)]:
+            problems.append(f"files read again: {[f'file_{n}.txt' for n in reread]}")
+    for turn, (answer, wanted) in enumerate(zip(answers, (CODES[:4], CODES)), start=1):
+        if not re.search(r"[\s,]+".join(wanted), answer.lower()):
+            problems.append(f"turn {turn} answer is wrong: {answer[-120:]!r}")
+    if "hook compaction failed" in log:
+        problems.append("a hook compaction failed (see relay.log)")
+    if rejected := sum(r["status"] >= 400 for r in trace if "status" in r):
+        problems.append(f"{rejected} model calls rejected")
+    return {
+        "name": f"{name} (hook)", "passed": not problems, "requests": len(requests), "mid_turn": mids, "turn_start": starts,
+        "resume_reused": None, "cache_hits": 0, "other_conversations": len({task(r) for r in requests}) - 1,
+        "self_compactions": len(own), "sub_compactions": sum(bool(e.get("agent")) for e in events),
+        "told": next((c for r in reversed(requests) for c in ("BETA", "ALPHA") if f"codename is {c}" in json.dumps(r["body"])), None),
+        "codename": next((c for c in ("BETA", "ALPHA") if c in answers[-1][-80:]), None),
+        "tokens_before": [e["tokens_before"] for e in events], "transient": 0, "problems": problems,
+        "answers": [a[-80:] for a in answers], "errors": "", "home": str(home),
+    }
+
+
+def evaluate_clm(name: str, home: Path) -> dict:
+    """Check a run with the CLM strategy (`--strategy clm`): the model edited its own context
+    through the mirror, and every accepted edit took effect exactly. On the request it was read
+    back and every later request of that conversation until the next edit, the turns it removed
+    are gone, the ones it kept are the original items, and its notes are there; the harness's own
+    items stay ahead of the conversation; every request that offers tools carries the strategy's
+    instructions and ends with the size readout. Also: both answers are right and every model call
+    was accepted. Re-reads are counted, not failed: a model may drop a file's text and read it
+    again."""
+
+    def records(file: str) -> list[dict]:
+        path = home / file
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    events, trace = records("events.jsonl"), records("trace.jsonl")
+    requests = [r for r in trace if "body" in r]
+    answers = [(home / f).read_text(errors="replace").strip() if (home / f).exists() else "" for f in ("harness.out", "harness2.out")]
+    problems: list[str] = []
+    edited = [n for n, r in enumerate(requests) if r["compacted"]]
+    if not events:
+        problems.append("the model never edited its context")
+    if len(edited) != len(events):
+        problems.append(f"{len(events)} edits logged, {len(edited)} requests rewritten")
+    for k, (event, at) in enumerate(zip(events, edited), start=1):
+        codec, harness = codec_for(requests[at]["path"]), detect({}, path=requests[at]["path"])
+        raw = codec.items(requests[at]["body"])
+        kept = {e["ref"] for e in event["head"] if "ref" in e and "text" not in e}
+        retold = {e["ref"]: e["text"] for e in event["head"] if "ref" in e and "text" in e}  # kept with new text
+        removed = [n for n in range(event["covered"]) if n not in kept and n not in retold
+                   and harness.refine(codec.classify(raw[n])).kind not in CONTEXT_KINDS]
+        notes = [e["text"] for e in event["head"] if "ref" not in e and "wire" not in e]
+        refs = [e["ref"] for e in event["head"] if "ref" in e]
+        if refs != sorted(refs):  # the harness's items where it sent them, the turns in their order
+            problems.append(f"edit {k}: request items out of order: {refs}")
+        until = next((n for n in edited if n > at), len(requests))
+        later = [r for r in requests[at:until] if codec.items(r["body"])[: event["covered"]] == raw[: event["covered"]]]
+        for r in later:
+            sent = codec.items(r.get("forwarded") or r["body"])
+            sent.append(without_note(sent[-1]))  # Anthropic and Gemini join the notes to the last user turn
+            if gone := [n for n in kept if raw[n] not in sent]:
+                problems.append(f"edit {k}: kept turns {gone} not forwarded as they were")
+            if back := [n for n in removed if raw[n] in sent]:
+                problems.append(f"edit {k}: removed turns {back} forwarded again")
+            if lost := [t[:40] for t in [*notes, *retold.values()] if json.dumps(t)[1:-1] not in json.dumps(sent)]:
+                problems.append(f"edit {k}: notes or new text {lost} missing")
+            if gone or back or lost:
+                break
+    for n, r in enumerate(requests):
+        if r["body"].get("tools") and not ("## Managing your context" in json.dumps(r.get("forwarded") or {})
+                                           and "[context: ~" in json.dumps((r.get("forwarded") or {}))):
+            problems.append(f"request {n}: without the strategy's instructions or readout")
+            break
+    for turn, (answer, wanted) in enumerate(zip(answers, (CODES[:4], CODES)), start=1):
+        if not re.search(r"[\s,]+".join(wanted), answer.lower()):
+            problems.append(f"turn {turn} answer is wrong: {answer[-120:]!r}")
+    if rejected := sum(r["status"] >= 400 for r in trace if "status" in r):
+        problems.append(f"{rejected} model calls rejected")
+    refused = sum(re.search(r"edit (NOT applied|REJECTED)", json.dumps(r.get("forwarded") or {})) is not None
+                  for r in requests)
+    usage = [r["usage"] for r in trace if r.get("usage")]
+    rereads = 0
+    first_read: dict[int, str] = {}
+    for request in requests:
+        codec, harness = codec_for(request["path"]), detect({}, path=request["path"])
+        items = codec.items(request["body"])
+        newest = codec.canonical(items[-1]).decode()
+        rereads += sum(not same_call(first_read.setdefault(n, newest), newest) for n in files_read(codec, harness, items))
+    return {
+        "name": f"{name} (clm)", "passed": not problems, "requests": len(requests), "edits": len(events),
+        "refused_edits": refused, "rereads": rereads, "prompt_tokens": [f"{u // 1000}k" for u in usage],
+        "answers": [a[-80:] for a in answers], "problems": problems, "home": str(home),
+    }
+
+
+def without_note(item: dict) -> dict:
+    """A message without its last part, where a note was joined to it."""
+
+    key = next((k for k in ("content", "parts") if isinstance(item.get(k), list) and item[k]), None)
+    return {**item, key: item[key][:-1]} if key else item
+
+
+def split(entries: list[dict], kind: Callable[[dict], Kind], length: int) -> tuple[list[dict], int]:
+    """A compaction's stored context as (head, covered): the entries before the history it keeps
+    (up to the summary, and the harness's state placed with it), and where that history begins."""
+
+    last = max((n for n, e in enumerate(entries) if e.get("kind") == "summary"), default=-1)
+    covered = min((e["ref"] for e in entries[last + 1:] if "ref" in e and kind(e) not in CONTEXT_KINDS), default=length)
+    return [e for e in entries if not ("ref" in e and e["ref"] >= covered)], covered
+
+
+def harness_visible(text: str) -> str:
+    return detect({}, "claude_code").visible(text)
+
+
 def show(result: dict) -> None:
     print(f"\n== {result['name']}: {'PASS' if result['passed'] else 'FAIL'}  ({result['home']})")
-    for key in ("requests", "mid_turn", "turn_start", "resume_reused", "cache_hits", "other_conversations", "self_compactions", "sub_compactions", "told", "codename",
-                "tokens_before", "transient", "answers", "problems", "errors"):
-        if result[key] or key not in {"problems", "errors"}:
-            print(f"  {key}: {result[key]}")
+    for key, value in result.items():
+        if key not in {"name", "passed", "home"} and (value or key not in {"problems", "errors"}):
+            print(f"  {key}: {value}")
 
 
 def main() -> int:
@@ -703,6 +918,11 @@ def main() -> int:
     parser.add_argument("--subagent", action="store_true", help="turn 2 hands three files to a sub-agent")
     parser.add_argument("--window", type=int, help="use Relay's own trigger for a context window of this size")
     parser.add_argument("--native-compact", action="store_true", help="the harness compacts itself between the turns")
+    parser.add_argument("--file-lines", type=int, default=120, help="lines per file (each ~18 tokens)")
+    parser.add_argument("--strategy", choices=["compaction", "clm"], default="compaction",
+                        help="Relay's strategy (clm: the model edits its own context)")
+    parser.add_argument("--via", choices=["proxy", "hook"], default="proxy",
+                        help="install through this path (hook: the harness compacts through Relay's hook)")
     parser.add_argument("--harness-compaction", action="store_true",
                         help="the harness's own auto-compaction set to fire early; it must stay off")
     options = parser.parse_args()
@@ -710,7 +930,8 @@ def main() -> int:
     results = []
     for name in names:
         results.append(run(name, options.growth, probe=options.probe, subagent=options.subagent, window=options.window,
-                           native=options.native_compact, selfcompact=options.harness_compaction))
+                           native=options.native_compact, selfcompact=options.harness_compaction, via=options.via,
+                           lines=options.file_lines, strategy=options.strategy))
         if options.probe:
             print(f"== {name}: probe recorded  ({results[-1]['home']})")
         else:
@@ -721,7 +942,7 @@ def main() -> int:
         print("\n| harness:model | mid-turn | turn start | requests | result |")
         print("|---|---|---|---|---|")
         for r in results:
-            print(f"| {r['name']} | {r['mid_turn']} | {r['turn_start']} | {r['requests']} "
+            print(f"| {r['name']} | {r.get('mid_turn', '-')} | {r.get('turn_start', '-')} | {r['requests']} "
                   f"| {'PASS' if r['passed'] else 'FAIL: ' + '; '.join(r['problems'])} |")
     out = Path(os.getenv("TMPDIR", "/tmp")) / "relay-matrix-results.jsonl"
     with out.open("a") as stream:

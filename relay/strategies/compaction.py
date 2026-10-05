@@ -19,7 +19,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from ..core.ir import AGENT_KINDS, Item, Kind, Rewrite, View
+from ..core.ir import AGENT_KINDS, Context, Item, Kind, Request
 from ..core.tokens import approx_tokens, truncate_middle
 from ..prompts import SUMMARIZATION_PROMPT, SUMMARY_PREFIX
 from .base import Summarizer
@@ -74,25 +74,25 @@ class Compaction:
     def limit(self, window: int | None) -> int:
         return self.threshold or int(self.ratio * (window or DEFAULT_WINDOW))
 
-    def plan(self, view: View, summarizer: Summarizer) -> Rewrite | None:
+    def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
         if self.growth:
-            budget, over = self.growth, view.base is not None and view.tokens - view.base >= self.growth
+            budget, over = self.growth, request.base is not None and request.tokens - request.base >= self.growth
         else:
-            budget = self.limit(view.window)
-            over = view.tokens >= budget
-        over = over or (view.window is not None and view.tokens >= HARD_LIMIT * view.window)
-        if not view.force and not over:
+            budget = self.limit(request.window)
+            over = request.tokens >= budget
+        over = over or (request.window is not None and request.tokens >= HARD_LIMIT * request.window)
+        if not request.force and not over:
             return None
-        cut = _cut(view)
+        cut = _cut(request)
         if cut is None:
             return None
-        items = view.items[:cut]
+        items = request.current[:cut]
         users = self._recent_users(items)
         freed = sum(approx_tokens(i.text) for i in items) - sum(approx_tokens(i.text) for i in users)
-        if not view.force and freed < self.min_gain * budget:
+        if not request.force and freed < self.min_gain * budget:
             return None
         summary = Item(Kind.SUMMARY, f"{SUMMARY_PREFIX}\n{summarizer.summarize(cut, SUMMARIZATION_PROMPT)}")
-        return Rewrite(cut, (*users, summary))
+        return Context((*users, summary, *request.current[cut:]))
 
     def _recent_users(self, items: tuple[Item, ...]) -> list[Item]:
         """The newest user messages within budget; the oldest one kept may be truncated."""
@@ -115,13 +115,13 @@ class Compaction:
         return kept[::-1]
 
 
-def _cut(view: View) -> int | None:
-    """Everything before a pending user turn, or the whole view mid-turn."""
+def _cut(request: Request) -> int | None:
+    """Everything before a pending user turn, or the whole conversation mid-turn."""
 
-    items = view.items
+    items = request.current
     last_agent = max((i for i, item in enumerate(items) if item.kind in AGENT_KINDS), default=None)
     if last_agent is None:
         return None
     pending_turn = any(item.kind is Kind.USER for item in items[last_agent + 1 :])
     cut = last_agent + 1 if pending_turn else len(items)
-    return cut if cut in view.boundaries else None
+    return cut if cut in request.boundaries else None

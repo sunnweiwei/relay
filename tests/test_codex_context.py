@@ -74,7 +74,7 @@ class RecordedCompactionTests(unittest.TestCase):
 class RebuildRuleTests(unittest.TestCase):
     def test_without_updates_the_first_rendering_is_kept_by_reference(self) -> None:
         context = rebuild(START)
-        self.assertEqual((context.pinned, context.context, context.updates), ((0, 1), (2, 3), frozenset()))
+        self.assertEqual((context.pinned, context.context), ((0, 1), (2, 3)))
 
     def test_latest_section_update_replaces_it_in_place(self) -> None:
         moved = "<environment_context>\n  <cwd>/b</cwd>\n</environment_context>"
@@ -101,8 +101,6 @@ class RebuildRuleTests(unittest.TestCase):
     def test_model_switch_only_at_the_start_of_the_switching_turn(self) -> None:
         switch = "<model_switch>\nnew model\n</model_switch>"
         new_turn = [*START, msg("assistant", "done"), msg("developer", switch), msg("user", "again")]
-        context = rebuild(new_turn)
-        self.assertIn(len(START) + 1, context.updates)  # folded in: a rewrite at the turn start drops it
         self.assertEqual(rendered(new_turn)[0]["content"][0]["text"], switch)
         self.assertEqual(rendered([*new_turn, CALL, OUTPUT]), rendered(START))
 

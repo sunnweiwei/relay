@@ -3,7 +3,7 @@
 A strategy sees only the conversation. Everything the harness itself writes into the request
 (instructions, environment, reminders, modes) is the profile's business: which items are
 injected (`refine`), what makes two requests the same conversation (`identity`), what the
-harness's state is now (`state`), and where that state goes in a rewritten history (`place`).
+harness's state is now (`state`), and where that state goes after a compaction (`place`).
 """
 
 from __future__ import annotations
@@ -29,11 +29,9 @@ NEVER = 10**9
 class State:
     """What the harness has told the model about its state, as it stands now: request items
     kept by `ref`, or items Relay writes (`wire`). SYSTEM items go first, the rest form one
-    context block. `supersedes` holds history items whose content the state replaces; a
-    rewrite drops those that directly follow its cut (a new turn's own updates)."""
+    context block."""
 
     items: tuple[Item, ...] = ()
-    supersedes: frozenset[int] = frozenset()
 
 
 class Harness:
@@ -111,13 +109,13 @@ class Harness:
             if view[i].kind in CONTEXT_KINDS and (pick := latest.get(keys.get(i, ""), i)) not in chosen:
                 chosen.append(pick)
         chosen += [i for i in latest.values() if i not in chosen]
-        return State(tuple(replace(view[i], ref=i) for i in chosen), frozenset(keys))
+        return State(tuple(replace(view[i], ref=i) for i in chosen))
 
     def place(self, head: tuple[Item, ...], state: tuple[Item, ...], mid_turn: bool) -> tuple[Item, ...]:
-        """Put the harness's state into a rewritten head, the way Codex does after compacting:
-        system items first; mid-turn the context sits just above the last real user message (or
-        the summary, which stays last), and at a turn start it follows the head, ahead of the
-        new turn."""
+        """Put the harness's state into a compacted head (ending with its summary), the way Codex
+        does after compacting: system items first; mid-turn the context sits just above the last
+        real user message (or the summary, which stays last), and at a turn start it follows the
+        head, ahead of the new turn."""
 
         system = tuple(item for item in state if item.kind is Kind.SYSTEM)
         context = tuple(item for item in state if item.kind is not Kind.SYSTEM)

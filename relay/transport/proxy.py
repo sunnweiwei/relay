@@ -2,7 +2,8 @@
 
 Conversation endpoints (one per codec) go through the engine; every other request,
 and every response body, passes through unchanged. Streaming responses are relayed
-as they arrive while a tap reads the reported prompt tokens.
+as they arrive while a tap reads the reported prompt tokens. The same server answers
+harness hooks (`hooks.py`).
 """
 
 from __future__ import annotations
@@ -29,7 +30,8 @@ from ..core.store import PrefixStore
 from ..harnesses import detect
 from ..protocols import Codec, codec_for
 from ..providers import Upstream, route, upstreams_from_env
-from ..strategies import Compaction
+from ..strategies import STRATEGIES
+from .hooks import hook_routes
 
 log = logging.getLogger("relay")
 
@@ -58,7 +60,7 @@ class ProxyConfig:
 def engine_from_env() -> Engine:
     window = os.getenv("RELAY_CONTEXT_WINDOW")
     return Engine(
-        Compaction.from_env(),
+        STRATEGIES[os.getenv("RELAY_STRATEGY", "compaction")].from_env(),
         PrefixStore.from_env(),
         window=int(window) if window else None,
         event_log=os.getenv("RELAY_EVENT_LOG") or None,
@@ -154,7 +156,7 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
         return await _relay(response, codec, streaming, on_usage)
 
     return Starlette(
-        routes=[Route("/{path:path}", handle, methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"])],
+        routes=[*hook_routes(engine), Route("/{path:path}", handle, methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"])],
         lifespan=lifespan,
     )
 
