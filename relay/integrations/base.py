@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -58,6 +59,9 @@ class Supplied:
         if key not in self.summaries:
             raise SummaryNeeded(key, cut, prompt)
         return self.summaries[key]
+
+    def complete(self, items: Sequence[Item]) -> str:
+        raise NotImplementedError("a hook can only continue the harness's own conversation; this strategy needs the proxy")
 
 
 LABELS = {Kind.USER: "User", Kind.SUMMARY: "Summary", Kind.ASSISTANT: "Assistant",

@@ -82,6 +82,14 @@ class StateTests(unittest.TestCase):
         mode = msg("user", "<system-reminder>\nAuto permission mode is active.\n</system-reminder>")
         return [msg("user", "task"), date, mode, *step(1), msg("assistant", "done"), *extra]
 
+    def test_a_pi_section_update_keeps_the_prompt_it_updates(self) -> None:
+        prompt = msg("developer", "You are an expert coding assistant operating inside pi.")
+        update = msg("developer", 'Updated system prompt section "project_context":\n\n<project_context>BETA</project_context>')
+        resumed = msg("developer", "You are an expert coding assistant operating inside pi. (resumed)")
+        items = [prompt, msg("user", "task"), *step(1), update]
+        self.assertEqual([i.ref for i in Pi().state(CODEC, items).items], [0, 4])
+        self.assertEqual([i.ref for i in Pi().state(CODEC, [*items, resumed]).items], [5, 4])  # a whole new prompt replaces it
+
     def test_openclaws_internal_context_is_its_own(self) -> None:
         item = CODEC.classify(msg("user", "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\nsessions: none"))
         self.assertIs(OpenClaw().refine(item).kind, Kind.CONTEXT)

@@ -62,6 +62,9 @@ class Codec(Protocol):
     def summary_request(self, body: Body, items: list[WireItem], prompt: str) -> Body:
         """Continue the same request with `prompt` as the final user turn."""
 
+    def request(self, body: Body, system: str, items: list[WireItem]) -> Body:
+        """A request of its own to the same model: `system` as its instructions, `items`, no tools."""
+
     def stream_result(self, events: list[Body]) -> Body:
         """The response body equivalent to a list of streamed events."""
 
@@ -72,6 +75,9 @@ class Codec(Protocol):
 
     def usage(self, payload: Body) -> int | None:
         """Prompt tokens reported by a response body or a streaming event."""
+
+    def cached(self, payload: Body) -> int | None:
+        """Prompt tokens the upstream read from its cache, from a response body or a streaming event."""
 
     def is_overflow(self, status: int, payload: Any) -> bool:
         """Whether an error response means the prompt exceeded the context window."""

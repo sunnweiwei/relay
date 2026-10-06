@@ -151,6 +151,11 @@ class AnthropicMessages:
             request["output_config"] = {k: v for k, v in request["output_config"].items() if k != "format"}
         return request
 
+    def request(self, body: Body, system: str, items: list[WireItem]) -> Body:
+        request = self.summary_request({k: v for k, v in body.items() if k not in {"tools", "tool_choice"}}, items, "")
+        request.update(messages=items, system=system)
+        return request
+
     def stream_result(self, events: list[Body]) -> Body:
         deltas = (e.get("delta") or {} for e in events if e.get("type") == "content_block_delta")
         stop = next((e["delta"].get("stop_reason") for e in reversed(events)
@@ -180,6 +185,12 @@ class AnthropicMessages:
             return None
         keys = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
         return sum(usage.get(key) or 0 for key in keys) or None
+
+    def cached(self, payload: Body) -> int | None:
+        if payload.get("type") == "message_start":
+            payload = payload.get("message") or {}
+        usage = payload.get("usage")
+        return usage.get("cache_read_input_tokens") if isinstance(usage, dict) else None
 
     def is_overflow(self, status: int, payload: Any) -> bool:
         _, message = error_message(payload)

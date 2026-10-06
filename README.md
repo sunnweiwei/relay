@@ -87,7 +87,7 @@ Three layers keep strategies free of harness and protocol details:
 | `relay/protocols/` | One codec per wire protocol (OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, Gemini): item kinds and text, legal cut points (never between a tool call and its result), prefix canonicalization, synthetic messages, summary requests, usage and overflow errors. |
 | `relay/harnesses/` | Harness profiles: injected context, conversation identity, current state and its placement, the harness's own compaction requests, detection from request headers, and the settings `relay install` writes. |
 | `relay/install.py` | `relay install` / `uninstall`: reversible edits of JSON, TOML, YAML and `.env` config files, and the endpoint mounts Relay forwards. |
-| `relay/strategies/` | Strategies. `compaction.py` ports Codex's local compaction; `clm.py` lets the model edit its own context (Context Language Models). |
+| `relay/strategies/` | Strategies. `compaction.py` ports Codex's local compaction; `clm.py` lets the model edit its own context (Context Language Models); `folding.py` folds the branches an agent returns from (Context Folding); `prolong.py` keeps a session log the agent searches (PRO-LONG). |
 | `relay/core/engine.py` | Per-request orchestration: restore the stored context, estimate tokens, ask the strategy, place the harness's own items, check the result, remember. It records each request's cache decision (matched depth) and warns when a request no longer reaches its conversation's last stored context, with the item where it diverged. Strategy failures never reach the harness; the request is forwarded with the last good context. |
 | `relay/core/store.py` | Exact-prefix store (a trie over item identities): a context computed for one request is found again by every later request that extends the same history, including other conversations forked from it (sub-agents). Relay keeps no other session state. |
 | `relay/providers.py` | Upstream routing (installed mounts, else by path) and model context windows. |
@@ -273,8 +273,9 @@ mini-swe-agent on GPT, and Gemini CLI, pi, Goose and Crush on Gemini. In Crush a
 edit was right, but the model read file_2 again although told not to. In pi and nanobot the model
 read the three files with parallel calls; once file_2's call went, the rest of that group became
 notes (the text right, the calls no longer calls), which Relay no longer does: only the items the
-protocol cannot keep are told as notes now. Gemini CLI, driven through LiteLLM to
-GPT, never edited the file. The paper-style task (`--strategy clm`, a 26k budget and its nudges)
+protocol cannot keep are told as notes now. Gemini CLI driven through LiteLLM to GPT never edited
+the file, because LiteLLM keeps only the first part of a Gemini system instruction and Relay had
+added its guidance as a second one; it joins the last part now, and the run passes. The paper-style task (`--strategy clm`, a 26k budget and its nudges)
 passed for Codex (7 edits over 27 requests) and Claude Code (6 over 21): the models mostly
 shortened old tool results in place, their calls still structured calls.
 
@@ -303,11 +304,136 @@ until the model removes it (as in pi-clm); revisions live in Relay's in-memory s
 returns the model to its raw history; through Claude Code's hook the instructions and notes cannot
 be delivered, so CLM runs through the proxy.
 
+## Context Folding
+
+`RELAY_STRATEGY=folding` lets the agent branch off a sub-task and come back with a message, as in
+FoldAgent ([github.com/sunnweiwei/FoldAgent](https://github.com/sunnweiwei/FoldAgent),
+`relay/strategies/folding.py`). The harness's own shell stands in for FoldAgent's `branch` and
+`return` tools: the guidance asks the agent to run `echo "[branch] <description> :: <task>"`, work on
+the sub-task, and run `echo "[return] <message>"`. The echo's result is rewritten in place:
+FoldAgent's branch message ("ROLE CHANGE: `MODE: BRANCH`" and the task) when the branch opens, and
+"Branch has finished its task, the returned message is: ..." when it returns, when the branch's
+steps and the return call fold away. Nothing before the branch call changes, so the upstream's
+prompt cache serves it on the request after the fold. A branch cannot open another (FoldAgent's
+rule). The conversation itself says which branches are open or done; the strategy keeps no state.
+
+Checked in Docker with `check.py --strategy folding` (read file_1, read file_2 and file_3 in a
+branch and return their codes, read file_4; then say, without reading, whether file_2's text is
+still there). The branch opened and folded in 18 of 19 harness/model pairs: Codex, Claude Code, pi,
+OpenCode, Kilo, Crush, OpenClaw, Goose, Kimi Code, Hermes, nanobot, DeepSeek Harness, WorkBuddy and
+mini-swe-agent on GPT, and Gemini CLI, pi, Goose and Crush on Gemini. Every later request kept the
+returned codes and neither file's text, and the model answered right and no longer saw file_2. On
+the request after the fold the upstream's cache served 69% to 98% of the prompt where it reports
+cache use (Codex 86%, Claude Code 89%, Gemini CLI on Gemini 72%). Gemini CLI on GPT, which had not
+been told about branches (see the LiteLLM note under CLM), used its own sub-agent tool
+(`invoke_agent`); told, it branches and folds too. Codex at times reaches for its `spawn_agent`. The signal is read from the echo's output in whatever
+form a harness reports it (plain, JSON, `Command: … Output: …`), else from the call.
+
+## PRO-LONG
+
+`RELAY_STRATEGY=prolong` gives the agent durable memory, as PRO-LONG does
+([github.com/alexisfox7/PRO-LONG](https://github.com/alexisfox7/PRO-LONG), `relay/strategies/prolong.py`):
+every event of the session (user prompts, the agent's messages, tool calls and results) is appended
+to one local log (`RELAY_PROLONG_LOG`, PRO-LONG's JSONL format), and PRO-LONG's skill tells the agent
+to search only what it needs there with `rg`, `grep`, `jq` or a script. The log never enters the
+prompt, and reading it is not recorded. PRO-LONG writes the log from each harness's hooks; Relay
+writes it from the requests, so it works in every harness. It matters once the context loses
+something, so it runs around compaction (the `RELAY_COMPACT_*` settings apply): compaction decides
+what the model sees, the log keeps everything.
+
+Checked in Docker with `check.py --strategy prolong`: each file also names an animal, which turn 1
+does not ask for and turn 2 does, after a compaction, without the files. In all 18 two-turn
+harness/model pairs the log held every event once and no read of itself, and the skill reached
+every request; the summaries had dropped the animal. Codex, Claude Code, OpenCode, Kilo, Crush,
+OpenClaw, Goose, nanobot and DeepSeek Harness on GPT, and Gemini CLI, pi, Goose and Crush on Gemini
+searched the log and answered right, and so do Gemini CLI on GPT (once the skill reached it past
+LiteLLM) and pi (once its own system prompt survived compaction, and with the same reasoning effort
+as Codex: it had run with low). So do the last three, once the test was fair: WorkBuddy once its
+model reasons (see ³ below; without reasoning it never looked), and Kimi Code and Hermes once the
+question named the line (`file N animal: …`; every line of the files mentions a fox and a dog, and
+Kimi Code had answered one of them). Hermes first searches its own session history, then the log,
+and never reopens file_2 (the check had taken that search's query for a read).
+
+## The CLM paper's baselines
+
+The CLM paper compares against methods that manage context through predefined actions or a
+schedule the harness keeps. Each is a strategy here, in every harness (`relay/strategies/`); where a
+method gives the model a tool, the harness's own shell stands in for it, as for Context Folding: the
+guidance asks the agent to `echo` a signal, and the echo's result is rewritten in place.
+
+| Baseline | `RELAY_STRATEGY` | What Relay does | Prompts |
+| --- | --- | --- | --- |
+| Summary | `compaction` with `RELAY_COMPACT_RATIO=0.75` | Codex's compaction at 75% of the budget (the paper's summary harness) | Codex's |
+| Self-Compact ([arXiv 2606.23525](https://arxiv.org/abs/2606.23525)) | `selfcompact` | every two model responses once the prompt passes 37% of the window, appends the rubric to the conversation (prompt cache reused); C1 = C2 = C3 = Y and N1 = N fires the summarizer, and the summary replaces the trajectory (the user's messages stay); past 95% it summarizes without asking | the paper's rubric and summarizer, verbatim |
+| AutoCompact ([autocompact.github.io](https://autocompact.github.io/)) | `autocompact` | the agent runs `echo "[compact]"` at a phase transition; the same model writes an "# Auto Context Summary", which answers the call, and the context becomes the user's messages, the turn before the call and the summary; Codex's compaction stays as the fallback (`RELAY_COMPACT_*`) | none released; written from its description |
+| ACM ([github](https://github.com/lixiaochuan2020/agentic-context-management)) | `acm` | `echo "[manage_context]"` compresses everything since the previous call into "[summary_id: N] ...", the originals saved to `RELAY_ACM_DIR/<conversation>/summary_N.json`; `echo "[query_memory] N :: query"` answers from them; every request after a tool result ends with "[CURRENT CONTEXT TOKEN: N]" | ACM's summarizer and recall prompts, verbatim; its guidance worded for a shell |
+| MEM1 ([github](https://github.com/MIT-MI/MEM1)) | `mem1` | the model writes its internal state in `<IS>` every response; the context is cut back to the newest response holding one (the user's messages stay) | MEM1's, for an agent's tools |
+| RLM ([github](https://github.com/alexzhang13/rlm)) | `rlm`, `rlm_persistent` | before every step the authors' RLM works out the agent's next step, the conversation held as `context` in its REPL; its answer is all the task's model sees of the conversation, and that model, with the harness's tools, takes the step. `rlm` is a fresh query every request (the whole conversation again, nothing cached); `rlm_persistent` is the authors' multi-turn mode: the conversation's REPL stays, each request adds only what is new as `context_k`, and earlier work stays in `history_k` and in the model's variables | the authors' (`rlms` 0.1.3); the root prompt asks for the next step |
+| Context Folding | `folding` | see above | FoldAgent's |
+
+Base is Relay without a strategy that changes anything. AutoCompact and MEM1 train their models to
+the behavior; an untrained model gets the guidance alone, so whether it compacts at the right
+moment, or writes its internal state at all, is the model's.
+
+The RLM runs inside Relay (`pip install 'relay[rlm]'`; `relay/strategies/rlm.py`): every model call
+it makes, the root's and the sub-calls', goes to the task's own model through the harness's
+upstream and credentials, with the RLM's instructions and no tools (`Summarizer.complete`). Its
+`local` environment runs the model's code in Relay's process, so it can read and change whatever
+Relay can (in the tests Gemini read the project's files itself); `RELAY_RLM_ENVIRONMENT=docker`
+uses the authors' Docker environment. It cannot run through Claude Code's hook, which can only continue
+the harness's own conversation. Through the Responses API, gpt-6 writes its plan and its code as
+commentary before a final answer, and repeats it at times: the RLM gets every message once, which it
+needs (from the final answer alone, or with the repeats, it did not converge).
+
+Checked in Docker with `check.py --strategy rlm|rlm_persistent` (read three files, one per call, and
+give their codes; turn 2 asks for them again without reading). `rlm` passed in Codex, pi and Claude
+Code on GPT: before every step the RLM ran (14–31 of its own model calls per run), the step's model
+saw only its result, and both answers were right. In WorkBuddy two of the RLM's calls through
+LiteLLM ran past Relay's 10-minute read limit, and Relay forwarded those steps unchanged (answers
+right); gemini-3.8-flash, in Gemini CLI, almost never submitted through `answer` (375 calls over 18
+steps, some answers unfinished, those steps forwarded unchanged). `rlm_persistent` worked out every
+step of turn 1 in Codex, but on turn 2, with the user's new message in the newest `context_k`, the
+model spent all 30 turns piecing the contexts together and never submitted; the authors' package
+with its own client does the same with this model, so it is the mode's, not Relay's. gpt-6 follows
+the `answer` protocol unevenly in any case: the authors' client, alone, has needed 3 to 31 calls
+for the same step.
+
+Checked in Docker on 19 harness/model pairs each (`check.py --strategy selfcompact|autocompact|acm|mem1`;
+Gemini was overloaded during much of it, answering 503s; failed pairs were run again):
+
+- **Self-Compact** (the default task, window 40k): the rubric was asked and fired, and the summary
+  replaced the trajectory, in every pair; the model then finished with all eight codes in 18 (all
+  but pi on Gemini, whose runs kept meeting Gemini's 503s). On this task the rubric fires at nearly
+  every probe (C1–C3 Y, N1 N). Gemini CLI on Gemini passed once Gemini was not overloaded (before,
+  it gave up on requests held 46–113 s while the probe and summary waited on 503s). Through Claude Code's hook it runs too (the harness's own model answers the rubric, then
+  summarizes; checked with `--via hook`), as it needs no instructions or notes.
+- **AutoCompact** (compact after reading three files): the compact call was answered by the
+  summary, the turn before it kept, and the files before it gone, and the answers were right, in 18
+  pairs. Gemini CLI on Gemini reads the three files in one turn (twice), so that turn, the one kept,
+  holds all three.
+- **ACM** (compress three reads, then recall an animal the summary dropped): in all 19 pairs the
+  reads were compressed into "[summary_id: 1]" with the originals saved, query_memory recalled the
+  animal from them, the context size reached every request, and the answers were right.
+- **MEM1** (the default task): the context was cut back to the newest internal state on every
+  request in 18 pairs (Chat Completions, Anthropic and Gemini carry the model's text in the same
+  message as its calls, where MEM1 reads it), and the model, carrying the codes only there, finished
+  right in 15: Codex, pi, OpenCode, Kilo, Crush, OpenClaw, Goose, Kimi Code, nanobot, DeepSeek
+  Harness, WorkBuddy and mini-swe-agent on GPT, and Gemini CLI, Crush and Goose on Gemini. Claude
+  Code and Gemini CLI on GPT dropped the first codes from their own internal state, twice each
+  (Claude Code's model called them "not verified in this turn"; LiteLLM, between them and OpenAI,
+  forwards the state); Hermes's model wrote states that were not cumulative and made codes up (in
+  another run its `read_file` answered a repeated read with "File unchanged since last read",
+  pointing at content MEM1 had removed); pi on Gemini met Gemini's 503s.
+
 ## Configuration
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `RELAY_STRATEGY` | `compaction` | The strategy: `compaction` (Codex's) or `clm` (the model edits its own context). |
+| `RELAY_STRATEGY` | `compaction` | The strategy: `compaction` (Codex's), `clm` (the model edits its own context), `folding` (the agent branches and returns), `prolong` (compaction, and a log the agent searches), or one of the CLM paper's baselines: `selfcompact`, `autocompact`, `acm`, `mem1`, `rlm`, `rlm_persistent`. |
+| `RELAY_RLM_MAX_ITERATIONS`, `RELAY_RLM_MAX_DEPTH` | `30`, `1` | RLM: root turns per step, and recursion depth (1: sub-calls are plain model calls), the authors' defaults. |
+| `RELAY_RLM_ENVIRONMENT` | `local` | RLM: where the model's code runs; `local` is Relay's own process. |
+| `RELAY_ACM_DIR` | `/tmp/.acm` | ACM: where the compressed messages are saved, a folder per conversation (Relay reads them back for `query_memory`). |
+| `RELAY_PROLONG_LOG` | `/tmp/.prolong/log.jsonl` | PRO-LONG: the session log; the harness's tools must be able to read it (Relay writes a `.gitignore` next to it). |
 | `RELAY_COMPACT_THRESHOLD` | `RELAY_COMPACT_RATIO` × context window | Prompt tokens that trigger compaction. |
 | `RELAY_COMPACT_RATIO` | `0.9` | Share of the model's context window used when no threshold is set. |
 | `RELAY_COMPACT_GROWTH` | unset | Instead of a threshold, compact after this many tokens were added since the context window began (Codex's `BodyAfterPrefix` scope); independent of each harness's fixed prompt overhead. |
@@ -376,9 +502,12 @@ OpenAI; `relay install` wrapped that gateway (harness → Relay → LiteLLM → 
 not translate protocols itself.
 ³ WorkBuddy is a desktop app; its engine ships as the CodeBuddy Code CLI, which was run on
 `~/.workbuddy`. Built-in models go through Tencent's service and cannot be managed; custom
-models can. gpt-6 accepts tools on Chat Completions only with `reasoning_effort: none`, so
-thinking was turned off; nanobot likewise needs a reasoning effort set to stop sending
-`temperature` to gpt-6.
+models can, through Chat Completions only. gpt-6 accepts tools on Chat Completions only with
+`reasoning_effort: none` (CodeBuddy itself drops the effort for api.openai.com), so WorkBuddy is
+pointed at a LiteLLM gateway that sends its requests to the Responses API, where the model reasons
+(`--effort medium`); run without reasoning, the model refused to answer from summaries or its
+own earlier context. Every harness runs gpt-6 at medium effort (nanobot and DeepSeek Harness set
+it explicitly; Claude Code asks for high itself).
 
 ⁴ One turn: mini cannot continue a session, so the turn-start path is not exercised.
 
@@ -515,7 +644,10 @@ covered yet.
   and new ones; a new SYSTEM item joins the system prompt, and a SUMMARY marks a compaction (the
   harness's state goes where the harness puts it after its own). Add `state` for the next
   request and `notes` for this one only. `summarizer.summarize(cut, prompt)` asks the task's
-  own model about `current[:cut]`. Register it in `STRATEGIES` (`RELAY_STRATEGY`).
+  own model about `current[:cut]`; `summarizer.complete(items)` asks it anything else, with
+  instructions of its own and no tools. Register it in `STRATEGIES` (`RELAY_STRATEGY`). To give the
+  model an action without a new tool, have it echo a signal through the harness's shell and rewrite
+  the echo's result (`relay/strategies/conversation.py`, as Context Folding, AutoCompact and ACM do).
 
 ```python
 @dataclass(frozen=True)

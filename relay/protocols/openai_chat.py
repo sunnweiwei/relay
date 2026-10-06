@@ -138,6 +138,13 @@ class OpenAIChat:
             request["tool_choice"] = "none"
         return request
 
+    def request(self, body: Body, system: str, items: list[WireItem]) -> Body:
+        drop = {"stream", "stream_options", "response_format", "n", "tools", "tool_choice", "parallel_tool_calls",
+                "functions", "function_call"}
+        request = {key: value for key, value in body.items() if key not in drop}
+        request.update(messages=[{"role": "system", "content": system}, *items] if system else items, stream=False)
+        return request
+
     def stream_result(self, events: list[Body]) -> Body:
         choices = [choice for event in events for choice in event.get("choices") or []]
         text = "".join((choice.get("delta") or {}).get("content") or "" for choice in choices)
@@ -158,6 +165,10 @@ class OpenAIChat:
         usage = payload.get("usage")
         tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
         return tokens if isinstance(tokens, int) else None
+
+    def cached(self, payload: Body) -> int | None:
+        details = (payload.get("usage") or {}).get("prompt_tokens_details") if isinstance(payload.get("usage"), dict) else None
+        return details.get("cached_tokens") if isinstance(details, dict) else None
 
     def is_overflow(self, status: int, payload: Any) -> bool:
         code, message = error_message(payload)
