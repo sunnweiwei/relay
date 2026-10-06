@@ -98,6 +98,21 @@ class ClmTests(unittest.TestCase):
         self.edit(lambda s: s.replace("id=1-", "id=x-"))
         self.assertIn("is unknown", self.send(*self.history, *call(3), *call(4)).body["input"][-1]["content"][0]["text"])
 
+    def test_a_header_is_read_by_its_attributes_or_refused(self) -> None:
+        # Headers models wrote: `index=new`, attributes reordered, no document at all.
+        self.send(*self.history)
+        self.edit(lambda s: s + "\n\n[[CTX_TURN role=notes id=new-a index=new]]\nMARKER A")
+        sent = self.send(*self.history, *call(3))
+        self.assertTrue(sent.compacted)
+        self.assertIn(msg("user", [{"type": "input_text", "text": "[context role=notes]\nMARKER A"}]), sent.body["input"])
+        # A file written back without its first line still names its version in every header.
+        self.edit(lambda s: s.split("\n", 1)[1].replace("MARKER A", "MARKER A2"))
+        self.assertTrue(self.send(*self.history, *call(3), *call(5)).compacted)
+        # A header from another version of the file is refused, not taken for text.
+        self.edit(lambda s: s + "\n\n[[CTX_TURN document=0000000000000000 index=9 role=notes id=new-b]]\nMARKER B")
+        receipt = self.send(*self.history, *call(3), *call(4)).body["input"][-1]["content"][0]["text"]
+        self.assertIn("this header cannot be read", receipt)
+
     def test_wiping_every_block_keeps_the_task(self) -> None:
         self.send(*self.history)
         # The edit a model made in a real run: every block's text emptied.
@@ -158,6 +173,18 @@ class ClmTests(unittest.TestCase):
     def test_side_calls_are_left_alone(self) -> None:
         request = body(msg("user", "title this"), tools=None)
         self.assertIs(self.engine.prepare(CODEC, HARNESS, request, tenant="t", post=unreachable).body, request)
+
+    def test_a_steering_policy_joins_the_guidance_and_nudges_can_be_off(self) -> None:
+        policy = "Mask each tool result once you have used it."
+        self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory),
+                                                  steering=policy, nudges=False))
+        history = [msg("user", "read the files")]
+        for i in range(1, 45):
+            history += call(i)
+            sent = self.send(*history).body["input"]
+            self.assertNotIn("CONTEXT BUDGET NUDGE", sent[-1]["content"][0]["text"])
+        self.assertTrue(sent[0]["content"][0]["text"].endswith(policy))
+        self.assertRegex(sent[-1]["content"][0]["text"], r"\[context: ~\d+/3800 tokens — OVER")
 
     def test_nudges_escalate_once_per_tier_then_every_request_near_the_limit(self) -> None:
         self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory)))

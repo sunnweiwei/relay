@@ -30,7 +30,7 @@ class Gemini:
         return {**body, "contents": items}
 
     def classify(self, item: WireItem) -> Item:
-        parts = [part for part in item.get("parts") or [] if isinstance(part, dict)]
+        parts = _distinct(item.get("parts") or [])
         text = "\n".join(filter(None, (_part_text(part) for part in parts)))
         if item.get("role") == "model":
             opaque = sum(decoded(part.get("thoughtSignature") or part.get("thought_signature")) for part in parts)
@@ -48,13 +48,9 @@ class Gemini:
         """Gemini CLI rewrites a resumed history: each tool result is repeated and thought
         signatures become a placeholder. Neither changes the conversation."""
 
-        parts: list[Any] = []
-        for part in item.get("parts") or []:
-            if isinstance(part, dict):
-                part = {key: value for key, value in part.items() if key not in {"thoughtSignature", "thought_signature"}}
-            if not parts or part != parts[-1]:
-                parts.append(part)
-        return canonical_json({**item, "parts": parts})
+        unsigned = [{k: v for k, v in part.items() if k not in {"thoughtSignature", "thought_signature"}}
+                    for part in item.get("parts") or [] if isinstance(part, dict)]
+        return canonical_json({**item, "parts": _distinct(unsigned)})
 
     def boundaries(self, items: list[WireItem]) -> frozenset[int]:
         legal = {0}
@@ -77,7 +73,8 @@ class Gemini:
         raise ValueError(f"Relay cannot write a {item.kind.value} item")
 
     def edit(self, wire: WireItem, text: str, media: tuple[Media, ...]) -> WireItem:
-        """Thoughts stay as they were; tool results share the new content: the first carries it."""
+        """Thoughts stay as they were; tool results share the new content: the first carries it
+        (and its repeats)."""
 
         parts = [part for part in wire.get("parts") or [] if isinstance(part, dict)]
         if wire.get("role") == "model":
@@ -88,23 +85,29 @@ class Gemini:
         if not responses:
             return {**wire, "parts": _content(text, media)}
         edited = []
-        for n, part in enumerate(responses):
+        for part in responses:  # a result Gemini CLI repeats (it does on resume) stays repeated
             key = "functionResponse" if "functionResponse" in part else "function_response"
-            edited.append({**part, key: {**part[key], "response": {"output": text if n == 0 else ""}}})
+            same = canonical_json(part) == canonical_json(responses[0])
+            edited.append({**part, key: {**part[key], "response": {"output": text if same else ""}}})
         return {**wire, "parts": [*edited, *(_content("", media) if media else [])]}
 
-    def legal(self, items: list[WireItem]) -> str | None:
-        """A model turn's function calls are answered by the turn right after it, and only them."""
+    def orphans(self, items: list[WireItem]) -> set[int]:
+        """Model turns whose function calls the turn right after them does not answer, and turns
+        answering calls the turn before them does not make."""
 
-        asked = 0
-        for index, item in enumerate(items):
-            parts = [part for part in item.get("parts") or [] if isinstance(part, dict)]
-            responses = [part for part in parts if _has(part, "functionResponse")]
-            answered = len({canonical_json(part) for part in responses})  # Gemini CLI repeats them on resume
-            if answered != asked:
-                return f"content {index} answers {answered} function calls where {asked} were made"
-            asked = sum(_has(part, "functionCall") for part in parts) if item.get("role") == "model" else 0
-        return f"{asked} function calls are not answered" if asked else None
+        def count(item: WireItem, kind: str) -> int:  # (Gemini CLI repeats responses on resume)
+            return len({canonical_json(part) for part in _distinct(item.get("parts") or []) if _has(part, kind)})
+
+        lonely = set()
+        for n, item in enumerate(items):
+            asked = count(item, "functionCall") if item.get("role") == "model" else 0
+            if asked and not (n + 1 < len(items) and count(items[n + 1], "functionResponse") == asked):
+                lonely.add(n)
+            answered = count(item, "functionResponse")
+            before = count(items[n - 1], "functionCall") if n and items[n - 1].get("role") == "model" else 0
+            if answered and answered != before:
+                lonely.add(n)
+        return lonely
 
     def note(self, items: list[WireItem], text: str) -> list[WireItem]:
         if not items or items[-1].get("role") != "user":
@@ -158,6 +161,16 @@ class Gemini:
     def is_overflow(self, status: int, payload: Any) -> bool:
         _, message = error_message(payload)
         return status == 400 and any(p in message for p in OVERFLOW_PHRASES)
+
+
+def _distinct(parts: list[Any]) -> list[dict[str, Any]]:
+    """The parts, a part repeated right after itself once (Gemini CLI repeats tool results)."""
+
+    kept: list[dict[str, Any]] = []
+    for part in parts:
+        if isinstance(part, dict) and (not kept or canonical_json(part) != canonical_json(kept[-1])):
+            kept.append(part)
+    return kept
 
 
 def _parts(payload: Body) -> list[dict[str, Any]]:

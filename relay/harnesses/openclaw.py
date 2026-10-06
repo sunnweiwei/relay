@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 from ..core.ir import Item, Kind
@@ -23,10 +24,16 @@ INTERNAL_CONTEXT = "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>"
 class OpenClaw(Harness):
     name = "openclaw"
 
+    def refine(self, item: Item) -> Item:
+        # Its internal-context message (sessions, subagents) follows each user message: OpenClaw's.
+        if item.kind is Kind.USER and item.text.lstrip().startswith(INTERNAL_CONTEXT):
+            return replace(item, kind=Kind.CONTEXT)
+        return super().refine(item)
+
     def volatile(self, item: Item) -> bool:
-        # OpenClaw appends a fresh internal-context message (sessions, subagents) to every
-        # request and drops the previous one.
-        return item.kind in {Kind.USER, Kind.CONTEXT} and item.text.lstrip().startswith(INTERNAL_CONTEXT)
+        # Some versions append a fresh internal-context message to every request instead and drop
+        # the previous one.
+        return item.kind is Kind.CONTEXT and item.text.lstrip().startswith(INTERNAL_CONTEXT)
 
     def settings(self) -> list[Setting]:
         config = Path(os.getenv("OPENCLAW_CONFIG_PATH", "~/.openclaw/openclaw.json")).expanduser()

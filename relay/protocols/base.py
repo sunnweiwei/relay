@@ -40,9 +40,9 @@ class Codec(Protocol):
         """`wire` with `text` and `media` as its content, its structure (role, the tool call a
         result answers) kept. ValueError where content cannot change on its own (a tool call)."""
 
-    def legal(self, items: list[WireItem]) -> str | None:
-        """Why the API would reject `items` (a tool call without its result, a result without
-        its call), or None."""
+    def orphans(self, items: list[WireItem]) -> set[int]:
+        """The items the API would reject where they stand: a tool call without its result, a
+        result without its call."""
 
     def note(self, items: list[WireItem], text: str) -> list[WireItem]:
         """`items` with `text` added at the end, for the model to read before it answers."""

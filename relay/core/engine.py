@@ -4,8 +4,9 @@ For each request the engine restores the context stored for the longest known pr
 by the harness's `identity`): what the model saw last time, followed by what the harness sent
 since. The strategy gets the conversation (`Request`) and answers with the context the model sees
 from now on (`Context`). The engine puts the harness's own items into it (where they were, or
-where the harness puts them after its own compaction when the answer has a summary), checks that
-the API would accept it, and remembers it, and later the prompt tokens the upstream reported,
+where the harness puts them after its own compaction when the answer has a summary), tells as a
+note each item the API would reject where it stands (a call whose result is gone), and remembers
+it, and later the prompt tokens the upstream reported,
 under the request's prefix. Strategy failures never reach the harness: the request is forwarded
 with the last good context instead.
 
@@ -31,7 +32,7 @@ from ..protocols.base import Body, Codec, WireItem
 from ..prompts import SUMMARY_PREFIX
 from ..providers import context_window
 from ..strategies.base import Strategy, Summarizer
-from .ir import CONTEXT_KINDS, Context, Item, Kind, Media, Request
+from .ir import CONTEXT_KINDS, LABELS, Context, Item, Kind, Media, Request, note
 from .store import PrefixStore
 from .tokens import approx_tokens, bytes_per_token, item_tokens
 
@@ -129,6 +130,12 @@ class Engine:
             return conversation[cut] if cut < len(conversation) else len(items)
 
         current = tuple(items[n] for n in conversation)
+        accepted = {raw_index for raw_index in codec.orphans(raw)}  # the harness's own history, as the API took it
+
+        def sendable(answer: tuple[Item, ...]) -> tuple[Item, ...]:
+            return tuple(item for item in _sendable(codec, harness, raw, originals, volatile, accepted, answer)
+                         if item.kind not in CONTEXT_KINDS or _instruction(item))
+
         request = Request(
             tuple(item for item in originals if item.kind not in CONTEXT_KINDS),
             current,
@@ -140,6 +147,7 @@ class Engine:
             state.get("strategy"),
             hashlib.sha256(thread).hexdigest()[:16],
             codec.offers_tools(body),
+            sendable,
         )
         leading = next((n for n, item in enumerate(items) if item.kind not in CONTEXT_KINDS), len(items))
 
@@ -152,17 +160,16 @@ class Engine:
                 summarizer = _Summarizer(codec, body, lambda cut: wire[: position(cut)], leading, post,
                                          request.window and request.window / scale, per_token)
                 if (context := self.strategy.plan(request, summarizer)) is not None:
-                    answer = tuple(item for item in context.items if not _instruction(item))
+                    answer = sendable(tuple(item for item in context.items if not _instruction(item)))
                     answered = [item.text for item in context.items if _instruction(item)]
                     stored = dict(state)
                     if answer != current:
                         placed = _place(codec, harness, raw, originals, answer)
                         stored = {"covered": len(raw), "head": [_entry(item, originals) for item in placed]}
                         new_items, new_wire = materialize(stored)
-                        # Judged only where the check holds for the harness's own request (the APIs
-                        # accept some histories it would not, Gemini CLI's resumed ones).
-                        if (problem := codec.legal([*new_wire, *volatile])) and not codec.legal(raw):
-                            raise ValueError(f"the context would be rejected: {problem}")
+                        if lonely := {n for n in codec.orphans([*new_wire, *volatile]) if n >= len(new_items)
+                                      or new_items[n].ref not in accepted}:
+                            raise ValueError(f"the context would be rejected: items {sorted(lonely)} where they stand")
                         self._remember(thread, len(raw), keys)
                         items, wire, changed = new_items, new_wire, True
                         self.emit(
@@ -265,6 +272,36 @@ def _instruction(item: Item) -> bool:
     """A SYSTEM item the strategy wrote: it joins the system prompt."""
 
     return item.kind is Kind.SYSTEM and item.ref is None
+
+
+def _sendable(codec: Codec, harness: Harness, raw: list[WireItem], originals: list[Item], volatile: list[WireItem],
+              accepted: set[int], answer: tuple[Item, ...]) -> list[Item]:
+    """The answer as it can be sent, its harness items placed: each item the protocol cannot keep
+    where it stands (a call whose result is gone, reasoning away from the item it preceded) is told
+    as a note (one with no text goes), the rest stays as the strategy gave it. What the harness's
+    own history already had (`accepted`) is the API's to judge."""
+
+    def told(item: Item) -> Item | None:
+        return note(LABELS.get(item.kind, item.kind.value), item.text) if item.text.strip() else None
+
+    def keeps(item: Item) -> bool:  # new content for a call, say, cannot change on its own
+        try:
+            _wire(codec, raw, originals, item)
+            return True
+        except ValueError:
+            return False
+
+    placed = _place(codec, harness, raw, originals, tuple(i for item in answer if (i := item if keeps(item) else told(item))))
+    while True:
+        wire = [_wire(codec, raw, originals, item) for item in placed]
+        lonely = {n for n in codec.orphans([*wire, *volatile])
+                  if n < len(placed) and placed[n].kind not in CONTEXT_KINDS and placed[n].ref not in accepted}
+        lonely |= {n for n, item in enumerate(placed)  # reasoning, only right before what it preceded
+                   if item.kind is Kind.REASONING and item.ref is not None
+                   and (n + 1 == len(placed) or placed[n + 1].ref != item.ref + 1)}
+        if not lonely:
+            return placed
+        placed = [i for n, item in enumerate(placed) if (i := told(item) if n in lonely else item)]
 
 
 def _place(codec: Codec, harness: Harness, raw: list[WireItem], originals: list[Item],

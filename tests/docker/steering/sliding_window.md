@@ -1,0 +1,1 @@
+Keep a sliding window: never write summaries, notes or new blocks, and never change the text of a block. Once the size readout passes 20,000 tokens, delete your own oldest blocks after the original task, oldest first, until it is under 15,000 tokens; keep the newest blocks exactly as they are.

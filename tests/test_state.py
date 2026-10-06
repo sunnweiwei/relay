@@ -8,7 +8,7 @@ from typing import Any
 
 from relay.core.engine import Engine
 from relay.core.ir import Item, Kind
-from relay.harnesses import ClaudeCode, DeepSeekHarness, GeminiCli, Harness, KimiCode, Pi, WorkBuddy
+from relay.harnesses import ClaudeCode, DeepSeekHarness, GeminiCli, Harness, KimiCode, OpenClaw, Pi, WorkBuddy
 from relay.protocols import AnthropicMessages, Gemini, OpenAIResponses
 from relay.strategies import Compaction
 
@@ -81,6 +81,10 @@ class StateTests(unittest.TestCase):
         date = msg("user", "<system-reminder>\nToday's date is 2026-10-02.\n</system-reminder>")
         mode = msg("user", "<system-reminder>\nAuto permission mode is active.\n</system-reminder>")
         return [msg("user", "task"), date, mode, *step(1), msg("assistant", "done"), *extra]
+
+    def test_openclaws_internal_context_is_its_own(self) -> None:
+        item = CODEC.classify(msg("user", "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>\nsessions: none"))
+        self.assertIs(OpenClaw().refine(item).kind, Kind.CONTEXT)
 
     def test_the_latest_restated_state(self) -> None:
         plan = msg("user", "<system-reminder>\nPlan mode is active.\n</system-reminder>")
