@@ -83,7 +83,7 @@ class Compaction:
         over = over or (request.window is not None and request.tokens >= HARD_LIMIT * request.window)
         if not request.force and not over:
             return None
-        cut = _cut(request)
+        cut = summary_cut(request)
         if cut is None:
             return None
         items = request.current[:cut]
@@ -115,7 +115,7 @@ class Compaction:
         return kept[::-1]
 
 
-def _cut(request: Request) -> int | None:
+def summary_cut(request: Request) -> int | None:
     """Everything before a pending user turn, or the whole conversation mid-turn."""
 
     items = request.current

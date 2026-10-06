@@ -22,7 +22,7 @@ import json
 import logging
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, replace
 from itertools import accumulate
 from typing import Any
@@ -387,7 +387,7 @@ class _Summarizer:
             fixed = [*lead, self.codec.user_message(f"{SUMMARY_PREFIX}\n{summary}")] if summary else lead
             overhead = approx_tokens(self.codec.preamble(self.body), self.per_token) + sum(map(self._tokens, fixed))
             piece = _piece(self.codec, rest, budget - overhead, self._tokens) if budget else len(rest)
-            status, payload = self._request([*fixed, *rest[:piece]], prompt)
+            status, payload = self._post(self.codec.summary_request(self.body, [*fixed, *rest[:piece]], prompt))
             if self.codec.is_overflow(status, payload):
                 if piece <= _piece(self.codec, rest, 0, self._tokens):
                     raise RuntimeError("a single turn of the history does not fit in a summary request")
@@ -403,13 +403,21 @@ class _Summarizer:
             if not rest:
                 return summary
 
-    def _request(self, items: list[WireItem], prompt: str) -> tuple[int, Any]:
-        """One summary request, retried while rate limited, overloaded or cut short."""
+    def complete(self, items: Sequence[Item]) -> str:
+        system = "\n\n".join(item.text for item in items if item.kind is Kind.SYSTEM)
+        wire = [self.codec.write(item) for item in items if item.kind is not Kind.SYSTEM]
+        status, payload = self._post(self.codec.request(self.body, system, wire))
+        if status >= 300 or not (isinstance(payload, dict) and self.codec.finished(payload)):
+            raise RuntimeError(f"the model request failed with HTTP {status}: {payload!r:.300}")
+        return self.codec.output_text(payload)
+
+    def _post(self, request: Body) -> tuple[int, Any]:
+        """One request of Relay's own, retried while rate limited, overloaded or cut short."""
 
         attempt = 0
         while True:
             self.requests += 1
-            status, payload = self.post(self.codec.summary_request(self.body, items, prompt))
+            status, payload = self.post(request)
             incomplete = status < 300 and not (isinstance(payload, dict) and self.codec.finished(payload))
             if not (incomplete or status in TRANSIENT) or attempt == RETRIES:
                 return status, payload

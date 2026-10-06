@@ -96,12 +96,20 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
 
         summary_client: httpx.Client = request.app.state.summary_client
 
-        def post(payload: dict[str, Any]) -> tuple[int, Any]:
+        def trace(**record: Any) -> None:  # test instrumentation, enabled by RELAY_TRACE
+            if config.trace:
+                with open(config.trace, "a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        def post(payload: dict[str, Any]) -> tuple[int, Any]:  # Relay's own request (a summary)
             response = summary_client.post(url, headers=plain, json=payload)
             if _is_stream(response, payload):
-                return response.status_code, codec.stream_result(_events(response.content))
-            result = _json(response.content)
-            return response.status_code, response.text[:2000] if result is None else result
+                result = codec.stream_result(_events(response.content))
+            else:
+                result = _json(response.content)
+                result = response.text[:2000] if result is None else result
+            trace(path=request.url.path, summary_request=payload, summary_status=response.status_code, answer=result)
+            return response.status_code, result
 
         def prepare(force: bool = False) -> Exchange:
             return engine.prepare(
@@ -118,11 +126,6 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
         except Exception:
             log.exception("could not prepare the request; forwarding it unchanged")
             return await _passthrough(client, "POST", url, headers, content)
-
-        def trace(**record: Any) -> None:  # test instrumentation, enabled by RELAY_TRACE
-            if config.trace:
-                with open(config.trace, "a", encoding="utf-8") as stream:
-                    stream.write(json.dumps(record, ensure_ascii=False) + "\n")
 
         trace(path=request.url.path, user_agent=request.headers.get("user-agent"),
               items=len(codec.items(body)), sent=len(codec.items(exchange.body)),
@@ -149,9 +152,9 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
             return _unreachable(exc)
         streaming = _is_stream(response, exchange.body)
 
-        def on_usage(tokens: int | None) -> None:
+        def on_usage(tokens: int | None, cached: int | None) -> None:
             engine.record(exchange, tokens)
-            trace(usage=tokens, status=response.status_code)
+            trace(usage=tokens, cached=cached, status=response.status_code)
 
         return await _relay(response, codec, streaming, on_usage)
 
@@ -184,14 +187,14 @@ async def _passthrough(
 
 
 async def _relay(
-    response: httpx.Response, codec: Codec, streaming: bool, on_usage: Callable[[int | None], None]
+    response: httpx.Response, codec: Codec, streaming: bool, on_usage: Callable[[int | None, int | None], None]
 ) -> Response:
     headers = _response_headers(response.headers)
     if not streaming:
         data = await response.aread()
         await response.aclose()
         payload = _json(data)
-        on_usage(codec.usage(payload) if isinstance(payload, dict) else None)
+        on_usage(*((codec.usage(payload), codec.cached(payload)) if isinstance(payload, dict) else (None, None)))
         return Response(data, response.status_code, headers)
 
     tap = _UsageTap(codec)
@@ -203,18 +206,20 @@ async def _relay(
                 yield chunk
         finally:
             await response.aclose()
-            on_usage(tap.tokens)
+            on_usage(tap.tokens, tap.cached)
 
     return StreamingResponse(stream(), response.status_code, headers)
 
 
 class _UsageTap:
-    """Reads prompt-token usage from a server-sent event stream without altering it."""
+    """Reads prompt-token usage (and how much of it the cache served) from a server-sent event
+    stream without altering it."""
 
     def __init__(self, codec: Codec) -> None:
         self.codec = codec
         self.pending = b""
         self.tokens: int | None = None
+        self.cached: int | None = None
 
     def feed(self, chunk: bytes) -> None:
         *lines, self.pending = (self.pending + chunk).split(b"\n")
@@ -223,6 +228,8 @@ class _UsageTap:
                 payload = _json(line[5:].strip())
                 if isinstance(payload, dict) and (tokens := self.codec.usage(payload)) is not None:
                     self.tokens = tokens
+                if isinstance(payload, dict) and (cached := self.codec.cached(payload)) is not None:
+                    self.cached = cached
 
 
 def _unreachable(exc: Exception) -> Response:

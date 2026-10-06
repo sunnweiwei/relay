@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Protocol
 
-from ..core.ir import Context, Request
+from ..core.ir import Context, Item, Request
 
 
 class Summarizer(Protocol):
+    """The task's own model, through the harness's upstream and credentials."""
+
     def summarize(self, cut: int, prompt: str) -> str:
-        """The task's own model answering `prompt` after `request.current[:cut]`, sent as the
-        harness sent it (its own instructions included, so the prompt cache holds)."""
+        """The model answering `prompt` after `request.current[:cut]`, sent as the harness sent it
+        (its own instructions included, so the prompt cache holds)."""
+
+    def complete(self, items: Sequence[Item]) -> str:
+        """The model answering `items` alone: SYSTEM items as its instructions, then user and
+        assistant messages; no tools."""
 
 
 class Strategy(Protocol):

@@ -17,3 +17,5 @@ RUN pip3 install --break-system-packages --no-cache-dir 'litellm[proxy]'
 RUN npm install -g --no-fund --no-audit @deepseek-ai/dsh
 RUN npm install -g --no-fund --no-audit @tencent-ai/codebuddy-code
 RUN pip3 install --break-system-packages --no-cache-dir nanobot-ai hermes-agent mini-swe-agent
+# RELAY_STRATEGY=rlm runs the RLM authors' package inside Relay.
+RUN pip3 install --break-system-packages --no-cache-dir rlms==0.1.3

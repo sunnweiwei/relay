@@ -118,9 +118,18 @@ class Gemini:
         return bool(body.get("tools"))
 
     def with_instructions(self, body: Body, text: str) -> Body:
+        """`text` joins the last text part: gateways translating to another API (LiteLLM to OpenAI)
+        keep only the first part, which is all the harness itself sends."""
+
         key = "system_instruction" if "system_instruction" in body else "systemInstruction"
         system = body.get(key) if isinstance(body.get(key), dict) else {}
-        return {**body, key: {**system, "parts": [*(system.get("parts") or []), {"text": text}]}}
+        parts = list(system.get("parts") or [])
+        last = next((n for n in range(len(parts) - 1, -1, -1) if isinstance(parts[n].get("text"), str)), None)
+        if last is None:
+            parts.append({"text": text})
+        else:
+            parts[last] = {**parts[last], "text": f"{parts[last]['text']}\n\n{text}"}
+        return {**body, key: {**system, "parts": parts}}
 
     def preamble(self, body: Body) -> str:
         system = body.get("systemInstruction") or body.get("system_instruction") or {}
@@ -136,6 +145,14 @@ class Gemini:
             if isinstance(config := request.get(name), dict):  # no structured-output schema for the summary
                 drop = {f(key) for key in ("responseMimeType", "responseSchema", "responseJsonSchema") for f in (str, _snake)}
                 request[name] = {k: v for k, v in config.items() if k not in drop}
+        return request
+
+    def request(self, body: Body, system: str, items: list[WireItem]) -> Body:
+        drop = {"tools", "systemInstruction", "system_instruction"}
+        request = self.summary_request({k: v for k, v in body.items() if k not in drop}, items, "")
+        request["contents"] = items
+        if system:
+            request["systemInstruction"] = {"parts": [{"text": system}]}
         return request
 
     def stream_result(self, events: list[Body]) -> Body:
@@ -157,6 +174,10 @@ class Gemini:
         usage = payload.get("usageMetadata")
         tokens = usage.get("promptTokenCount") if isinstance(usage, dict) else None
         return tokens if isinstance(tokens, int) and tokens > 0 else None
+
+    def cached(self, payload: Body) -> int | None:
+        usage = payload.get("usageMetadata")
+        return usage.get("cachedContentTokenCount") if isinstance(usage, dict) else None
 
     def is_overflow(self, status: int, payload: Any) -> bool:
         _, message = error_message(payload)

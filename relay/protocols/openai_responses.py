@@ -143,6 +143,14 @@ class OpenAIResponses:
             request["text"] = {k: v for k, v in request["text"].items() if k != "format"}
         return request
 
+    def request(self, body: Body, system: str, items: list[WireItem]) -> Body:
+        drop = {"background", "tools", "tool_choice", "previous_response_id", "prompt"}  # (Codex needs parallel_tool_calls kept)
+        request = {key: value for key, value in body.items() if key not in drop}
+        request.update(instructions=system, input=items, store=False)
+        if isinstance(request.get("text"), dict):
+            request["text"] = {k: v for k, v in request["text"].items() if k != "format"}
+        return request
+
     def stream_result(self, events: list[Body]) -> Body:
         final = next(
             (e.get("response") for e in reversed(events) if e.get("type", "").startswith("response.")
@@ -153,12 +161,12 @@ class OpenAIResponses:
         return {**final, "output": final.get("output") or done}
 
     def output_text(self, payload: Body) -> str:
-        parts = [
-            _content_text(item.get("content"))[0]
-            for item in payload.get("output") or []
-            if item.get("type") == "message" and item.get("role") == "assistant"
-        ]
-        return "\n".join(part for part in parts if part).strip() or str(
+        parts: list[str] = []  # each message once: gpt-6 repeats its commentary at times
+        for item in payload.get("output") or []:
+            if item.get("type") == "message" and item.get("role") == "assistant":
+                if (text := _content_text(item.get("content"))[0]) and text not in parts:
+                    parts.append(text)
+        return "\n".join(parts).strip() or str(
             payload.get("output_text") or ""
         ).strip()
 
@@ -171,6 +179,12 @@ class OpenAIResponses:
         usage = payload.get("usage")
         tokens = usage.get("input_tokens") if isinstance(usage, dict) else None
         return tokens if isinstance(tokens, int) else None
+
+    def cached(self, payload: Body) -> int | None:
+        if payload.get("type") in {"response.completed", "response.incomplete"}:
+            payload = payload.get("response") or {}
+        details = (payload.get("usage") or {}).get("input_tokens_details") if isinstance(payload.get("usage"), dict) else None
+        return details.get("cached_tokens") if isinstance(details, dict) else None
 
     def is_overflow(self, status: int, payload: Any) -> bool:
         code, message = error_message(payload)

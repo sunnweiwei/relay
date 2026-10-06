@@ -6,18 +6,27 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
+import re
+
 from ..core.ir import Item, Kind
 from ..install import Setting
 from .base import Harness
+
+
+SECTION = re.compile(r'Updated system prompt section "([^"]+)"')
 
 
 class Pi(Harness):
     name = "pi"
 
     def state_key(self, item: Item) -> str | None:
-        """A resumed session appends its system prompt anew, with instruction files as they are now."""
+        """A resumed session appends its system prompt anew, with instruction files as they are now;
+        a changed section alone comes as an update of that section (the prompt it updates stays)."""
 
-        return "system" if item.kind is Kind.SYSTEM else None
+        if item.kind is not Kind.SYSTEM:
+            return None
+        section = SECTION.match(item.text)
+        return f"section:{section.group(1)}" if section else "system"
 
     def matches(self, headers: Mapping[str, str]) -> bool:
         return headers.get("user-agent", "").startswith(("pi/", "pi ("))

@@ -70,6 +70,15 @@ class OpenAIResponsesTests(unittest.TestCase):
         ]
         self.assertEqual(self.codec.boundaries(items), {0, 1, 6, 7})
 
+    def test_output_text_has_every_message_once(self) -> None:
+        def message(text: str, phase: str) -> dict:
+            return {"type": "message", "role": "assistant", "phase": phase, "content": [{"type": "output_text", "text": text}]}
+
+        code = "```repl\nprint(context)\n```"  # (an RLM's step, written as commentary, then repeated)
+        payload = {"output": [message("Let me look.", "commentary"), {"type": "reasoning"}, message(code, "commentary"),
+                              message(code, "commentary"), message(code, "final_answer")]}
+        self.assertEqual(self.codec.output_text(payload), f"Let me look.\n{code}")
+
     def test_classify_marks_media_and_tool_items(self) -> None:
         image = {"type": "message", "role": "user",
                  "content": [{"type": "input_text", "text": "look"}, {"type": "input_image", "image_url": "u"}]}
@@ -407,4 +416,5 @@ class StrategyAdditionsTests(unittest.TestCase):
         self.assertEqual(chat["messages"], [{"role": "system", "content": "base\n\nmore"}])
         self.assertEqual(OpenAIChat().with_instructions({"messages": []}, "more")["messages"], [{"role": "system", "content": "more"}])
         gemini = Gemini().with_instructions({"system_instruction": {"parts": [{"text": "base"}]}}, "more")
-        self.assertEqual(gemini, {"system_instruction": {"parts": [{"text": "base"}, {"text": "more"}]}})
+        self.assertEqual(gemini, {"system_instruction": {"parts": [{"text": "base\n\nmore"}]}})  # (LiteLLM keeps one part)
+        self.assertEqual(Gemini().with_instructions({}, "more"), {"systemInstruction": {"parts": [{"text": "more"}]}})
