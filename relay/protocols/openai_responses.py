@@ -106,22 +106,15 @@ class OpenAIResponses:
             return {**wire, "output": _content(text, media) if media else text}
         raise ValueError(f"the content of a {kind} item cannot change on its own")
 
-    def legal(self, items: list[WireItem]) -> str | None:
-        called, waiting = set(), set()
-        for index, item in enumerate(items):
-            kind, call_id = item.get("type", "message"), item.get("call_id")
-            if call_id and kind.endswith("_output"):
-                if call_id not in called:
-                    return f"item {index} answers a tool call the request does not make"
-                waiting.discard(call_id)
-            elif call_id and kind.endswith("_call"):
-                called.add(call_id)
-                waiting.add(call_id)
-        if waiting:
-            return f"tool calls {sorted(waiting)} have no output"
-        if items and items[-1].get("type") == "reasoning":
-            return "the request ends with a reasoning item, without the item it preceded"
-        return None
+    def orphans(self, items: list[WireItem]) -> set[int]:
+        """Calls without an output, and outputs without their call (the API pairs them by call id)."""
+
+        calls = {item["call_id"]: n for n, item in enumerate(items)
+                 if item.get("call_id") and item.get("type", "").endswith("_call")}
+        answered = {item["call_id"] for item in items if item.get("call_id") and item.get("type", "").endswith("_output")}
+        lonely = {n for n, item in enumerate(items) if item.get("call_id") and item.get("type", "").endswith("_output")
+                  and calls.get(item["call_id"], len(items)) > n}
+        return lonely | {n for call_id, n in calls.items() if call_id not in answered}
 
     def note(self, items: list[WireItem], text: str) -> list[WireItem]:
         return [*items, self.user_message(text)]

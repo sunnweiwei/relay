@@ -68,7 +68,8 @@ Three layers keep strategies free of harness and protocol details:
 
 - the **codec** knows the wire protocol: items (their text and media), legal cuts, how a
   message is written, how an item gets new content with its structure kept (a tool result
-  still answers its call), what the API would reject, and where it allows system messages;
+  still answers its call), which items the API would reject where they stand (a call without its
+  result), and where it allows system messages;
 - the **harness profile** knows what the harness writes itself: which items are injected
   context (`refine`), what makes two requests the same conversation for the prefix store
   (`identity`, robust to instructions re-rendered in place and resumed histories), the
@@ -249,9 +250,10 @@ the authors' adaptation of CLM to a coding harness: a metadata line, then one
 (tool calls, reasoning and images intact); an edited user, assistant or tool-result turn keeps its
 place with the new text (a result still answers its call, and keeps its images); an edited tool
 call or reasoning item, and every block the model adds (`id=new-*`, any role label), becomes a
-user-role note labelled with the role; a tool call left without its result (or the reverse) becomes
-a note as well, and reasoning stays only right before the item it preceded, so the request stays
-legal for its protocol. A file without block headers replaces everything after the task with one
+user-role note labelled with the role; a tool call left without its result (or the reverse), or
+reasoning away from the item it preceded, is told as a note when the request is sent, and nothing
+else changes (the codec knows how its protocol pairs calls: removing one of several parallel calls
+leaves the others calls). A file without block headers replaces everything after the task with one
 note. The edited context is stored like any other, so it holds for every later request of the
 conversation; the harness's own context (instructions, environment, reminders) stays out of the
 file and where the harness sent it, which also keeps the system prompt's cache. Two changes adapt the paper's loop, which ran until the task was submitted, to
@@ -261,13 +263,39 @@ goes on after them, and the urgent nudge says "compact … before anything else,
 the task" where the paper says "do nothing else". Requests that offer no tools (titles, quota
 checks) are left alone, and each conversation (a sub-agent's too) has its own file.
 
-Verified in Docker (`tests/docker/check.py --strategy clm`, the two-turn file-reading task with a
-26k budget): Codex made 7 edits over 27 requests and Claude Code 6 over 21, both answered both
-turns right, and no request or edit was refused. The models mostly shortened old tool results in
-place (Codex's first edit: four of them, their calls still structured calls). Every accepted edit
-held exactly on the requests up to the next one: kept turns were the original items, turns with
-new text carried it, removed turns stayed gone, the model's notes were there, and the harness's
-own items kept their places.
+Verified in Docker. `check.py --strategy clm --clm-edit` tells the model exactly what to edit (delete
+file_2's call and output, rewrite file_1's output, add a marker block) and then asks it, without
+reading anything, what it sees; it checks that Relay applied every accepted edit faithfully, that
+the result is what was asked on every later request, and that the model sees it. Every accepted
+edit was applied faithfully in all 19 harness/model pairs. The result was exactly what was asked,
+and seen so, in 13: Codex, Claude Code, OpenCode, Kilo, OpenClaw, Goose, Kimi Code, Hermes and
+mini-swe-agent on GPT, and Gemini CLI, pi, Goose and Crush on Gemini. In Crush and WorkBuddy the
+edit was right, but the model read file_2 again although told not to. In pi and nanobot the model
+read the three files with parallel calls; once file_2's call went, the rest of that group became
+notes (the text right, the calls no longer calls), which Relay no longer does: only the items the
+protocol cannot keep are told as notes now. Gemini CLI, driven through LiteLLM to
+GPT, never edited the file. The paper-style task (`--strategy clm`, a 26k budget and its nudges)
+passed for Codex (7 edits over 27 requests) and Claude Code (6 over 21): the models mostly
+shortened old tool results in place, their calls still structured calls.
+
+**Steering.** As in the paper (§5.2), a policy in words changes how the model manages its
+context: `RELAY_CLM_STEERING` adds one to the guidance. `tests/docker/steering/` holds briefs that
+imitate other strategies, and `check.py --strategy clm --steering NAME` checks each accepted edit
+against the shape the brief asks for. On the file-reading task, with nudges off (backup with
+them on), the edits that followed their brief, for Codex / Claude Code / pi:
+
+| Brief | Asks for | Codex | Claude Code | pi |
+| --- | --- | --- | --- | --- |
+| `compaction` | nothing below 20k tokens, then one handoff summary in place of everything | 2/2 | 3/3 | 1/1 |
+| `masking` | tool results cut to one line, nothing deleted or added | 7/7 | 5/6 | 0/1 |
+| `memory` | after each file, one memory block in place of everything | 7/7 | 6/6 | 1/1 (1 edit, not 3) |
+| `sliding_window` | the oldest turns deleted, nothing written or retold | 1/5 | 2/3 | no edit |
+| `backup` | a copy of the context file before every edit | 8/8 | 9/9 | 1/1 |
+
+Without a brief the same models first shorten tool results in place, then collapse everything
+into notes. Policies that keep what the task needs were followed; under the sliding window, once
+deleting would lose the codes, Codex and Claude Code wrote a note anyway, and where they did not,
+they answered with codes they made up. pi edited least, and late.
 
 Limits: Relay must run on the machine whose files the harness's tools edit (the paper's sandbox
 mirror); the edit is read back at the next request, so the turn that made it stays in the context
@@ -286,7 +314,9 @@ be delivered, so CLM runs through the proxy.
 | `RELAY_CONTEXT_WINDOW` | from the model name | Overrides the context window table in `relay/providers.py`. |
 | `RELAY_RETAIN_USER_TOKENS` | `20000` | Budget for recent user messages kept verbatim. |
 | `RELAY_CLM_BUDGET` | context window | CLM: the context budget the model is told about; its limit is this less `RELAY_CLM_RESERVE` (`2048`). |
-| `RELAY_CLM_DIR` | `/tmp/.live_ctx` | CLM: where the context files live; the harness's tools must be able to edit files there. |
+| `RELAY_CLM_DIR` | `/tmp/.live_ctx` | CLM: where the context files live; the harness's tools must be able to edit files there (inside the workspace for a sandboxed harness; Relay writes a `.gitignore` there). |
+| `RELAY_CLM_STEERING` | unset | CLM: a file holding a context-management policy in words, added to the model's guidance (see `tests/docker/steering/`). |
+| `RELAY_CLM_NUDGES` | `on` | CLM: `off` drops the budget nudges (the size readout stays), as in the paper's steering runs. |
 | `RELAY_COMPACT_MIN_GAIN` | `0.1` | Skip compactions that free less than this share of the threshold (or growth). |
 | `RELAY_OPENAI_BASE_URL` | `https://api.openai.com/v1` | Upstream for the Responses API. |
 | `RELAY_ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Upstream for the Messages API. |

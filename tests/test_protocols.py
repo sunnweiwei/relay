@@ -342,20 +342,20 @@ class StrategyAdditionsTests(unittest.TestCase):
         for codec in self.CODECS:
             call, result = self.CALLS[codec.name]
             edited = codec.edit(result, "short", ())
-            self.assertIsNone(codec.legal([codec.user_message("go"), call, edited]), codec.name)
+            self.assertEqual(codec.orphans([codec.user_message("go"), call, edited]), set(), codec.name)
             self.assertIn("short", codec.classify(edited).text)
             self.assertNotIn("a long output", json.dumps(edited))
             with self.assertRaises(ValueError):
                 codec.edit(call, "another call", ())
 
-    def test_legal_finds_a_call_without_its_result_and_a_result_without_its_call(self) -> None:
+    def test_orphans_are_a_call_without_its_result_and_a_result_without_its_call(self) -> None:
         for codec in self.CODECS:
             call, result = self.CALLS[codec.name]
             go = codec.user_message("go")
-            self.assertIsNotNone(codec.legal([go, call]), codec.name)
-            self.assertIsNotNone(codec.legal([go, result]), codec.name)
+            self.assertEqual(codec.orphans([go, call]), {1}, codec.name)
+            self.assertEqual(codec.orphans([go, result]), {1}, codec.name)
             if codec.name != "openai_responses":  # the Responses API pairs items by call id, not position
-                self.assertIsNotNone(codec.legal([go, call, go, result]), codec.name)
+                self.assertEqual(codec.orphans([go, call, go, result]), {1, 3}, codec.name)
 
     def test_tool_results_carry_their_images(self) -> None:
         source = {"type": "base64", "media_type": "image/png", "data": self.IMAGE.data}
@@ -370,6 +370,18 @@ class StrategyAdditionsTests(unittest.TestCase):
         kept = AnthropicMessages().edit(result, "screen", ())
         self.assertEqual(AnthropicMessages().classify(kept).media, ())
         self.assertEqual(kept["content"][0]["tool_use_id"], "t1")
+
+    def test_a_repeated_gemini_result_reads_once(self) -> None:
+        _, result = self.CALLS["gemini"]
+        repeated = {**result, "parts": result["parts"] * 2}  # Gemini CLI repeats each result in later requests
+        self.assertEqual(Gemini().classify(repeated), Gemini().classify(result))
+
+    def test_a_repeated_gemini_result_stays_repeated_when_it_changes(self) -> None:
+        call, result = self.CALLS["gemini"]
+        repeated = {**result, "parts": result["parts"] * 2}  # Gemini CLI's resumed history
+        edited = Gemini().edit(repeated, "short", ())
+        self.assertEqual(edited["parts"][0], edited["parts"][1])
+        self.assertEqual(Gemini().orphans([Gemini().user_message("go"), call, edited]), set())
 
     def test_an_assistant_turn_keeps_its_thinking_when_its_text_changes(self) -> None:
         reply = {"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "s"},

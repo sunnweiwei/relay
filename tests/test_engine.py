@@ -159,26 +159,35 @@ class EngineTests(unittest.TestCase):
         self.engine.prepare(CODEC, HARNESS, request, tenant="other", post=upstream)
         self.assertEqual(len(upstream.requests), 2)
 
-    def test_a_context_the_api_would_reject_is_not_sent(self) -> None:
-        class Broken:
-            name = "broken"
+    def test_only_what_the_api_would_reject_becomes_a_note(self) -> None:
+        class Drops:
+            name = "drops"
 
             def fingerprint(self) -> dict[str, Any]:
                 return {}
 
             def plan(self, request, summarizer):  # noqa: ANN001
-                return Context(request.current[1:])  # an output without its call
+                return Context((request.current[0], *request.current[2:]))  # the first call goes, its output stays
 
-        engine = Engine(Broken())
-        request = body(*step(1))
-        with self.assertLogs("relay", "WARNING"):
-            exchange = engine.prepare(CODEC, HARNESS, request, tenant="t", post=Upstream())
-        self.assertIs(exchange.body, request)
-        # A history the check would refuse as the harness sent it (an output whose call an
-        # aborted turn lost) is the API's to judge: the strategy's context goes through.
-        orphan = body(msg("user", "task"), step(0)[1], *step(1))
-        self.assertTrue(engine.prepare(CODEC, HARNESS, orphan, tenant="t", post=Upstream()).compacted)
-
+        engine = Engine(Drops())
+        request = body(msg("user", "task"), *step(1), *step(2))
+        sent = engine.prepare(CODEC, HARNESS, request, tenant="t", post=Upstream()).body["input"]
+        self.assertEqual(sent[1], msg("user", "[context role=tool]\n" + "x" * 800) | {"content": [
+            {"type": "input_text", "text": "[context role=tool]\n" + "x" * 800}]})
+        self.assertEqual(sent[2:], step(2))  # the other call and output, as they were
+        # Parallel calls: one pair dropped, the others stay calls (the API pairs them by id).
+        parallel = [*(c for i in (1, 2, 3) for c in step(i)[:1]), *(o for i in (1, 2, 3) for o in step(i)[1:])]
+        engine = Engine(type("DropsTwo", (Drops,), {"plan": lambda self, r, s: Context(
+            tuple(i for n, i in enumerate(r.current) if n not in (2, 5)))})())
+        sent = engine.prepare(CODEC, HARNESS, body(msg("user", "task"), *parallel), tenant="t", post=Upstream()).body["input"]
+        self.assertEqual(sent[1:], [parallel[0], parallel[2], parallel[3], parallel[5]])  # c1, c3, o1, o3
+        # A history the check would refuse as the harness sent it (an output whose call an aborted
+        # turn lost) is the API's to judge: that output is left as it is.
+        orphan = body(msg("user", "task"), step(0)[1], *step(1), *step(2))
+        engine = Engine(type("DropsC1", (Drops,), {"plan": lambda self, r, s: Context((*r.current[:2], *r.current[3:]))})())
+        sent = engine.prepare(CODEC, HARNESS, orphan, tenant="t", post=Upstream()).body["input"]
+        self.assertEqual(sent[1], step(0)[1])
+        self.assertEqual(sent[2]["content"][0]["text"], "[context role=tool]\n" + "x" * 800)  # c1's output
 
 if __name__ == "__main__":
     unittest.main()

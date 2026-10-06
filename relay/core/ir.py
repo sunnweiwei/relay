@@ -10,6 +10,7 @@ wire item they came from, so anything a strategy keeps is forwarded byte-for-byt
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -29,6 +30,8 @@ class Kind(str, Enum):
 
 AGENT_KINDS = frozenset({Kind.ASSISTANT, Kind.REASONING, Kind.TOOL_CALL, Kind.TOOL_RESULT})
 CONTEXT_KINDS = frozenset({Kind.SYSTEM, Kind.CONTEXT})
+LABELS = {Kind.USER: "user", Kind.ASSISTANT: "assistant", Kind.REASONING: "reasoning", Kind.TOOL_CALL: "tool_call",
+          Kind.TOOL_RESULT: "tool", Kind.SUMMARY: "summary"}  # an item's role, as a note names it
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,16 @@ class Request:
     state: Any = None  # what the strategy saved on this conversation's previous request
     conversation: str = ""  # names the conversation, the same on all of its requests
     tools: bool = True  # the request offers the model tools: an agent's turn, not a side call (a title)
+    # The items as they will be sent: what the protocol cannot keep where it stands (a tool call whose
+    # result is gone, new text for a call) told as a note. Relay applies it to every answer.
+    sendable: Callable[[tuple[Item, ...]], tuple[Item, ...]] = field(default=lambda items: items, repr=False,
+                                                                     compare=False)
+
+
+def note(role: str, text: str) -> Item:
+    """A user-role note telling `text` as `role` (an item the protocol cannot keep, a strategy's own)."""
+
+    return Item(Kind.USER, text if role == "user" else f"[context role={role}]\n{text}")
 
 
 @dataclass(frozen=True)

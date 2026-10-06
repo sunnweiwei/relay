@@ -44,7 +44,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
-from relay.core.ir import AGENT_KINDS, CONTEXT_KINDS, Kind  # noqa: E402
+from relay.core.ir import AGENT_KINDS, CONTEXT_KINDS, Item, Kind  # noqa: E402
 from relay.harnesses import detect  # noqa: E402
 from relay.prompts import SUMMARIZATION_PROMPT, SUMMARY_PREFIX  # noqa: E402
 from relay.protocols import codec_for  # noqa: E402
@@ -66,6 +66,18 @@ FINISH = ("Do not read file_1.txt to file_4.txt again. Then reply with the codes
           "to file_8.txt) in order, comma-separated, and on a last line the project codename as your project "
           "instructions state it now.")
 PROMPT2 = f"Background notes, not needed for the task:\n{NOTES}\n\nNow read file_5.txt to file_8.txt, {RULES} {DELEGATE}{FINISH}"
+# `--clm-edit`: the model edits its context as told (CLM's mechanism, whatever it would choose itself),
+# then answers from what it sees.
+EDIT = ("Read file_1.txt, file_2.txt and file_3.txt in the current directory, one file per tool call, each in full. "
+        "Then, in one edit of your context file (see \"Managing your context\"): delete the tool call that read "
+        "file_2.txt and its result; replace the text of the block holding file_1.txt's output with exactly "
+        "`MASKED file_1: CODE amber`; and add a block with `id=new-marker` and role `notes` whose text is exactly "
+        "`MARKER 7319`. Change nothing else.")
+EDIT_ASK = ("reply with exactly three lines: the text of your marker block; what your context now shows as the output "
+            "of reading file_1.txt; and the CODE of file_2.txt if your context still shows its output, otherwise NONE.")
+EDIT_PROMPTS = (f"{EDIT} Then reply with the CODE of file_3.txt.",
+                f"Do not read any file and do not edit your context. Just {EDIT_ASK}")
+EDIT_ONE = f"{EDIT} After the edit, {EDIT_ASK}"  # one-turn harnesses
 # `--native-compact`: the agent itself reads on, so the conversation after the harness's summary compacts.
 DIRECT2 = f"Background notes, not needed for the task:\n{NOTES}\n\nNow read file_5.txt to file_8.txt, {RULES} {FINISH}"
 # `--subagent`: turn 2 hands three files to one sub-agent, so a sub-agent compacts too.
@@ -381,7 +393,8 @@ SPECS = {
 
 def run(name: str, growth: int | None = None, retried: bool = False, probe: bool = False,
         subagent: bool = False, window: int | None = None, native: bool = False, selfcompact: bool = False,
-        via: str = "proxy", lines: int = 120, strategy: str = "compaction") -> dict:
+        via: str = "proxy", lines: int = 120, strategy: str = "compaction", steering: str | None = None,
+        clm_edit: bool = False) -> dict:
     spec, harness = SPECS[name], name.split(":")[0]
     root = Path(tempfile.mkdtemp(prefix=f"relay-{name.replace(':', '-')}-", dir=os.getenv("TMPDIR")))
     home, project = root / "home", root / "project"
@@ -397,6 +410,8 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
     # No min_gain guard (Codex has none): turn 2 must start with a compaction even when turn 1
     # ended right after one.
     first, second = PROBE if probe else (PROMPT if spec.resume else PROMPT_ALL, SUBAGENT2 if subagent else DIRECT2 if native else PROMPT2)
+    if clm_edit:
+        first, second = EDIT_PROMPTS if spec.resume else (EDIT_ONE, "")
     # Growth (every GROWTH new tokens) by default; `window` instead uses Relay's own trigger,
     # 90% of a context window of that many tokens (and 95% always).
     trigger = {"RELAY_CONTEXT_WINDOW": str(window)} if window else {
@@ -404,7 +419,12 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
     if via == "hook":
         trigger = {"RELAY_COMPACT_THRESHOLD": str(HOOK_THRESHOLD)}
     if strategy == "clm":  # the files in HOME, where the run can be inspected
-        trigger = {"RELAY_STRATEGY": "clm", "RELAY_CLM_BUDGET": str(CLM_BUDGET), "RELAY_CLM_DIR": "/home/agent/live_ctx"}
+        trigger = {"RELAY_STRATEGY": "clm", "RELAY_CLM_BUDGET": str(CLM_BUDGET), "RELAY_CLM_DIR": "/project/.live_ctx"}
+        if clm_edit:  # no budget pressure: the edit is the task
+            trigger = {k: v for k, v in trigger.items() if k != "RELAY_CLM_BUDGET"} | {"RELAY_CLM_NUDGES": "off"}
+        if steering:
+            trigger |= {"RELAY_CLM_STEERING": f"/relay/tests/docker/steering/{steering}.md",
+                        "RELAY_CLM_NUDGES": "on" if POLICIES[steering].nudges else "off"}
     env = {"PROMPT": first, "PROMPT2": second, **trigger, "RELAY_COMPACT_MIN_GAIN": "0"}
     container(name, root, env, f"""
         cd /project && timeout 600 {spec.command} > ~/harness.out 2> ~/harness.err < /dev/null
@@ -418,13 +438,13 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
     if via == "hook":
         return evaluate_hook(name, home)
     if strategy == "clm":
-        return evaluate_clm(name, home)
+        return evaluate_clm_edit(name, home) if clm_edit else evaluate_clm(name, home, steering)
     # Relay's own trigger compacts less often; after the harness compacted itself, turn 2 starts small.
     result = evaluate(name, home, need=(0, 0) if window else (2, 0) if native else None, selfcompact=selfcompact)
     if not result["passed"] and result["transient"] and result["requests"] < 3 and not retried:
         time.sleep(60)  # rate-limited before the task got going: try once more
         return run(name, growth, retried=True, subagent=subagent, window=window, native=native, selfcompact=selfcompact,
-                   via=via, lines=lines, strategy=strategy)
+                   via=via, lines=lines, strategy=strategy, steering=steering, clm_edit=clm_edit)
     return result
 
 
@@ -808,7 +828,7 @@ def evaluate_hook(name: str, home: Path) -> dict:
     }
 
 
-def evaluate_clm(name: str, home: Path) -> dict:
+def evaluate_clm(name: str, home: Path, steering: str | None = None) -> dict:
     """Check a run with the CLM strategy (`--strategy clm`): the model edited its own context
     through the mirror, and every accepted edit took effect exactly. On the request it was read
     back and every later request of that conversation until the next edit, the turns it removed
@@ -816,19 +836,22 @@ def evaluate_clm(name: str, home: Path) -> dict:
     items stay ahead of the conversation; every request that offers tools carries the strategy's
     instructions and ends with the size readout. Also: both answers are right and every model call
     was accepted. Re-reads are counted, not failed: a model may drop a file's text and read it
-    again."""
+    again. With a steering brief (`--steering`), every edit must also have the shape the brief asks
+    for (`POLICIES`); the answers are reported, not judged, as a policy may lose what the task needs."""
 
     def records(file: str) -> list[dict]:
         path = home / file
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
     events, trace = records("events.jsonl"), records("trace.jsonl")
+    shapes: list[Shape] = []
     requests = [r for r in trace if "body" in r]
     answers = [(home / f).read_text(errors="replace").strip() if (home / f).exists() else "" for f in ("harness.out", "harness2.out")]
     problems: list[str] = []
     edited = [n for n, r in enumerate(requests) if r["compacted"]]
-    if not events:
-        problems.append("the model never edited its context")
+    sizes = [int(n) for r in requests for n in re.findall(r"\[context: ~(\d+)/", json.dumps(r.get("forwarded") or {}))[-1:]]
+    if not events and max(sizes, default=0) > CLM_BUDGET - 2048:  # Relay's readout (some gateways report no usage)
+        problems.append("the model never edited its context, past its limit")
     if len(edited) != len(events):
         problems.append(f"{len(events)} edits logged, {len(edited)} requests rewritten")
     for k, (event, at) in enumerate(zip(events, edited), start=1):
@@ -842,14 +865,28 @@ def evaluate_clm(name: str, home: Path) -> dict:
         refs = [e["ref"] for e in event["head"] if "ref" in e]
         if refs != sorted(refs):  # the harness's items where it sent them, the turns in their order
             problems.append(f"edit {k}: request items out of order: {refs}")
+        # What the edit did to the turns the mirror showed: those before this request's own items.
+        identity = [codec.canonical(item) for item in raw]
+        seen = max((len(earlier) for r in requests[:at]
+                    if (earlier := [codec.canonical(item) for item in codec.items(r["body"])]) == identity[: len(earlier)]),
+                   default=0)
+        conversation = [n for n in range(event["covered"]) if harness.refine(codec.classify(raw[n])).kind not in CONTEXT_KINDS]
+        # The model's own turns after the protected task (the user's are left to the user).
+        mirrored = [n for n in conversation[1:] if n < seen and harness.refine(codec.classify(raw[n])).kind is not Kind.USER]
+        survivors = [n for n in mirrored if n in kept or n in retold]
+        shapes.append(Shape(event["tokens_before"], len(mirrored), len([n for n in mirrored if n in removed]),
+                            sorted({harness.refine(codec.classify(raw[n])).kind.value for n in retold}), len(retold),
+                            len(notes), not removed or max(removed) < min(survivors, default=len(raw))))
         until = next((n for n in edited if n > at), len(requests))
         later = [r for r in requests[at:until] if codec.items(r["body"])[: event["covered"]] == raw[: event["covered"]]]
         for r in later:
             sent = codec.items(r.get("forwarded") or r["body"])
             sent.append(without_note(sent[-1]))  # Anthropic and Gemini join the notes to the last user turn
+            sent += [without_guidance(item) for item in sent if "## Managing your context" in json.dumps(item)]
             if gone := [n for n in kept if raw[n] not in sent]:
                 problems.append(f"edit {k}: kept turns {gone} not forwarded as they were")
-            if back := [n for n in removed if raw[n] in sent]:
+            since = codec.items(r["body"])[len(raw):]  # lookalikes the harness sent later (Hermes's empty replies)
+            if back := [n for n in removed if sent.count(raw[n]) > sum(raw[m] == raw[n] for m in kept) + since.count(raw[n])]:
                 problems.append(f"edit {k}: removed turns {back} forwarded again")
             if lost := [t[:40] for t in [*notes, *retold.values()] if json.dumps(t)[1:-1] not in json.dumps(sent)]:
                 problems.append(f"edit {k}: notes or new text {lost} missing")
@@ -860,9 +897,25 @@ def evaluate_clm(name: str, home: Path) -> dict:
                                            and "[context: ~" in json.dumps((r.get("forwarded") or {}))):
             problems.append(f"request {n}: without the strategy's instructions or readout")
             break
-    for turn, (answer, wanted) in enumerate(zip(answers, (CODES[:4], CODES)), start=1):
-        if not re.search(r"[\s,]+".join(wanted), answer.lower()):
-            problems.append(f"turn {turn} answer is wrong: {answer[-120:]!r}")
+    turns = 2 if SPECS[name].resume else 1
+    wrong = [f"turn {turn} answer is wrong: {answer[-120:]!r}"
+             for turn, (answer, wanted) in enumerate(zip(answers[:turns], (CODES[:4], CODES)), start=1)
+             if not re.search(r"[\s,]+".join(wanted), answer.lower())]
+    if not steering:
+        problems += wrong
+    else:
+        policy = POLICIES[steering]
+        if not shapes:
+            problems.append(f"policy {steering}: the model never edited its context")
+        problems += [f"policy {steering}: edit {k} at {shape.tokens} tokens is {shape}" for k, shape in enumerate(shapes, 1)
+                     if policy.edit and not policy.edit(shape)]
+        if policy.edits and len(shapes) < policy.edits:
+            problems.append(f"policy {steering}: {len(shapes)} edits, at least {policy.edits} expected")
+        if steering == "backup":
+            backups = [f for d in [*home.rglob("compaction_backup"), *home.parent.joinpath("project").rglob("compaction_backup")]
+                       for f in d.rglob("*") if f.is_file()]
+            if len(backups) < len(shapes):
+                problems.append(f"policy backup: {len(backups)} backups for {len(shapes)} edits")
     if rejected := sum(r["status"] >= 400 for r in trace if "status" in r):
         problems.append(f"{rejected} model calls rejected")
     refused = sum(re.search(r"edit (NOT applied|REJECTED)", json.dumps(r.get("forwarded") or {})) is not None
@@ -876,10 +929,123 @@ def evaluate_clm(name: str, home: Path) -> dict:
         newest = codec.canonical(items[-1]).decode()
         rereads += sum(not same_call(first_read.setdefault(n, newest), newest) for n in files_read(codec, harness, items))
     return {
-        "name": f"{name} (clm)", "passed": not problems, "requests": len(requests), "edits": len(events),
-        "refused_edits": refused, "rereads": rereads, "prompt_tokens": [f"{u // 1000}k" for u in usage],
+        "name": f"{name} (clm{f', {steering}' if steering else ''})", "passed": not problems, "requests": len(requests),
+        "edits": len(events), "refused_edits": refused, "rereads": rereads, "prompt_tokens": [f"{u // 1000}k" for u in usage],
+        "edit_shapes": [f"{s.tokens // 1000}k: {s}" for s in shapes] if steering else None,
+        "task": ("answers right" if not wrong else "; ".join(wrong)) if steering else None,
         "answers": [a[-80:] for a in answers], "problems": problems, "home": str(home),
     }
+
+
+def evaluate_clm_edit(name: str, home: Path) -> dict:
+    """Check a `--clm-edit` run, in four parts: an edit was applied (or the model never wrote the
+    file, or Relay refused what it wrote); Relay applied it faithfully (`evaluate_clm`'s checks of
+    every edit); the context then is what the model was asked for, on every later request (file_2's
+    call and output gone, file_1's output rewritten in place, its call kept, the marker there); and
+    the model, answering from it, sees it so (the marker, the rewritten output, file_2's CODE gone)."""
+
+    def records(file: str) -> list[dict]:
+        path = home / file
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    trace = records("trace.jsonl")
+    requests = [r for r in trace if "body" in r and "MARKER 7319" in json.dumps(r["body"])  # the task's conversation
+                and codec_for(r["path"]).offers_tools(r["body"])]  # (not a title made from it)
+    resumable = bool(SPECS[name].resume)
+    answers = [(home / f).read_text(errors="replace").strip() if (home / f).exists() else ""
+               for f in ("harness.out", "harness2.out")[: 1 + resumable]]
+
+    def items(r: dict) -> list[Item]:
+        codec, harness = codec_for(r["path"]), detect({}, path=r["path"])
+        return [harness.refine(codec.classify(i)) for i in codec.items(r.get("forwarded") or r["body"])]
+
+    wrote = any(".live_ctx" in i.text for r in requests for i in items(r) if i.kind is Kind.TOOL_CALL)
+    refused = [m.group(0)[:160] for r in requests  # Relay's receipts end a request (a model may read Relay's code)
+               if (m := re.search(r"\[context file: edit (NOT applied|REJECTED)[^\]]*", items(r)[-1].text))]
+    edited = [n for n, r in enumerate(requests) if r["compacted"]]
+    applied = "yes" if edited else "no: " + ("Relay refused it" if refused else "the model wrote the file, Relay saw no change"
+                                             if wrote else "the model never wrote the context file")
+    faithful = [p for p in evaluate_clm(name, home)["problems"] if p.startswith("edit ")]
+
+    def reads(text: str, n: int) -> bool:  # a call reading file_n alone
+        return f"file_{n}.txt" in text and all(f"file_{m}" not in text for m in (1, 2, 3) if m != n)
+
+    asked: list[str] = []
+    for n in range(edited[-1] if edited else len(requests), len(requests)):
+        seen = items(requests[n])
+        own = [i for i in seen if i.kind is Kind.TOOL_CALL and ".live_ctx" not in i.text]  # not the edit's own calls
+        output = lambda k: any(i.kind is Kind.TOOL_RESULT and i.text.count(f"file {k} line ") >= 50 for i in seen)  # noqa: E731
+        asked = [what for what, bad in [
+            ("file_2's call is there", any(reads(i.text, 2) for i in own)),
+            ("file_2's output is there", output(2)),
+            ("file_1's output is there", output(1)),
+            ("file_1's output is not rewritten in place",
+             not any(i.kind is Kind.TOOL_RESULT and "MASKED file_1: CODE amber" in i.text for i in seen)),
+            ("file_1's call is gone", not any(reads(i.text, 1) for i in own)),
+            ("the marker is missing", not any(i.kind is Kind.USER and "MARKER 7319" in i.text
+                                              and "Change nothing else" not in i.text for i in seen)),
+        ] if bad]
+        if asked:
+            asked = [f"request {n}: {'; '.join(asked)}"]
+            break
+    answer = answers[-1].lower()
+    sees = "marker 7319" in answer and "masked file_1" in answer and "none" in answer
+    problems = [*([] if edited else [f"no edit applied: {applied[4:]}"]), *faithful, *asked,
+                *([] if sees else [f"the model does not see the edited context: {answers[-1][-160:]!r}"])]
+    if rejected := sum(r["status"] >= 400 for r in trace if "status" in r):
+        problems.append(f"{rejected} model calls rejected")
+    return {"name": f"{name} (clm edit)", "passed": not problems, "requests": len(requests), "edits": len(edited),
+            "applied": applied, "faithful": not faithful, "as_asked": bool(edited) and not asked, "sees": sees,
+            "refused_edits": refused, "answers": [a[-100:] for a in answers], "problems": problems, "home": str(home)}
+
+
+@dataclass(frozen=True)
+class Shape:
+    """What one CLM edit did to the model's own turns the mirror showed (after the protected task)."""
+
+    tokens: int  # the context's size when the edit was read back
+    mirrored: int  # turns in the mirror
+    removed: int  # of them, removed
+    retold_kinds: list[str]  # kinds of the turns kept with new text
+    retold: int
+    notes: int  # notes in the new context (the model's own blocks)
+    oldest_first: bool  # every removed turn older than every surviving one
+
+    def __str__(self) -> str:
+        return (f"-{self.removed}/{self.mirrored} removed, {self.retold} retold {self.retold_kinds or ''}, "
+                f"{self.notes} notes{', oldest first' if self.oldest_first else ''}").replace(" , ", ", ")
+
+
+@dataclass(frozen=True)
+class Policy:
+    """A steering brief (tests/docker/steering/NAME.md) and the shape each of its edits must have."""
+
+    edit: Callable[[Shape], bool] | None = None
+    edits: int = 1  # at least this many
+    nudges: bool = False  # the budget nudges on (off where the brief says when to act)
+
+
+POLICIES = {
+    # One handoff summary in place of all the mirror showed, and only past 20k tokens.
+    "compaction": Policy(lambda s: s.notes >= 1 and s.removed >= 0.9 * s.mirrored and s.tokens >= 19_000),
+    # The oldest turns gone, nothing written, nothing retold.
+    "sliding_window": Policy(lambda s: s.notes == 0 and s.retold == 0 and s.removed >= 1 and s.oldest_first),
+    # Tool results retold, nothing removed or added.
+    "masking": Policy(lambda s: s.removed == 0 and s.notes == 0 and s.retold >= 1 and s.retold_kinds == ["tool_result"]),
+    # One memory block in place of all the mirror showed, after each file.
+    "memory": Policy(lambda s: s.notes == 1 and s.removed >= 0.9 * s.mirrored, edits=3),
+    # A backup before every edit (counted from the files); edits come from the default nudges.
+    "backup": Policy(nudges=True),
+}
+
+
+def without_guidance(item: dict) -> dict:
+    """A system message without the strategy's guidance (Chat Completions joins it to the first)."""
+
+    content = item.get("content")
+    if isinstance(content, str):
+        return {**item, "content": content.split("\n\n## Managing your context")[0]}
+    return {**item, "content": content[:-1]} if isinstance(content, list) and content else item
 
 
 def without_note(item: dict) -> dict:
@@ -921,6 +1087,10 @@ def main() -> int:
     parser.add_argument("--file-lines", type=int, default=120, help="lines per file (each ~18 tokens)")
     parser.add_argument("--strategy", choices=["compaction", "clm"], default="compaction",
                         help="Relay's strategy (clm: the model edits its own context)")
+    parser.add_argument("--steering", help="with --strategy clm: a brief from tests/docker/steering (compaction, "
+                        "sliding_window, masking, memory, backup), the model told how to manage its context")
+    parser.add_argument("--clm-edit", action="store_true", help="with --strategy clm: the model edits its context as "
+                        "told (delete, rewrite, add) and answers from what it then sees")
     parser.add_argument("--via", choices=["proxy", "hook"], default="proxy",
                         help="install through this path (hook: the harness compacts through Relay's hook)")
     parser.add_argument("--harness-compaction", action="store_true",
@@ -931,7 +1101,8 @@ def main() -> int:
     for name in names:
         results.append(run(name, options.growth, probe=options.probe, subagent=options.subagent, window=options.window,
                            native=options.native_compact, selfcompact=options.harness_compaction, via=options.via,
-                           lines=options.file_lines, strategy=options.strategy))
+                           lines=options.file_lines, strategy=options.strategy, steering=options.steering,
+                           clm_edit=options.clm_edit))
         if options.probe:
             print(f"== {name}: probe recorded  ({results[-1]['home']})")
         else:

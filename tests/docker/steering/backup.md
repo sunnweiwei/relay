@@ -1,0 +1,1 @@
+Before every edit to your context, you must back up the current context file into a new file inside a new folder named compaction_backup next to the context file; never overwrite or delete earlier backups.

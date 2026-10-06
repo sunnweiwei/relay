@@ -94,21 +94,22 @@ class OpenAIChat:
             raise ValueError("the content of a tool call cannot change on its own")
         return {**wire, "content": _content(text, media)}
 
-    def legal(self, items: list[WireItem]) -> str | None:
-        """The tool messages answering an assistant message's calls follow it, and only them."""
+    def orphans(self, items: list[WireItem]) -> set[int]:
+        """Assistant messages whose calls the tool messages right after them do not all answer, and
+        tool messages answering no call waiting for them."""
 
-        waiting: set[str] = set()
-        for index, item in enumerate(items):
+        lonely, waiting, asker = set(), set(), None
+        for n, item in enumerate(items + [{}]):
             if item.get("role") == "tool":
-                if item.get("tool_call_id") not in waiting:
-                    return f"message {index} answers a tool call that is not waiting for it"
-                waiting.discard(item.get("tool_call_id"))
+                if item.get("tool_call_id") in waiting:
+                    waiting.discard(item.get("tool_call_id"))
+                else:
+                    lonely.add(n)
                 continue
             if waiting:
-                return f"tool calls {sorted(waiting)} are not answered"
-            if item.get("role") == "assistant":
-                waiting = {call.get("id") for call in item.get("tool_calls") or []}
-        return f"tool calls {sorted(waiting)} are not answered" if waiting else None
+                lonely.add(asker)
+            asker, waiting = n, {call.get("id") for call in item.get("tool_calls") or []} if item.get("role") == "assistant" else set()
+        return lonely
 
     def note(self, items: list[WireItem], text: str) -> list[WireItem]:
         return [*items, self.user_message(text)]

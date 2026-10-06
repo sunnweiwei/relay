@@ -95,19 +95,22 @@ class AnthropicMessages:
                    *({**b, "content": ""} for b in results[1:])]
         return {**wire, "content": content}
 
-    def legal(self, items: list[WireItem]) -> str | None:
-        """Each tool use is answered in the very next message, and each result answers one."""
+    def orphans(self, items: list[WireItem]) -> set[int]:
+        """Messages whose tool uses are not all answered in the very next message, and messages
+        answering a tool use the message before them does not make."""
 
-        asked: set[str] = set()
-        for index, item in enumerate(items):
-            blocks = _blocks(item.get("content"))
-            answered = {b.get("tool_use_id") for b in blocks if b.get("type") == "tool_result"}
-            if not answered <= asked:
-                return f"message {index} answers a tool use the message before it does not make"
-            if asked - answered:
-                return f"tool uses {sorted(asked - answered)} are not answered in the next message"
-            asked = {b.get("id") for b in blocks if b.get("type") == "tool_use"} if item.get("role") == "assistant" else set()
-        return f"tool uses {sorted(asked)} are not answered" if asked else None
+        def ids(item: WireItem, kind: str, key: str) -> set[str]:
+            return {b.get(key) for b in _blocks(item.get("content")) if b.get("type") == kind}
+
+        lonely = set()
+        for n, item in enumerate(items):
+            asked = ids(item, "tool_use", "id") if item.get("role") == "assistant" else set()
+            if asked and not (n + 1 < len(items) and asked <= ids(items[n + 1], "tool_result", "tool_use_id")):
+                lonely.add(n)
+            before = ids(items[n - 1], "tool_use", "id") if n and items[n - 1].get("role") == "assistant" else set()
+            if not ids(item, "tool_result", "tool_use_id") <= before:
+                lonely.add(n)
+        return lonely
 
     def note(self, items: list[WireItem], text: str) -> list[WireItem]:
         if not items or items[-1].get("role") != "user":
