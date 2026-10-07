@@ -1,0 +1,5 @@
+{
+  "name": "relay-session",
+  "version": "0.1.0",
+  "description": "Reports Claude Code's session to Relay, so Relay's compaction lays out the context as Claude Code's own would."
+}

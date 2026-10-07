@@ -18,10 +18,11 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from ..core.conversation import pending_cut
 from ..core.ir import Context, Item, Kind, Request
 from ..prompts import SUMMARY_PREFIX
 from .base import Summarizer
-from .compaction import DEFAULT_WINDOW, HARD_LIMIT, summary_cut
+from .compaction import DEFAULT_WINDOW, HARD_LIMIT
 from .conversation import responses
 
 RUBRIC = """You are about to decide whether to compress your conversation history into a summary that REPLACES the full history above. After compression, you continue research from only [system, original_question, assistant_summary, user_continue]. Compression is irreversible: anything not preserved in the summary is gone.
@@ -88,7 +89,7 @@ class SelfCompact:
         rounds = sum(start > last for start in responses(items))
         forced = request.force or request.tokens >= self.backstop * budget
         due = request.tokens >= self.gate * budget and rounds and rounds % self.period == 0
-        if not (forced or due) or (cut := summary_cut(request)) is None:
+        if not (forced or due) or (cut := pending_cut(request)) is None:
             return None
         if not forced and not _fires(summarizer.summarize(cut, RUBRIC)):
             return None

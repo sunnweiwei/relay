@@ -2,9 +2,11 @@
 
 Each scenario runs three times against the scripted fake upstream, in the same directories
 with a fresh Codex home: without compaction to measure the request sizes, with Codex's own
-compaction, and through Relay with Codex's compaction off. The first compacted request of the
-last two runs must match, ids and the summary text aside. Thresholds sit between measured
-sizes, so both compact in the same turn and at the same kind of point (mid-turn or turn start).
+compaction, and through Relay with Codex's compaction off. The first request after a compaction
+in the last two runs must match, ids and the summary text aside (subagents are numbered in the
+order they were spawned, and listed in any order: Codex lists them from a hash map). Thresholds
+sit between measured sizes, so both compact in the same turn and at the same kind of point
+(mid-turn or turn start).
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ import threading
 import time
 import unittest
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +48,7 @@ class Turn:
     cwd: str = "A"
     model: str = MODEL
     before: Callable[[Path], None] | None = None  # runs in the test root before the turn starts
+    env: dict[str, str] = field(default_factory=dict)
 
 
 def _text(item: dict[str, Any]) -> str:
@@ -58,21 +61,69 @@ def _tokens(body: dict[str, Any]) -> int:
     return len(json.dumps(body)) // 4  # what the fake reports as prompt tokens
 
 
-def _compacted(bodies: list[dict[str, Any]], task: str) -> list[dict[str, Any]] | None:
-    """The input of the first model request after a compaction in the conversation of `task`."""
+def _conversation(bodies: list[dict[str, Any]], task: str) -> list[dict[str, Any]]:
+    """The model requests of the conversation of `task` (not its summaries or side requests)."""
 
+    return [body for body in bodies if body.get("tools") and any(task in _text(i) for i in body["input"])
+            and COMPACTION_MARKER not in _text(body["input"][-1])]
+
+
+def _compacted(bodies: list[dict[str, Any]], task: str, nth: int = 1) -> list[dict[str, Any]] | None:
+    """The input of the first model request after the n-th compaction in the conversation of `task`."""
+
+    summaries = [i for i, body in enumerate(bodies) if COMPACTION_MARKER in _text(body["input"][-1])
+                 and any(task in _text(item) for item in body["input"])]
+    if len(summaries) < nth:
+        return None
+    return next((body["input"] for body in _conversation(bodies[summaries[nth - 1] + 1:], task)
+                 if any(_text(item).startswith(SUMMARY_PREFIX) for item in body["input"])), None)
+
+
+SPAWNED = re.compile(r'\{"agent_id":"([^"]+)","nickname":(?:"([^"]*)"|null)\}')
+
+
+def _normal(items: list[dict[str, Any]], bodies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    spawned: dict[str, str | None] = {}
     for body in bodies:
-        items = body["input"]
-        if COMPACTION_MARKER in _text(items[-1]) or not any(task in _text(i) for i in items):
-            continue
-        if any(_text(item).startswith(SUMMARY_PREFIX) for item in items):
-            return items
-    return None
+        for item in body["input"]:
+            if item.get("type") == "function_call_output" and isinstance(item.get("output"), str):
+                spawned.update((m[1], m[2]) for m in SPAWNED.finditer(item["output"]) if m[1] not in spawned)
+    text = json.dumps([{k: v for k, v in item.items() if k != "id"} for item in items])
+    for n, (agent, nickname) in enumerate(spawned.items()):
+        text = text.replace(agent, f"agent-{n}")
+        text = re.sub(rf"\b{re.escape(nickname)}\b", f"nickname-{n}", text) if nickname else text
+    text = re.sub(r"(<subagents>\\n)(.*?)(\\n  </subagents>)",
+                  lambda m: m[1] + "\\n".join(sorted(m[2].split("\\n"))) + m[3], text)
+    return [{**item, "content": "<summary>"} if _text(item).startswith(SUMMARY_PREFIX) else item
+            for item in json.loads(text)]
 
 
-def _normal(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    items = [{k: v for k, v in item.items() if k != "id"} for item in items]
-    return [{**item, "content": "<summary>"} if _text(item).startswith(SUMMARY_PREFIX) else item for item in items]
+def spawn(message: str) -> dict[str, Any]:
+    return {"namespace": "multi_agent_v1", "name": "spawn_agent", "input": {"message": message}}
+
+
+def wait(agent: str) -> dict[str, Any]:
+    return {"namespace": "multi_agent_v1", "name": "wait_agent", "input": {"targets": [agent], "timeout_ms": 60000}}
+
+
+def close(agent: str) -> dict[str, Any]:
+    return {"namespace": "multi_agent_v1", "name": "close_agent", "input": {"target": agent}}
+
+
+def delegating(steps: dict[str, list[Callable[[list[str]], dict[str, Any]]]]):
+    """A fake script: in a user turn whose prompt contains a key, its calls, each made from the ids
+    of the agents spawned so far, then shell commands; agents (prompts starting "AGENT") answer
+    at once."""
+
+    def script(step: int, turns: list[tuple[str, str, int]]) -> dict[str, Any] | str | None:
+        prompts = [text for role, text, _ in turns if role == "user" and not text.lstrip().startswith(("<", "#"))]
+        if prompts and prompts[0].startswith("AGENT"):
+            return "done"
+        calls = next((calls for key, calls in steps.items() if prompts and key in prompts[-1]), [])
+        agents = [m[1] for role, text, _ in turns if role == "tool" for m in SPAWNED.finditer(text)]
+        return calls[step](agents) if step < len(calls) else None
+
+    return script
 
 
 class Bench:
@@ -117,7 +168,8 @@ def exec_turns(bench: Bench, fake: FakeUpstream, turns: list[Turn], limits: list
                    "-m", turn.model, "-c", f"model_auto_compact_token_limit={limit}"]
         command = ["codex", "exec", *options, turn.prompt] if thread is None else \
             ["codex", "exec", "resume", *options, thread, turn.prompt]
-        result = subprocess.run(command, cwd=bench.root / turn.cwd, env=bench.env(), stdin=subprocess.DEVNULL,
+        result = subprocess.run(command, cwd=bench.root / turn.cwd, env={**bench.env(), **turn.env},
+                                stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, timeout=300)
         assert result.returncode == 0, result.stderr[-2000:]
         thread = thread or next(json.loads(line)["thread_id"] for line in result.stdout.splitlines()
@@ -227,8 +279,8 @@ def tui_turns(bench: Bench, fake: FakeUpstream, turns: list[Turn], limits: list[
             screen = ""
 
     def completed() -> int:
-        logs = sorted((bench.home / "sessions").rglob("*.jsonl"))
-        return sum(path.read_text().count('"task_complete"') for path in logs)
+        logs = sorted((bench.home / "sessions").rglob("*.jsonl"))  # by time: the session, then its subagents
+        return logs[0].read_text().count('"task_complete"') if logs else 0
 
     try:
         pump(8)
@@ -274,25 +326,31 @@ class CodexContextEndToEndTests(unittest.TestCase):
                     counts = driver(self.bench, fake, turns, [OFF] * len(turns))
         return fake.bodies("/v1/responses"), counts
 
-    def compare(self, driver, turns, fake_args, *, turn_start: bool = False):
-        """Calibrate, run Codex's compaction and Relay's, and compare the first compacted request."""
+    def compare(self, driver, turns, fake_args, *, turn_start: bool = False, at: int | None = None, nth: int = 1):
+        """Calibrate, run Codex's compaction and Relay's, and compare the first request after the
+        n-th compaction: mid-way through turn 2, at its start, or before request `at` of the task."""
 
         task = turns[0].prompt
         bodies, counts = self.run_once(driver, turns, fake_args)
-        mine = [b for b in bodies if any(task in _text(i) for i in b["input"])]
-        last1, first2, second2 = (_tokens(mine[i]) for i in (counts[0] - 1, counts[0], counts[0] + 1))
-        if turn_start:  # Codex: compact before turn 2 (per-process limits); Relay: on its first request
-            limits, threshold = [OFF, last1 - 1], (last1 + first2) // 2
-        else:  # both compact mid-way through turn 2, after its first tool result; Relay's own
-            # estimate of a request with large context updates runs a little above the fake's count
-            threshold = first2 + 2 * (second2 - first2) // 3
+        if at is not None:
+            before, after = (_tokens(body) for body in _conversation(bodies, task)[at - 1 : at + 1])
+            threshold = before + 2 * (after - before) // 3
             limits = [threshold] * len(turns)
+        else:
+            mine = [b for b in bodies if any(task in _text(i) for i in b["input"])]
+            last1, first2, second2 = (_tokens(mine[i]) for i in (counts[0] - 1, counts[0], counts[0] + 1))
+            if turn_start:  # Codex: compact before turn 2 (per-process limits); Relay: on its first request
+                limits, threshold = [OFF, last1 - 1], (last1 + first2) // 2
+            else:  # both compact mid-way through turn 2, after its first tool result; Relay's own
+                # estimate of a request with large context updates runs a little above the fake's count
+                threshold = first2 + 2 * (second2 - first2) // 3
+                limits = [threshold] * len(turns)
         native, _ = self.run_once(driver, turns, fake_args, limits=limits)
         relayed, _ = self.run_once(driver, turns, fake_args, threshold=threshold)
-        codex_view, relay_view = _compacted(native, task), _compacted(relayed, task)
+        codex_view, relay_view = _compacted(native, task, nth), _compacted(relayed, task, nth)
         self.assertIsNotNone(codex_view, "Codex did not compact")
         self.assertIsNotNone(relay_view, "Relay did not compact")
-        self.assertEqual(_normal(relay_view), _normal(codex_view))
+        self.assertEqual(_normal(relay_view, relayed), _normal(codex_view, native))
         return relay_view, relayed
 
     def directory_agents_and_model_turns(self) -> list[Turn]:
@@ -312,6 +370,19 @@ class CodexContextEndToEndTests(unittest.TestCase):
         text = json.dumps(view)
         self.assertIn("Project notes (v2)", text)
         self.assertIn("<model_switch>", text)
+
+    def test_exec_resume_after_the_date_changes(self) -> None:
+        # Codex dates by TZ (its timezone is the system's): the update names the date, not the
+        # working directory and shell, as when a session runs past midnight.
+        turns = [Turn("List the files.", env={"TZ": "Pacific/Kiritimati"}),
+                 Turn("List them again.", env={"TZ": "Pacific/Pago_Pago"})]
+        view, relayed = self.compare(exec_turns, turns, {"tool_calls": 5, "command": COMMAND})
+        updates = [_text(item) for body in relayed for item in body["input"]
+                   if _text(item).startswith("<environment_context>") and "<cwd>" not in _text(item)]
+        self.assertTrue(updates)
+        text = json.dumps(view)
+        self.assertIn("<cwd>", text)
+        self.assertIn(re.search(r"<current_date>.*?</current_date>", updates[-1]).group(), text)
 
     def test_app_server_with_approved_command_prefixes(self) -> None:
         view, _ = self.compare(app_server_turns, [Turn("Count to two thousand."), Turn("Do it again.")],
@@ -360,6 +431,49 @@ class CodexContextEndToEndTests(unittest.TestCase):
         for body in relayed:  # one Relay, two sessions: neither sees the other's conversation
             texts = [_text(item) for item in body["input"]]
             self.assertFalse(any(other in t for t in texts) and any(turns[0].prompt in t for t in texts))
+
+    def test_exec_with_agents_spawned_waited_on_and_closed(self) -> None:
+        # Codex lists its open agents in the environment context, though a change to them alone
+        # renders no update.
+        calls = [lambda agents, n=n: spawn(f"AGENT {n}") for n in range(5)]
+        calls += [lambda agents: wait(agents[0]), lambda agents: close(agents[1]), lambda agents: close(agents[3])]
+        view, relayed = self.compare(exec_turns, [Turn("Delegate the counting.")],
+                                     {"tool_calls": 10, "command": COMMAND, "script": delegating({"Delegate": calls})},
+                                     at=9)
+        listed = re.findall(r"- (agent-\d+)", json.dumps(_normal(view, relayed)))
+        self.assertEqual(sorted(listed), ["agent-0", "agent-2", "agent-4"])
+
+    def test_exec_resume_with_an_agent_swapped_after_the_date_changes(self) -> None:
+        # The update for the new date lists the agents open at the time.
+        script = delegating({"Delegate": [lambda agents: spawn("AGENT A"), lambda agents: wait(agents[0])],
+                             "Swap": [lambda agents: close(agents[0]), lambda agents: spawn("AGENT B"),
+                                      lambda agents: wait(agents[1])]})
+        turns = [Turn("Delegate the counting.", env={"TZ": "Pacific/Kiritimati"}),
+                 Turn("Swap the agents.", env={"TZ": "Pacific/Pago_Pago"})]
+        view, relayed = self.compare(exec_turns, turns, {"tool_calls": 6, "command": COMMAND, "script": script}, at=10)
+        self.assertEqual(re.findall(r"- (agent-\d+)", json.dumps(_normal(view, relayed))), ["agent-1"])
+
+    def test_exec_resume_with_everything_changing_and_two_compactions(self) -> None:
+        script = delegating({"Delegate": [lambda agents: spawn("AGENT A"), lambda agents: wait(agents[0])]})
+        turns = [Turn("Delegate the counting.", env={"TZ": "Pacific/Kiritimati"}),
+                 Turn("Count in B.", cwd="B", model=SWITCHED, env={"TZ": "Pacific/Pago_Pago"}),
+                 Turn("Count in A.", env={"TZ": "Pacific/Pago_Pago"})]
+        self.compare(exec_turns, turns, {"tool_calls": 4, "command": COMMAND, "script": script}, at=5, nth=2)
+
+    def test_app_server_with_a_command_approved_in_the_compacting_step(self) -> None:
+        # Codex compacts with the state from before the approval; the saved prefix follows.
+        view, _ = self.compare(app_server_turns, [Turn("Count to six thousand.")],
+                               {"tool_calls": 3, "command": COMMAND, "arguments": ESCALATE}, at=1)
+        self.assertEqual(_text(view[-1]), 'Approved command prefix saved:\n- ["seq"]')
+
+    @unittest.skipUnless(shutil.which("setsid"), "setsid is not installed")
+    def test_tui_with_an_agent_approvals_and_agents_md_edited_between_turns(self) -> None:
+        edit = lambda root: (root / "A" / "AGENTS.md").write_text(AGENTS["B"])  # noqa: E731
+        script = delegating({"Delegate": [lambda agents: spawn("AGENT A"), lambda agents: wait(agents[0])]})
+        view, relayed = self.compare(
+            tui_turns, [Turn("Delegate the counting."), Turn("Do it again.", before=edit)],
+            {"tool_calls": 4, "command": COMMAND, "arguments": ESCALATE, "script": script}, at=6)
+        self.assertEqual(re.findall(r"- (agent-\d+)", json.dumps(_normal(view, relayed))), ["agent-0"])
 
 
 if __name__ == "__main__":

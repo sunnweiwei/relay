@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 
-from relay.core.ir import Item, Kind, Media, Request
+from relay.core.ir import Item, Kind, Media, Native, Request
+from relay.harnesses import keep
+from relay.harnesses.goose import Summary as GooseSummary
+from relay.harnesses.workbuddy import Summary as WorkBuddySummary
 from relay.prompts import SUMMARIZATION_PROMPT, SUMMARY_PREFIX
 from relay.strategies import Compaction
 
@@ -106,3 +110,81 @@ class GrowthTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def native(request_: Request, how: Native) -> Request:
+    return replace(request_, native=how)
+
+
+class NativeKeepTests(unittest.TestCase):
+    """What a harness keeps verbatim when it compacts by itself, and when it compacts at all."""
+
+    strategy = Compaction(threshold=500, min_gain=0)
+    rounds = [item(Kind.USER, "task", 0), *(i for n in range(4) for i in
+                                             (item(Kind.TOOL_CALL, f"read({n})", 1 + 2 * n),
+                                              item(Kind.TOOL_RESULT, "x" * 2_000, 2 + 2 * n)))]
+
+    def compact(self, how: Native, *items: Item) -> tuple[Item, ...]:
+        summarizer = FakeSummarizer()
+        context = self.strategy.plan(native(request(*items), how), summarizer)
+        self.assertEqual(summarizer.calls[0][1], how.prompt)
+        return context.items
+
+    def test_round_keeps_the_model_s_last_call_and_its_result(self) -> None:
+        kept = self.compact(Native("P", "<", ">", keep.round()), *self.rounds)
+        self.assertEqual([i.kind for i in kept], [Kind.SUMMARY, Kind.TOOL_CALL, Kind.TOOL_RESULT])
+        self.assertEqual(kept[0].text, "<SUMMARY>")
+
+    def test_tail_keeps_what_fits_its_budget_never_opening_on_a_result(self) -> None:
+        kept = self.compact(Native("P", keep=keep.tail(tokens=600)), *self.rounds)  # one round's worth, and a little
+        self.assertEqual([i.kind for i in kept], [Kind.SUMMARY, Kind.TOOL_CALL, Kind.TOOL_RESULT])
+        least = self.compact(Native("P", keep=keep.tail(tokens=10, least=4)), *self.rounds)  # at least four items
+        self.assertEqual(len(least), 5)
+        most = self.compact(Native("P", keep=keep.tail(tokens=10_000, most=1)), *self.rounds)  # one round at most
+        self.assertEqual(len(most), 3)
+        head = self.compact(Native("P", keep=keep.tail(tokens=10, head=1)), *self.rounds)  # the task stays first
+        self.assertEqual([i.kind for i in head][:2], [Kind.USER, Kind.SUMMARY])
+
+    def test_turns_keeps_the_turn_in_progress(self) -> None:
+        turn = [*self.rounds, item(Kind.ASSISTANT, "done", 9), item(Kind.USER, "next", 10),
+                item(Kind.TOOL_CALL, "read(9)", 11), item(Kind.TOOL_RESULT, "y", 12)]
+        kept = self.compact(Native("P", keep=keep.turns(0.001)), *turn)
+        self.assertEqual([i.text for i in kept[1:]], ["next", "read(9)", "y"])
+
+    def test_users_keeps_the_user_messages_ahead_of_a_summary_of_everything(self) -> None:
+        kept = self.compact(Native("P", keep=keep.users(20_000)), *self.rounds)
+        self.assertEqual([i.kind for i in kept], [Kind.USER, Kind.SUMMARY])
+
+    def test_split_keeps_from_the_first_user_message_past_its_share(self) -> None:
+        turns = [*self.rounds, item(Kind.ASSISTANT, "done", 9), item(Kind.USER, "next", 10),
+                 item(Kind.TOOL_CALL, "read(9)", 11), item(Kind.TOOL_RESULT, "y" * 100, 12)]
+        kept = self.compact(Native("P", keep=keep.split(0.3)), *turns)
+        self.assertEqual([i.text for i in kept[1:]], ["next", "read(9)", "y" * 100])
+
+    def test_last_keeps_a_pending_turn_or_mid_turn_the_last_round(self) -> None:
+        self.assertEqual([i.kind for i in self.compact(Native("P", keep=keep.last()), *self.rounds)],
+                         [Kind.SUMMARY, Kind.TOOL_CALL, Kind.TOOL_RESULT])
+        waiting = [*self.rounds, item(Kind.ASSISTANT, "done", 9), item(Kind.USER, "next", 10)]
+        self.assertEqual([i.text for i in self.compact(Native("P", keep=keep.last()), *waiting)][1:], ["next"])
+
+    def test_a_harness_compacting_at_turn_starts_waits_for_one(self) -> None:
+        how = Native("P", keep=keep.pending(), at_turns=True)
+        self.assertIsNone(self.strategy.plan(native(request(*self.rounds), how), FakeSummarizer()))
+        self.assertIsNotNone(self.strategy.plan(native(request(*self.rounds, force=True), how), FakeSummarizer()))
+        waiting = [*self.rounds, item(Kind.ASSISTANT, "done", 9), item(Kind.USER, "next", 10)]
+        self.assertIsNotNone(self.strategy.plan(native(request(*waiting), how), FakeSummarizer()))
+
+
+class SummaryMessageTests(unittest.TestCase):
+    def test_goose_renders_its_json_and_keeps_text_it_cannot_read(self) -> None:
+        answer = ('<analysis>notes</analysis>\n```json\n{"user_intent": ["read files"], "files": [{"path": "a", '
+                  '"summary": "CODE amber"}], "current_work": "reading b"}\n```')
+        self.assertEqual(GooseSummary("").message(answer),
+                         "# Conversation Summary\n\n## User Intent\n- read files\n\n## Files + Code\n### a\nCODE amber\n\n"
+                         "## Current Work\nreading b")
+        self.assertEqual(GooseSummary("").message("plain"), "plain")
+
+    def test_workbuddy_keeps_the_summary_its_model_marks(self) -> None:
+        message = WorkBuddySummary("", "<", ">").message
+        self.assertEqual(message("<analysis>a</analysis><summary>\nS\n</summary>"), "<S>")
+        self.assertEqual(message("S"), "<<conversation_history_summary>\nS\n</conversation_history_summary>>")
