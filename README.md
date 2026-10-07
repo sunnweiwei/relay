@@ -450,7 +450,8 @@ Gemini was overloaded during much of it, answering 503s; failed pairs were run a
 | `RELAY_HARNESS` | detected | Force a harness profile by name, e.g. `codex`, `hermes`, `generic`. |
 | `RELAY_EVENT_LOG` | unset | Append one JSON line per compaction (sizes, timing, the new head). |
 | `RELAY_HOST`, `RELAY_PORT` | `127.0.0.1`, `8787` | Server address for `relay serve`. |
-| `RELAY_CACHE_MAX_ENTRIES`, `RELAY_CACHE_MAX_BYTES`, `RELAY_CACHE_TTL_SECONDS`, `RELAY_CACHE_SECRET` | `4096`, 256 MiB, 6 h, random | Limits of the in-memory prefix store. |
+| `RELAY_CACHE_MAX_ENTRIES`, `RELAY_CACHE_MAX_BYTES`, `RELAY_CACHE_TTL_SECONDS`, `RELAY_CACHE_SECRET` | `4096`, 256 MiB, 6 h, random | Limits of the prefix store. |
+| `RELAY_CACHE_PATH` | `~/.relay/store.json` | Where the prefix store is kept, so a restarted Relay finds its contexts: compactions are not recomputed and CLM edits are not lost (`off`: in memory only). The file holds summaries and strategy state (conversation text), readable by its owner only; without `RELAY_CACHE_SECRET`, a secret is generated once and kept beside it. |
 
 Set `RELAY_CONTEXT_WINDOW` to the window the harness itself uses (Codex's catalog gives the
 gpt-5.6 and gpt-6 families 272k by default, shown as 258k usable): the table covers older
@@ -615,9 +616,10 @@ its own history passes it. Checked with Codex's trigger at 25k and Relay's thres
 Codex's history grew to 34k, the usage it was told stayed under 22k, and it never compacted
 itself (in `codex exec` and under Remote Control); with Relay not compacting, it did.
 
-Known limitations: state lives in memory, so a restart costs a catch-up summary per
-conversation; WebSocket transports are refused (Codex falls back to HTTP); an overflow
-reported inside an already-started stream is not retried; token-counting endpoints are
+Known limitations: a restart finds the stored contexts again only when the store is kept on disk
+(the default, `RELAY_CACHE_PATH`), otherwise it costs a catch-up summary per conversation;
+WebSocket transports are refused (Codex falls back to HTTP); an overflow reported inside an
+already-started stream is not retried; token-counting endpoints are
 passed through unchanged; Gemini CLI's Google-login mode (Code Assist API) is not
 covered yet.
 

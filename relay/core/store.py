@@ -5,6 +5,14 @@ strategy computed for one request is found again by walking the canonical item
 prefix of the next one. A keyed hash trie gives each prefix one node; only nodes
 carrying a value count toward the limits. Values are soft state: a miss is always
 recoverable by recomputing from the request.
+
+The store can be kept on disk (`path`, with a fixed `secret`), so that a restarted Relay
+finds the contexts it had. Relay does this by default (`from_env`: ~/.relay/store.json, with a
+secret it generates once and keeps beside it; RELAY_CACHE_PATH=off keeps it in memory): a strategy's result is then not recomputed, and a result that cannot
+be recomputed (the edits a model made under CLM) is not lost. Only the keyed digests of the
+prefixes are written, never the items; values are written as they are stored (summaries and
+strategy state, conversation text). The file is written at most every `save_interval` seconds
+and by `flush()` (Relay calls it on shutdown), atomically and readable by its owner only.
 """
 
 from __future__ import annotations
@@ -12,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
 import time
@@ -21,6 +30,9 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any
+
+log = logging.getLogger("relay")
+FORMAT = 2  # 2: every node written once, with its parent (1 repeated every entry's whole path)
 
 
 @dataclass(eq=False)
@@ -44,6 +56,8 @@ class PrefixStore:
         ttl_seconds: float | None = 6 * 60 * 60,
         secret: bytes | None = None,
         clock: Callable[[], float] = time.monotonic,
+        path: str | os.PathLike[str] | None = None,
+        save_interval: float = 1.0,
     ) -> None:
         if min(max_entries, max_bytes, max_nodes) <= 0:
             raise ValueError("store limits must be positive")
@@ -58,17 +72,34 @@ class PrefixStore:
         self._lock = RLock()
         self._nodes = 0
         self._bytes = 0
+        if path is not None and secret is None:  # a random secret makes every saved key unreachable
+            log.warning("the prefix store is kept in memory only: a store on disk needs a fixed secret")
+            path = None
+        self._path = None if path is None else os.fspath(path)
+        self._save_interval = save_interval
+        self._save_lock = RLock()
+        self._dirty = False
+        self._saved_at = time.time()
+        if self._path is not None:
+            self._load()
 
     @classmethod
     def from_env(cls) -> PrefixStore:
-        secret = os.getenv("RELAY_CACHE_SECRET")
+        secret: str | bytes | None = os.getenv("RELAY_CACHE_SECRET")
         ttl = float(os.getenv("RELAY_CACHE_TTL_SECONDS", str(6 * 60 * 60)))
+        path: str | None = os.getenv("RELAY_CACHE_PATH", os.path.join(os.path.expanduser("~"), ".relay", "store.json"))
+        if path.strip().lower() in ("", "off", "none", "memory"):
+            path = None
+        if path is not None and not secret:
+            secret = _kept_secret(f"{path}.secret")
+            path = path if secret else None
         return cls(
             max_entries=int(os.getenv("RELAY_CACHE_MAX_ENTRIES", "4096")),
             max_bytes=int(os.getenv("RELAY_CACHE_MAX_BYTES", str(256 * 1024 * 1024))),
             max_nodes=int(os.getenv("RELAY_CACHE_MAX_NODES", "200000")),
             ttl_seconds=ttl if ttl > 0 else None,
-            secret=secret.encode() if secret else None,
+            secret=secret.encode() if isinstance(secret, str) else secret or None,
+            path=path,
         )
 
     def partition(self, *parts: str) -> bytes:
@@ -121,12 +152,113 @@ class PrefixStore:
             self._bytes += size
             self._lru[node.digest] = node
             self._lru.move_to_end(node.digest)
-            while self._lru and (
-                len(self._lru) > self.max_entries
-                or self._bytes > self.max_bytes
-                or self._nodes > self.max_nodes
-            ):
-                self._drop(next(iter(self._lru.values())))
+            self._evict()
+            self._dirty = True
+        if self._path is not None and time.time() - self._saved_at >= self._save_interval:
+            self.flush()
+
+    def flush(self) -> None:
+        """Write the store to its file, if it has one and changed since it was last written."""
+
+        if self._path is None:
+            return
+        with self._save_lock:
+            with self._lock:
+                if not self._dirty:
+                    return
+                now, wall = self._clock(), time.time()
+                # Each node once, a parent before its children: the prefixes of one conversation share
+                # their nodes, so the file grows with the trie rather than with entries times depth.
+                index: dict[int, int] = {}
+                nodes: list[list[Any]] = []
+                entries = []
+                for node in self._lru.values():  # least recently used first, as they are reloaded
+                    if node.value is None or (node.expires_at is not None and node.expires_at <= now):
+                        continue
+                    trail, step = [], node
+                    while step is not None and id(step) not in index:
+                        trail.append(step)
+                        step = step.parent
+                    for missing in reversed(trail):
+                        parent = -1 if missing.parent is None else index[id(missing.parent)]
+                        index[id(missing)] = len(nodes)
+                        nodes.append([missing.digest.hex(), parent])
+                    expires = None if node.expires_at is None else wall + node.expires_at - now
+                    entries.append([index[id(node)], node.value, expires])
+                self._dirty, self._saved_at = False, wall
+            # Values are replaced, never changed in place, so they are written outside the lock.
+            data = json.dumps({"format": FORMAT, "check": self._digest(b"check").hex(), "nodes": nodes,
+                               "entries": entries}, separators=(",", ":"))
+            temporary = f"{self._path}.{os.getpid()}.tmp"
+            try:
+                os.makedirs(os.path.dirname(self._path) or ".", mode=0o700, exist_ok=True)
+                descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+                    file.write(data)
+                os.replace(temporary, self._path)
+            except OSError:
+                log.warning("could not write the prefix store to %s", self._path, exc_info=True)
+                with self._lock:
+                    self._dirty = True
+
+    def _load(self) -> None:
+        try:
+            with open(self._path, encoding="utf-8") as file:  # type: ignore[arg-type]
+                data = json.load(file)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError):
+            log.warning("could not read the prefix store from %s; starting empty", self._path, exc_info=True)
+            return
+        if not isinstance(data, dict) or data.get("format") != FORMAT:
+            log.warning("the prefix store in %s has an unknown format; starting empty", self._path)
+            return
+        if data.get("check") != self._digest(b"check").hex():
+            log.warning("the prefix store in %s was written with another secret; starting empty", self._path)
+            return
+        now, wall = self._clock(), time.time()
+        try:
+            written = [(bytes.fromhex(digest), int(parent)) for digest, parent in data["nodes"]]
+            entries = [(int(at), value, expires) for at, value, expires in data["entries"]]
+        except (KeyError, TypeError, ValueError):
+            log.warning("the prefix store in %s is damaged; starting empty", self._path)
+            return
+        with self._lock:
+            built: list[_Node | None] = []
+            for digest, parent in written:  # a parent always comes before its children
+                if parent == -1:
+                    node = self._roots.get(digest)
+                    if node is None:
+                        node = self._roots[digest] = _Node(digest, 0)
+                        self._nodes += 1
+                elif 0 <= parent < len(built) and (up := built[parent]) is not None:
+                    node = up.children.get(digest)
+                    if node is None:
+                        node = up.children[digest] = _Node(digest, up.depth + 1, up)
+                        self._nodes += 1
+                else:
+                    node = None
+                built.append(node)
+            for at, value, expires in entries:
+                node = built[at] if 0 <= at < len(built) else None
+                if node is None or not isinstance(value, dict) or (expires is not None and expires <= wall):
+                    continue
+                if node.value is not None:
+                    self._bytes -= node.size
+                node.value, node.size = value, len(json.dumps(value, separators=(",", ":")))
+                node.expires_at = None if expires is None else now + expires - wall
+                self._bytes += node.size
+                self._lru[node.digest] = node
+                self._lru.move_to_end(node.digest)
+            self._evict()
+
+    def _evict(self) -> None:
+        while self._lru and (
+            len(self._lru) > self.max_entries
+            or self._bytes > self.max_bytes
+            or self._nodes > self.max_nodes
+        ):
+            self._drop(next(iter(self._lru.values())))
 
     def __len__(self) -> int:
         return len(self._lru)
@@ -158,3 +290,26 @@ class PrefixStore:
             node.parent.children.pop(node.digest, None)
             self._nodes -= 1
             node = node.parent
+
+
+def _kept_secret(path: str) -> bytes | None:
+    """The store's secret, generated on first use and kept in `path` (readable by its owner only),
+    so that a restarted Relay computes the same keys; None if it cannot be kept."""
+
+    try:
+        os.makedirs(os.path.dirname(path) or ".", mode=0o700, exist_ok=True)
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            with open(path, "rb") as file:
+                secret = file.read()
+            if len(secret) >= 16:
+                return secret
+            raise ValueError(f"{path} holds no usable secret") from None
+        secret = secrets.token_bytes(32)
+        with os.fdopen(descriptor, "wb") as file:
+            file.write(secret)
+        return secret
+    except (OSError, ValueError):
+        log.warning("the prefix store is kept in memory only: no secret could be kept in %s", path, exc_info=True)
+        return None
