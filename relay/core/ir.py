@@ -72,6 +72,31 @@ class Request:
     # result is gone, new text for a call) told as a note. Relay applies it to every answer.
     sendable: Callable[[tuple[Item, ...]], tuple[Item, ...]] = field(default=lambda items: items, repr=False,
                                                                      compare=False)
+    native: Native | None = None  # how the harness compacts its own history (None: as Codex does)
+    local: Any = None  # what the harness's side reported of its session (`relay.core.local.Local`), if anything
+
+
+# What a harness keeps verbatim when it compacts: the items it keeps ahead of the summary, and
+# where the history it keeps after the summary begins (None: it would not compact this request).
+Keep = Callable[[Request], "tuple[tuple[Item, ...], int] | None"]
+
+
+@dataclass(frozen=True)
+class Native:
+    """How a harness compacts its own history, for a strategy that compacts as it would: the
+    prompt it summarizes with, what it keeps verbatim (`keep`; None: as Codex does, the newest
+    user messages ahead of the summary and a pending turn after it), whether it compacts only as
+    a turn starts (`at_turns`; mid-turn only when it must), and the summary's own message
+    (`message`, from the model's answer)."""
+
+    prompt: str = ""
+    prefix: str = ""
+    suffix: str = ""
+    keep: Keep | None = field(default=None, compare=False, repr=False)
+    at_turns: bool = False
+
+    def message(self, answer: str) -> str:
+        return f"{self.prefix}{answer}{self.suffix}"
 
 
 def note(role: str, text: str) -> Item:

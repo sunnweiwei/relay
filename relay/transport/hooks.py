@@ -1,5 +1,6 @@
-"""Relay's endpoint for harness hooks: a harness compacting its own history asks Relay's
-strategy what the history should become (`relay.integrations`)."""
+"""Relay's endpoints for a harness's side: a harness compacting its own history asks Relay's
+strategy what the history should become (`relay.integrations`); a harness reports what it knows
+of its session that its requests do not show (`relay.core.local`)."""
 
 from __future__ import annotations
 
@@ -26,4 +27,15 @@ def hook_routes(engine: Engine) -> list[Route]:
             log.warning("hook compaction failed", exc_info=True)
             return JSONResponse({"error": {"message": f"relay: {error!r:.300}"}}, 500)
 
-    return [Route("/relay/v1/compact", compact, methods=["POST"])]
+    async def local(request: Request) -> Response:
+        try:
+            report = await request.json()
+            if not isinstance(report, dict):
+                raise ValueError("a report is a JSON object")
+            local = engine.locals.update(report)
+            return JSONResponse({"ok": True, "files": bool(local.files)})  # (a restarted Relay has none to keep)
+        except Exception as error:
+            log.warning("could not keep a harness's report", exc_info=True)
+            return JSONResponse({"error": {"message": f"relay: {error!r:.300}"}}, 400)
+
+    return [Route("/relay/v1/compact", compact, methods=["POST"]), Route("/relay/v1/local", local, methods=["POST"])]

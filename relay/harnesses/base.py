@@ -3,16 +3,20 @@
 A strategy sees only the conversation. Everything the harness itself writes into the request
 (instructions, environment, reminders, modes) is the profile's business: which items are
 injected (`refine`), what makes two requests the same conversation (`identity`), what the
-harness's state is now (`state`), and where that state goes after a compaction (`place`).
+harness's state is now (`state`), where that state goes after a compaction (`place`, or all of
+the layout around the summary: `compose`), and how the harness compacts by itself (`native`).
+What the harness's side reports of its session (`relay.core.local`) is found by `session`.
 """
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 
-from ..core.ir import AGENT_KINDS, CONTEXT_KINDS, Item, Kind
+from ..core.ir import AGENT_KINDS, CONTEXT_KINDS, Item, Kind, Native
+from ..core.local import Local
 from ..install import Setting
 from ..prompts import SUMMARY_PREFIX
 from ..protocols.base import Codec, WireItem
@@ -117,13 +121,47 @@ class Harness:
         real user message (or the summary, which stays last), and at a turn start it follows the
         head, ahead of the new turn."""
 
-        system = tuple(item for item in state if item.kind is Kind.SYSTEM)
-        context = tuple(item for item in state if item.kind is not Kind.SYSTEM)
+        system, context = self.split_state(state)
         if not mid_turn:
             return (*system, *head, *context)
         last = lambda kind: next((n for n in range(len(head) - 1, -1, -1) if head[n].kind is kind), None)
         at = next(n for n in (last(Kind.USER), last(Kind.SUMMARY), len(head)) if n is not None)
         return (*system, *head[:at], *context, *head[at:])
+
+    def compose(self, codec: Codec, head: tuple[Item, ...], tail: tuple[Item, ...], state: tuple[Item, ...],
+                mid_turn: bool, local: Local | None,
+                request: tuple[Item, ...] = ()) -> tuple[tuple[Item, ...], tuple[Item, ...], tuple[Item, ...]]:
+        """A compacted request around what follows its summary (`tail`, the harness's own items
+        there included): the items before it (the head, ending with the summary, with the
+        harness's state placed), the tail (its items may get new text) and the items after it.
+        `request` is every item the harness sent."""
+
+        return codec.arrange(self.place(head, state, mid_turn), mid_turn), tail, ()
+
+    def native(self, local: Local | None, request: tuple[Item, ...] = ()) -> Native | None:
+        """How the harness compacts its own history (None: as Codex does), for the conversation of
+        `request` (every item the harness sent)."""
+
+        return None
+
+    @staticmethod
+    def split_state(state: tuple[Item, ...]) -> tuple[tuple[Item, ...], tuple[Item, ...]]:
+        """The harness's state as its system items (first in any request) and the rest."""
+
+        return (tuple(item for item in state if item.kind is Kind.SYSTEM),
+                tuple(item for item in state if item.kind is not Kind.SYSTEM))
+
+    def said(self, codec: Codec, kind: Kind, text: str) -> Item:
+        """A message of the harness's own (a user or assistant message it writes after compacting):
+        context, as what it writes is."""
+
+        return Item(Kind.CONTEXT, text, wire=json.dumps(codec.write(Item(kind, text))))
+
+    def session(self, headers: Mapping[str, str], body: Mapping) -> tuple[str, str] | None:
+        """The session a request belongs to, as the harness's side reports it, and the request's
+        first user message (which of the session's conversations it continues)."""
+
+        return None
 
     def settings(self) -> list[Setting]:
         """Config-file settings that point the harness at Relay (`relay install`)."""

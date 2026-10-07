@@ -11,6 +11,10 @@ profile puts its current state into the result (Codex: above the last user messa
 mid-turn, after the summary at a turn start). A compaction that would free less than
 `min_gain` of the budget is skipped, so a threshold set too close to the fixed prompt
 overhead cannot trigger a summary on every request.
+
+A harness that compacts differently says how (`Request.native`): its own prompt, what it keeps
+verbatim (a function of the request), whether it compacts only as a turn starts, and its summary
+message.
 """
 
 from __future__ import annotations
@@ -19,11 +23,13 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from ..core.ir import AGENT_KINDS, Context, Item, Kind, Request
-from ..core.tokens import approx_tokens, truncate_middle
+from ..core.conversation import pending_cut, recent_users
+from ..core.ir import Context, Item, Kind, Native, Request
+from ..core.tokens import approx_tokens
 from ..prompts import SUMMARIZATION_PROMPT, SUMMARY_PREFIX
 from .base import Summarizer
 
+CODEX = Native(SUMMARIZATION_PROMPT, f"{SUMMARY_PREFIX}\n")
 DEFAULT_WINDOW = 128_000
 HARD_LIMIT = 0.95  # Codex's effective_context_window_percent
 
@@ -83,45 +89,22 @@ class Compaction:
         over = over or (request.window is not None and request.tokens >= HARD_LIMIT * request.window)
         if not request.force and not over:
             return None
-        cut = summary_cut(request)
+        native = request.native or CODEX
+        hard = request.window is not None and request.tokens >= HARD_LIMIT * request.window
+        if native.at_turns and not request.force and not hard and pending_cut(request) == len(request.current):
+            return None  # mid-turn: the harness would go on until a turn starts
+        if native.keep is None:
+            cut = pending_cut(request)
+            users = None if cut is None else recent_users(request.current[:cut], self.retain_user_tokens)
+        elif kept := native.keep(request):
+            users, cut = list(kept[0]), kept[1]
+        else:
+            cut = None
         if cut is None:
             return None
         items = request.current[:cut]
-        users = self._recent_users(items)
         freed = sum(approx_tokens(i.text) for i in items) - sum(approx_tokens(i.text) for i in users)
         if not request.force and freed < self.min_gain * budget:
             return None
-        summary = Item(Kind.SUMMARY, f"{SUMMARY_PREFIX}\n{summarizer.summarize(cut, SUMMARIZATION_PROMPT)}")
+        summary = Item(Kind.SUMMARY, native.message(summarizer.summarize(cut, native.prompt)))
         return Context((*users, summary, *request.current[cut:]))
-
-    def _recent_users(self, items: tuple[Item, ...]) -> list[Item]:
-        """The newest user messages within budget; the oldest one kept may be truncated."""
-
-        kept: list[Item] = []
-        remaining = self.retain_user_tokens
-        for item in reversed(items):
-            if item.kind is not Kind.USER:
-                continue
-            if remaining <= 0:
-                break
-            tokens = approx_tokens(item.text)
-            if tokens <= remaining and not item.media:
-                kept.append(item)
-            else:  # rebuilt as text only, truncated to what is left (never keeps media)
-                kept.append(Item(Kind.USER, truncate_middle(item.text, remaining)))
-            if tokens > remaining:
-                break
-            remaining -= tokens
-        return kept[::-1]
-
-
-def summary_cut(request: Request) -> int | None:
-    """Everything before a pending user turn, or the whole conversation mid-turn."""
-
-    items = request.current
-    last_agent = max((i for i, item in enumerate(items) if item.kind in AGENT_KINDS), default=None)
-    if last_agent is None:
-        return None
-    pending_turn = any(item.kind is Kind.USER for item in items[last_agent + 1 :])
-    cut = last_agent + 1 if pending_turn else len(items)
-    return cut if cut in request.boundaries else None

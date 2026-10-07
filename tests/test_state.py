@@ -9,7 +9,7 @@ from typing import Any
 from relay.core.engine import Engine
 from relay.core.ir import Item, Kind
 from relay.harnesses import ClaudeCode, DeepSeekHarness, GeminiCli, Harness, KimiCode, OpenClaw, Pi, WorkBuddy
-from relay.protocols import AnthropicMessages, Gemini, OpenAIResponses
+from relay.protocols import AnthropicMessages, Gemini, OpenAIChat, OpenAIResponses
 from relay.strategies import Compaction
 
 CODEC = OpenAIResponses()
@@ -169,7 +169,14 @@ class EngineStateTests(unittest.TestCase):
         sent = json.dumps(exchange.body)
         self.assertTrue(exchange.compacted)
         self.assertEqual((sent.count("Today's date"), sent.count("Auto permission mode"), sent.count("Plan mode")), (1, 0, 1))
-        self.assertTrue(sent.index("Today's date") < sent.index('"next"') < sent.index("Plan mode"))
+        system = {"role": "system", "content": "You are Kimi Code."}
+        chat = engine.prepare(OpenAIChat(), KimiCode(), {"model": "m", "messages": [
+            system, *({"role": item["role"], "content": item["content"]} for item in items if item.get("type") == "message")]},
+            tenant="u", post=lambda r: (200, {"choices": [{"message": {"content": "S"}, "finish_reason": "stop"}]}))
+        self.assertEqual(chat.body["messages"][0], system)  # its system prompt stays first
+        # As Kimi Code lays it out: the user's messages, the summary, then its reminders anew.
+        self.assertTrue(sent.index('"next"') < sent.index("compaction is complete") < sent.index("Today's date")
+                        < sent.index("Plan mode"))
 
 
 class MaskedToolOutputTests(unittest.TestCase):

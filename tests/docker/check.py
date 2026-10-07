@@ -47,13 +47,14 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 from relay.core.ir import AGENT_KINDS, CONTEXT_KINDS, Item, Kind  # noqa: E402
-from relay.harnesses import detect  # noqa: E402
+from relay.harnesses import HARNESSES, detect  # noqa: E402
 from relay.prompts import SUMMARIZATION_PROMPT, SUMMARY_PREFIX  # noqa: E402
 from relay.protocols import codec_for  # noqa: E402
 from relay.strategies.selfcompact import RUBRIC, SUMMARIZER  # noqa: E402
 
 IMAGE = "relay-harness-test"
 CODES = ["amber", "birch", "cobalt", "dune", "ember", "fjord", "garnet", "harbor"]
+SEPARATOR = r"[\s,`'\"]+(?:and\s+[`'\"]?)?"  # between codes in an answer (some models quote them, or end with "and")
 RULES = ("strictly one after another: request one file, wait until you have seen its content, then "
          "request the next. Never request two files at once, and read each file in full "
          "(for example `cat file_1.txt`; no head, tail or grep). Each file ends with a line starting "
@@ -313,7 +314,10 @@ LITELLM = f"""cat > ~/litellm.yaml <<'YAML'
 model_list:
   - model_name: {GPT}
     litellm_params: {{model: openai/{GPT}, api_key: os.environ/OPENAI_API_KEY}}
+  - model_name: "*"  # the harness's own helper models (Gemini CLI's compression) get the same one
+    litellm_params: {{model: openai/{GPT}, api_key: os.environ/OPENAI_API_KEY}}
 litellm_settings: {{drop_params: true}}
+general_settings: {{dangerously_permit_weak_or_unset_master_key: true}}  # it listens on 127.0.0.1 in the container
 YAML
 litellm --config ~/litellm.yaml --port 4000 > ~/litellm.log 2>&1 &
 until python3 -c 'import socket; socket.create_connection(("127.0.0.1", 4000))' 2>/dev/null; do sleep 0.5; done"""
@@ -323,6 +327,20 @@ until python3 -c 'import socket; socket.create_connection(("127.0.0.1", 4000))' 
 
 CLAUDE_ARGS = '-p "$PROMPT" --permission-mode bypassPermissions --model'
 REMOTE = "/relay/tests/docker/codex_remote.py"
+# `--openrouter`: every provider the user configured is reached through OpenRouter, with one key. The
+# endpoints `relay install` wraps (OpenAI's, Anthropic's) are pointed at OpenRouter's first, so the user's
+# setup routes through OpenRouter and Relay wraps that; LiteLLM's OpenAI backend goes there too.
+OPENROUTER = "https://openrouter.ai/api"
+OPENROUTER_ORIGINS = ("https://api.openai.com", "https://api.anthropic.com")
+TO_OPENROUTER = """python3 - <<'PY'
+from relay.harnesses import HARNESSES
+from relay.install import edit, read
+for setting in HARNESSES["{harness}"].settings():
+    url = read(setting.path, setting.key) or setting.endpoint
+    origin = next((o for o in {origins!r} if isinstance(url, str) and url.startswith(o)), None)
+    if setting.endpoint is not None and origin:
+        edit(setting.path, setting.key, "{openrouter}" + url[len(origin):])
+PY"""
 ONBOARDED = """echo '{"hasCompletedOnboarding": true}' > ~/.claude.json"""
 GEMINI_AUTH = json_file("~/.gemini/settings.json", {"security": {"auth": {"selectedType": "gemini-api-key"}}})
 OPENCLAW = json_file("~/.openclaw/openclaw.json", {"agents": {"defaults": {"workspace": "/project"}}})
@@ -529,6 +547,12 @@ def container(name: str, root: Path, env: dict[str, str], turns: str, timeout: i
     spec, harness = SPECS[name], name.split(":")[0]
     home, project = root / "home", root / "project"
     env = {**env, "RELAY_EVENT_LOG": "/home/agent/events.jsonl", "RELAY_TRACE": "/home/agent/trace.jsonl"}
+    openrouter = bool(os.getenv("RELAY_CHECK_OPENROUTER"))
+    user_setup = spec.setup
+    if openrouter:
+        user_setup = user_setup.replace("api_key: os.environ/OPENAI_API_KEY}",
+                                        f"api_key: os.environ/OPENAI_API_KEY, api_base: {OPENROUTER}/v1}}")
+        user_setup += "\n" + TO_OPENROUTER.format(harness=harness, origins=OPENROUTER_ORIGINS, openrouter=OPENROUTER)
     passwd = root / "passwd"  # some harnesses look the user up (os.userInfo)
     passwd.write_text(f"root:x:0:0::/root:/bin/bash\nagent:x:{os.getuid()}:{os.getgid()}::/home/agent:/bin/bash\n")
     mounts = [f"{REPO}:/relay:ro", f"{home}:/home/agent", f"{project}:/project", f"{passwd}:/etc/passwd:ro"]
@@ -537,7 +561,8 @@ def container(name: str, root: Path, env: dict[str, str], turns: str, timeout: i
         # Spread Gemini quota over GEMINI_API_KEY, GEMINI_API_KEY_2, ... when several are given.
         gemini = sorted(k for k in keys if k.startswith("GEMINI_API_KEY"))
         alias = {"GEMINI_API_KEY": gemini[sum(map(ord, name)) % len(gemini)]} if gemini else {}
-        env.update({var: keys[alias.get(key, key)] for var, key in spec.keys.items()})
+        env.update({var: keys["OPENROUTER_API_KEY"] if openrouter else keys[alias.get(key, key)]
+                    for var, key in spec.keys.items()})
     if spec.login and harness == "codex":
         copy_login("~/.codex/auth.json", home / ".codex/auth.json", "tokens", "refresh_token")
     if spec.login and harness == "claude_code":
@@ -552,7 +577,7 @@ def container(name: str, root: Path, env: dict[str, str], turns: str, timeout: i
         cd /relay
         python3 -m relay.cli serve > ~/relay.log 2>&1 & echo $! > ~/relay.pid
         until python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8787))' 2>/dev/null; do sleep 0.2; done
-        cd ~ && {spec.setup}
+        cd ~ && {user_setup}
         {setup}
         {f"cd /relay && python3 -m relay.cli install {harness} --via {via} >> ~/relay.log 2>&1" if install else ""}
         {turns}
@@ -645,7 +670,7 @@ ASKED = tuple(json.dumps(prompt[:80])[1:-1] for prompt in (SUMMARIZATION_PROMPT,
 def own_words(summary: str) -> str:
     """A summary's own words as they appear inside a JSON body (its start is the fixed prefix)."""
 
-    return json.dumps(summary)[-201:-1]
+    return json.dumps(summary)[1:-1][-200:]
 MODEL_CALLS = ("/responses", "/chat/completions", "/messages", ":generateContent", ":streamGenerateContent")
 
 
@@ -691,11 +716,17 @@ def evaluate(name: str, home: Path, need: tuple[int, int] | None = None, selfcom
         kept = {e["ref"] for e in head if "ref" in e}
         first_action = next((i for i in range(len(raw)) if kind({"ref": i}) in AGENT_KINDS), len(raw))
         initial = {i for i in range(first_action) if kind({"ref": i}) in CONTEXT_KINDS}
-        start = covered < len(raw)
+        last = next((kind({"ref": i}) for i in range(len(raw) - 1, -1, -1) if kind({"ref": i}) not in CONTEXT_KINDS), None)
+        start = last is Kind.USER  # a new turn waits (else the model is mid-turn)
+        # Most harnesses lay out their own compaction (Relay compacts each as it would itself, which
+        # tests/docker/versus.py compares one to one); Codex's layout is checked here.
+        native = harness.native(None, ()) is not None
         if start and codec.name == "anthropic_messages":  # no legal place for a system message there
             initial = {i for i in initial if kind({"ref": i}) is not Kind.SYSTEM}
         rendered = harness.state(codec, raw)  # the harness's state now: all of it must be in the new context
-        if rendered.items:
+        if native:
+            pass
+        elif rendered.items:
             wires = [json.loads(e["wire"]) for e in head if "wire" in e]
             expected = [i for i in rendered.items
                         if (i.ref is None or i.ref < covered)  # later state is still in the tail
@@ -713,14 +744,14 @@ def evaluate(name: str, home: Path, need: tuple[int, int] | None = None, selfcom
             pattern = r"S*U*Y[SC]*" if start else r"S*U*[SC]*U?Y"
         else:  # Anthropic: system last
             pattern = r"S*U*YC*" if start else r"S*U*C*U?YS*"
-        if not re.fullmatch(pattern, layout):
+        if not native and not re.fullmatch(pattern, layout):
             problems.append(f"compaction {k}: layout {layout} is not Codex's")
         summary = next((e["text"] for e in head if e.get("kind") == "summary"), "")
-        read = [c for c in CODES if f"CODE: {c}" in json.dumps(raw[:covered])]
+        read = [c for c in CODES if f"CODE: {c}" in json.dumps([raw[i] for i in range(covered) if i not in kept])]
         if lost := [c for c in read if c not in summary.lower()]:
             problems.append(f"compaction {k}: the summary lost {lost} of the {len(read)} codes read")
         users = {i for i in range(covered) if harness.refine(codec.classify(raw[i])).kind is Kind.USER}
-        if dropped := users - kept:
+        if not native and (dropped := users - kept):
             problems.append(f"compaction {k}: user messages {sorted(dropped)} not kept verbatim")
         replaced.append((summary, read))
 
@@ -741,7 +772,7 @@ def evaluate(name: str, home: Path, need: tuple[int, int] | None = None, selfcom
         sent = json.dumps(request.get("forwarded") or request["body"])
         if request.get("forwarded") is None:
             problems.append(f"request {n}: forwarded without the compacted context")
-        elif sent.count(MARK) != 1 or own_words(summary) not in sent:
+        elif own_words(summary) not in sent or (harness.native(None, ()) is None and sent.count(MARK) != 1):
             problems.append(f"request {n}: carries {sent.count(MARK)} summaries, not just the latest")
         elif leaked := [c for c in read if any(f"CODE: {c}" in item.text for item in results(request))]:
             problems.append(f"request {n}: summarized tool output {leaked} still sent")  # (summaries may quote it)
@@ -763,11 +794,19 @@ def evaluate(name: str, home: Path, need: tuple[int, int] | None = None, selfcom
         injected = " ".join(item.text for item in told if item.kind in {Kind.SYSTEM, Kind.CONTEXT, Kind.USER})
         if "codename is BETA" in injected and "codename is BETA" not in json.dumps(request["forwarded"]):
             problems.append(f"request {n}: the latest instructions (BETA) were dropped")
-    need_mid, need_start = need or (2, int(two_turns))
+    # Codex compacts at every growth step; a harness compacting as it does itself keeps more (pi
+    # its newest 20k tokens, Hermes a fifth of its threshold), so a session this short may compact
+    # once.
+    natively = any(detect({}, path=r["path"]).native(None, ()) is not None for r in compacting)
+    need_mid, need_start = (0, 0) if natively else need or (2, int(two_turns))
+    # Goose compacts as a turn starts: after its own summary, one turn left, it has no reason to.
+    harness_name = name.split(":")[0]
+    native = HARNESSES[harness_name].native(None, ()) if harness_name in HARNESSES else None
+    rested = need == (2, 0) and native is not None and native.at_turns
     own = self_compactions(requests)
     if selfcompact and own:
         problems.append(f"the harness compacted itself {len(own)}×: {own[:2]}")
-    if not selfcompact and (mids < need_mid or starts < need_start or not mids + starts):
+    if not selfcompact and not rested and (mids < need_mid or starts < need_start or not mids + starts):
         problems.append(f"compacted {mids}× mid-turn and {starts}× at a turn start (need {need_mid} and {need_start})")
     # A conversation reading a file it already read (agents splitting work may overlap: not a re-read).
     first_read: dict[tuple, str] = {}  # (conversation, file) -> the tool result that returned it
@@ -779,7 +818,7 @@ def evaluate(name: str, home: Path, need: tuple[int, int] | None = None, selfcom
                       if not same_call(first_read.setdefault((conversation, n), newest), newest)]:
             problems.append(f"files read again: {[f'file_{n}.txt' for n in reread]}")
     for turn, (answer, codes) in enumerate(zip(answers, (CODES[:4], CODES) if two_turns else (CODES,)), start=1):
-        if not re.search(r"[\s,]+".join(codes), answer.lower()):
+        if not re.search(SEPARATOR.join(codes), answer.lower()):
             problems.append(f"turn {turn} answer is wrong: {answer[-120:]!r}")
     if "failed; forwarding" in log or "could not prepare" in log:
         problems.append("a compaction failed (see relay.log)")
@@ -882,7 +921,7 @@ def evaluate_hook(name: str, home: Path) -> dict:
                       if not same_call(first_read.setdefault((task(request), n), newest), newest)]:
             problems.append(f"files read again: {[f'file_{n}.txt' for n in reread]}")
     for turn, (answer, wanted) in enumerate(zip(answers, (CODES[:4], CODES)), start=1):
-        if not re.search(r"[\s,]+".join(wanted), answer.lower()):
+        if not re.search(SEPARATOR.join(wanted), answer.lower()):
             problems.append(f"turn {turn} answer is wrong: {answer[-120:]!r}")
     if "hook compaction failed" in log:
         problems.append("a hook compaction failed (see relay.log)")
@@ -971,7 +1010,7 @@ def evaluate_clm(name: str, home: Path, steering: str | None = None) -> dict:
     turns = 2 if SPECS[name].resume else 1
     wrong = [f"turn {turn} answer is wrong: {answer[-120:]!r}"
              for turn, (answer, wanted) in enumerate(zip(answers[:turns], (CODES[:4], CODES)), start=1)
-             if not re.search(r"[\s,]+".join(wanted), answer.lower())]
+             if not re.search(SEPARATOR.join(wanted), answer.lower())]
     if not steering:
         problems += wrong
     else:
@@ -1223,8 +1262,8 @@ def rejected(trace: list[dict]) -> list[str]:
     return [f"{n} model calls rejected"] if (n := sum(r["status"] >= 400 for r in trace if "status" in r)) else []
 
 
-ALL_CODES = re.compile(r"[\s,]+".join(CODES))
-FOUR_CODES = re.compile(r"[\s,]+".join(CODES[:4]))
+ALL_CODES = re.compile(SEPARATOR.join(CODES))
+FOUR_CODES = re.compile(SEPARATOR.join(CODES[:4]))
 
 
 def evaluate_selfcompact(name: str, home: Path) -> dict:
@@ -1366,7 +1405,7 @@ def evaluate_rlm(name: str, home: Path, persistent: bool = False) -> dict:
     if persistent and not later:
         problems.append("no run found the earlier contexts")
     for turn, answer in enumerate(answers, start=1):
-        if not re.search(r"[\s,]+".join(CODES[:3]), answer.lower()):
+        if not re.search(SEPARATOR.join(CODES[:3]), answer.lower()):
             problems.append(f"turn {turn} answer is wrong: {answer[-120:]!r}")
     problems += rejected(trace)
     return {"name": f"{name} ({'rlm_persistent' if persistent else 'rlm'})", "passed": not problems,
@@ -1477,8 +1516,16 @@ def main() -> int:
                         help="install through this path (hook: the harness compacts through Relay's hook)")
     parser.add_argument("--harness-compaction", action="store_true",
                         help="the harness's own auto-compaction set to fire early; it must stay off")
+    parser.add_argument("--openrouter", action="store_true",
+                        help="reach every provider through OpenRouter (OPENROUTER_API_KEY in the keys file)")
     options = parser.parse_args()
+    if options.openrouter:
+        os.environ["RELAY_CHECK_OPENROUTER"] = "1"
     names = options.names or (list(SPECS) if options.matrix else parser.error("name a spec or use --matrix"))
+    if options.native_compact and (skipped := [n for n in names if n.split(":")[0] not in NATIVE_COMPACT]):
+        for name in skipped:
+            print(f"== {name}: SKIP  (the harness has no compaction of its own)")
+        names = [n for n in names if n not in skipped]
     results = []
     for name in names:
         results.append(run(name, options.growth, probe=options.probe, subagent=options.subagent, window=options.window,

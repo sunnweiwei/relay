@@ -44,6 +44,10 @@ class OpenAIResponses:
             return Item(_ROLES.get(item.get("role"), Kind.OTHER), text, media=media)
         if kind == "reasoning":
             return Item(Kind.REASONING, _content_text(item.get("summary"))[0], opaque=decoded(item.get("encrypted_content")))
+        if kind == "agent_message":  # another agent's message to this one (Codex's sub-agents): its input
+            parts = [part for part in item.get("content") or [] if isinstance(part, dict)]
+            text = "".join(part.get("text") or "" for part in parts if part.get("type") == "input_text")
+            return Item(Kind.USER, text, opaque=sum(decoded(part.get("encrypted_content")) for part in parts))
         if kind == "compaction":  # opaque server-side compaction
             return Item(Kind.SUMMARY, opaque=decoded(item.get("encrypted_content")))
         if kind.endswith("_output"):

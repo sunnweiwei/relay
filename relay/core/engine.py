@@ -33,6 +33,7 @@ from ..prompts import SUMMARY_PREFIX
 from ..providers import context_window
 from ..strategies.base import Strategy, Summarizer
 from .ir import CONTEXT_KINDS, LABELS, Context, Item, Kind, Media, Request, note
+from .local import Local, LocalStore
 from .store import PrefixStore
 from .tokens import approx_tokens, bytes_per_token, item_tokens
 
@@ -56,6 +57,7 @@ class Exchange:
     estimate: int = 0  # Relay's own estimate of the forwarded prompt, if usage is never reported
     depth: int = 0  # leading items that matched a stored prefix
     diverged: int | None = None  # where a request that found no stored context left its conversation's last one
+    tokens: int = 0  # the request's prompt tokens as the strategy was told them
 
 
 class Engine:
@@ -73,6 +75,7 @@ class Engine:
         self.window = window
         self.event_log = event_log
         self.retry_after = retry_after
+        self.locals = LocalStore()  # what harnesses' sides report of their sessions
         self._retry_at: dict[bytes, float] = {}  # per conversation, after a failure
         # Each conversation's last stored context (items covered, digests of their identities),
         # to tell a request that should have found it but did not, and where it diverged.
@@ -87,6 +90,7 @@ class Engine:
         tenant: str,
         post: Post,
         force: bool = False,
+        local: Local | None = None,
     ) -> Exchange:
         raw = codec.items(body)
         # Trailing items the harness regenerates on every request (live status, say) are
@@ -133,7 +137,7 @@ class Engine:
         accepted = {raw_index for raw_index in codec.orphans(raw)}  # the harness's own history, as the API took it
 
         def sendable(answer: tuple[Item, ...]) -> tuple[Item, ...]:
-            return tuple(item for item in _sendable(codec, harness, raw, originals, volatile, accepted, answer)
+            return tuple(item for item in _sendable(codec, harness, raw, originals, volatile, accepted, answer, local)
                          if item.kind not in CONTEXT_KINDS or _instruction(item))
 
         request = Request(
@@ -148,6 +152,8 @@ class Engine:
             hashlib.sha256(thread).hexdigest()[:16],
             codec.offers_tools(body),
             sendable,
+            harness.native(local, tuple(originals)),
+            local,
         )
         leading = next((n for n, item in enumerate(items) if item.kind not in CONTEXT_KINDS), len(items))
 
@@ -164,7 +170,7 @@ class Engine:
                     answered = [item.text for item in context.items if _instruction(item)]
                     stored = dict(state)
                     if answer != current:
-                        placed = _place(codec, harness, raw, originals, answer)
+                        placed = _place(codec, harness, raw, originals, answer, local)
                         stored = {"covered": len(raw), "head": [_entry(item, originals) for item in placed]}
                         new_items, new_wire = materialize(stored)
                         if lonely := {n for n in codec.orphans([*new_wire, *volatile]) if n >= len(new_items)
@@ -208,7 +214,7 @@ class Engine:
         if instructions:
             forwarded = codec.with_instructions(forwarded, "\n\n".join(instructions))
         estimate = size([*items, *volatile_items]) + approx_tokens(" ".join([*notes, *instructions]), per_token)
-        return Exchange(forwarded, partition, [] if compacting else keys, state, changed, estimate, depth, diverged)
+        return Exchange(forwarded, partition, [] if compacting else keys, state, changed, estimate, depth, diverged, tokens)
 
     def answer(self, request: Request, summarizer: Summarizer) -> Context | None:
         """The strategy's answer on a conversation a harness hook hands over before a request; the
@@ -275,7 +281,7 @@ def _instruction(item: Item) -> bool:
 
 
 def _sendable(codec: Codec, harness: Harness, raw: list[WireItem], originals: list[Item], volatile: list[WireItem],
-              accepted: set[int], answer: tuple[Item, ...]) -> list[Item]:
+              accepted: set[int], answer: tuple[Item, ...], local: Local | None = None) -> list[Item]:
     """The answer as it can be sent, its harness items placed: each item the protocol cannot keep
     where it stands (a call whose result is gone, reasoning away from the item it preceded) is told
     as a note (one with no text goes), the rest stays as the strategy gave it. What the harness's
@@ -291,7 +297,8 @@ def _sendable(codec: Codec, harness: Harness, raw: list[WireItem], originals: li
         except ValueError:
             return False
 
-    placed = _place(codec, harness, raw, originals, tuple(i for item in answer if (i := item if keeps(item) else told(item))))
+    placed = _place(codec, harness, raw, originals, tuple(i for item in answer if (i := item if keeps(item) else told(item))),
+                    local)
     while True:
         wire = [_wire(codec, raw, originals, item) for item in placed]
         lonely = {n for n in codec.orphans([*wire, *volatile])
@@ -305,10 +312,11 @@ def _sendable(codec: Codec, harness: Harness, raw: list[WireItem], originals: li
 
 
 def _place(codec: Codec, harness: Harness, raw: list[WireItem], originals: list[Item],
-           answer: tuple[Item, ...]) -> list[Item]:
+           answer: tuple[Item, ...], local: Local | None = None) -> list[Item]:
     """The answer with the harness's own items put in. They stay where the harness sent them,
     those before the conversation in front; but what a summary stands in for is replaced by the
-    harness's current state, placed as the harness places it after its own compaction."""
+    harness's current state, placed as the harness places it after its own compaction (around
+    what follows the summary, which stays as it was)."""
 
     own = [item for item in originals if item.kind in CONTEXT_KINDS]
     summary = max((n for n, item in enumerate(answer) if item.kind is Kind.SUMMARY), default=None)
@@ -318,8 +326,10 @@ def _place(codec: Codec, harness: Harness, raw: list[WireItem], originals: list[
     head, tail = answer[: summary + 1], answer[summary + 1 :]
     cut = min((item.ref for item in tail if item.ref is not None), default=len(raw))
     state = tuple(item for item in harness.state(codec, raw).items if item.ref is None or item.ref < cut)
-    mid_turn = cut == len(raw)
-    return [*codec.arrange(harness.place(head, state, mid_turn), mid_turn), *_merge(tail, [i for i in own if i.ref >= cut])]
+    mid_turn = cut == len(raw) or all(item.kind in (Kind.TOOL_CALL, Kind.TOOL_RESULT, Kind.REASONING) for item in tail)
+    front, after, back = harness.compose(codec, head, tuple(_merge(tail, [i for i in own if i.ref >= cut])), state,
+                                         mid_turn, local, tuple(originals))
+    return [*front, *after, *back]
 
 
 def _merge(items: tuple[Item, ...], own: list[Item]) -> list[Item]:

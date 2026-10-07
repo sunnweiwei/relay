@@ -13,18 +13,21 @@ from __future__ import annotations
 
 from ..harnesses import Harness
 from .base import Installation, Integration, Proxy, Supplied, SummaryNeeded
-from .claude_code import ClaudeCodeHook
+from . import kimi_code
+from .claude_code import ClaudeCodeHook, session_report
 
 # Claude Code: the proxy first, as it follows Codex's timing exactly and continues each
 # sub-agent's own conversation for its summary; the hook (early access) keeps Claude Code's
 # endpoint, so Remote Control and every login are untouched.
 HOOKS: dict[str, Integration] = {"claude_code": ClaudeCodeHook()}
+# Through the proxy, the harness's side reports its session (`relay.core.local`).
+REPORTS = {"claude_code": session_report, "kimi_code": kimi_code.session_report}
 
 
 def paths(harness: Harness) -> list[Integration]:
     """The harness's integration paths, the preferred first."""
 
-    return [Proxy(harness), *([HOOKS[harness.name]] if harness.name in HOOKS else [])]
+    return [Proxy(harness, REPORTS.get(harness.name)), *([HOOKS[harness.name]] if harness.name in HOOKS else [])]
 
 
 def choose(harness: Harness, via: str = "auto") -> Integration:

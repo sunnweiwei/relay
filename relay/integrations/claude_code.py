@@ -45,6 +45,19 @@ TAIL = "These messages came after your latest reply above:"
 HISTORY = "The conversation so far:"
 
 
+def session_report(relay_url: str) -> Installation:
+    """Through the proxy: the plugin that reports Claude Code's session to Relay before each
+    model request (`plugins/claude_code/session`)."""
+
+    path = settings_file()
+    return Installation([
+        Setting(path, ("env", "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"), "1"),
+        Setting(path, ("env", "RELAY_URL"), relay_url),
+        Setting(path, ("extraKnownMarketplaces", "relay"), {"source": {"source": "directory", "path": str(PLUGIN)}}),
+        Setting(path, ("enabledPlugins", "relay-session@relay"), True),
+    ])
+
+
 class ClaudeCodeHook:
     name = "hook"
 

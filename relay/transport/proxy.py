@@ -26,6 +26,7 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
 from ..core.engine import Engine, Exchange
+from ..core.local import Local
 from ..core.store import PrefixStore
 from ..harnesses import detect
 from ..protocols import Codec, codec_for
@@ -113,13 +114,18 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
             return response.status_code, result
 
         def prepare(force: bool = False) -> Exchange:
+            harness = detect(request.headers, config.harness, request.url.path)
+            session = harness.session(request.headers, body)
             return engine.prepare(
                 codec,
-                detect(request.headers, config.harness, request.url.path),
+                harness,
                 body,
                 tenant=next((request.headers[h] for h in TENANT_HEADERS if h in request.headers), ""),
                 post=post,
                 force=force,
+                # (what the request itself tells of its session, where its harness's side reports nothing)
+                local=(engine.locals.find(harness.name, *session) or Local(harness.name, session[0], opening=session[1]))
+                if session else None,
             )
 
         try:
@@ -130,7 +136,7 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
 
         trace(path=request.url.path, user_agent=request.headers.get("user-agent"),
               items=len(codec.items(body)), sent=len(codec.items(exchange.body)),
-              rewritten=exchange.body is not body, compacted=exchange.compacted, body=body,
+              rewritten=exchange.body is not body, compacted=exchange.compacted, tokens=exchange.tokens, body=body,
               forwarded=exchange.body if exchange.body is not body else None,
               cache={"depth": exchange.depth, "covered": exchange.state.get("covered", 0), "diverged": exchange.diverged})
 

@@ -39,12 +39,15 @@ class ReplayTests(unittest.TestCase):
         for path in FIXTURES:
             name, requests = load(path)
             with self.subTest(name):
-                compactions, hits = self.replay(requests)
+                compactions, hits, later = self.replay(requests)
                 self.assertGreater(compactions, 0, "the session never compacted")
-                self.assertGreater(hits, 0, "no request found a stored compaction")
+                if later:  # (pi keeps its newest 20k tokens: it compacts late, at times on the last request)
+                    self.assertGreater(hits, 0, "no request found a stored compaction")
 
-    def replay(self, requests: list[tuple[str, dict[str, Any]]]) -> tuple[int, int]:
-        engine, compacted, compactions, hits = Engine(Compaction(growth=3_000, min_gain=0)), set(), 0, 0
+    def replay(self, requests: list[tuple[str, dict[str, Any]]]) -> tuple[int, int, int]:
+        """Compactions, requests that found one, and requests after one in their conversation."""
+
+        engine, compacted, compactions, hits, later = Engine(Compaction(growth=3_000, min_gain=0)), set(), 0, 0, 0
         for n, (path, body) in enumerate(requests):
             codec, harness = codec_for(path), detect({}, path=path)
             post = lambda request: (200, SUMMARIES[codec.name])  # noqa: E731
@@ -58,6 +61,7 @@ class ReplayTests(unittest.TestCase):
             thread = tuple(k for k in harness.identity(codec, items) if k not in (b"\0system", b"\0context"))[:3]
             # The prefix store: a conversation that compacted finds its compaction again.
             self.assertIsNone(exchange.diverged, f"request {n} left its stored compaction at item {exchange.diverged}")
+            later += thread in compacted
             if thread in compacted and not exchange.compacted:
                 self.assertGreater(exchange.state.get("covered", 0), 0, f"request {n} missed its compaction")
                 hits += 1
@@ -73,7 +77,7 @@ class ReplayTests(unittest.TestCase):
             self.assertEqual(orphans(codec.name, sent), [], f"request {n} has tool results without their calls")
             if codec.name == "anthropic_messages":
                 self.assertTrue(legal_system_messages(sent), f"request {n} places a system message illegally")
-        return compactions, hits
+        return compactions, hits, later
 
 
 def orphans(protocol: str, items: list[dict[str, Any]]) -> list[str]:

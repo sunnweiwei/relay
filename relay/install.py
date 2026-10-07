@@ -130,7 +130,7 @@ def _apply(text: str, suffix: str, key: tuple[str, ...], value: Callable[[Any], 
         if index is not None:
             previous = _scalar(lines.pop(index).split("=", 1)[1].strip(), "toml" if toml else "env")
         if (new := value(previous)) is not None:
-            line = f"{name} = {json.dumps(new)}" if toml else f"{name}={new}"
+            line = f"{name} = {_toml(new)}" if toml else f"{name}={new}"
             lines.insert(end if index is None else index, line)
         text = "\n".join(lines) + "\n"
     return text, previous
@@ -297,6 +297,16 @@ def _toml_region(lines: list[str], table: list[str]) -> tuple[int, int]:
         lines += ["", header]
         return len(lines), len(lines)
     return start, next((i for i in headers if i >= start), len(lines))
+
+
+def _toml(value: Any) -> str:
+    """A value as TOML writes it on one line (JSON's spelling for scalars)."""
+
+    if isinstance(value, dict):
+        return "{ " + ", ".join(f"{key} = {_toml(item)}" for key, item in value.items()) + " }"
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml(item) for item in value) + "]"
+    return json.dumps(value)
 
 
 def _scalar(raw: str, kind: str) -> Any:

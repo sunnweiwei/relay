@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import tempfile
+import tomllib
 import unittest
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -12,6 +14,8 @@ from unittest.mock import patch
 from starlette.testclient import TestClient
 
 from relay import install, integrations
+from relay.core.local import Local, LocalStore
+from relay.integrations import kimi_code
 from relay.core.engine import Engine
 from relay.core.ir import Context, Item, Kind
 from relay.harnesses import HARNESSES
@@ -67,6 +71,77 @@ class ClaudeCodeInstallTests(unittest.TestCase):
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://gateway")
         install.uninstall("claude_code")
         self.assertEqual((self.root / "settings.json").read_text(), original)
+
+
+    def test_through_the_proxy_a_plugin_reports_the_session(self) -> None:
+        original = '{\n  "theme": "light"\n}\n'
+        (self.root / "settings.json").write_text(original)
+        url = "http://127.0.0.1:9999"
+        install.install("claude_code", url, integrations.choose(HARNESSES["claude_code"], "proxy").installation(url).settings)
+        settings = json.loads((self.root / "settings.json").read_text())
+        self.assertEqual(settings["enabledPlugins"], {"relay-session@relay": True})
+        self.assertEqual(settings["extraKnownMarketplaces"]["relay"]["source"], {"source": "directory", "path": str(PLUGIN)})
+        self.assertTrue((PLUGIN / "session" / "hooks" / "session.ts").exists())
+        env = settings["env"]
+        self.assertEqual((env["CLAUDE_CODE_ENABLE_FUNCTION_HOOKS"], env["RELAY_URL"]), ("1", url))
+        self.assertTrue(env["ANTHROPIC_BASE_URL"].startswith(f"{url}/up/claude_code-"))
+        install.uninstall("claude_code")
+        self.assertEqual((self.root / "settings.json").read_text(), original)
+
+
+class KimiCodeReportTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(tempfile.mkdtemp())
+        patcher = patch.dict(os.environ, {"RELAY_HOME": str(self.root / "relay"), "KIMI_CODE_HOME": str(self.root)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        spec = importlib.util.spec_from_file_location("kimi_report", kimi_code.REPORT)
+        self.hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.hook)
+
+    def test_its_hooks_join_the_users_and_report_the_event_log(self) -> None:
+        original = 'hooks = [{ event = "Stop", command = "notify" }]\ndefault_model = "m"\n'
+        (self.root / "config.toml").write_text(original)
+        url = "http://127.0.0.1:9999"
+        install.install("kimi_code", url, kimi_code.session_report(url).settings)
+        hooks = tomllib.loads((self.root / "config.toml").read_text())["hooks"]
+        self.assertEqual([hook["event"] for hook in hooks], ["Stop", "PreToolUse", "UserPromptSubmit"])
+        self.assertTrue(hooks[1]["command"].endswith(f"report.py {url}"))
+        install.uninstall("kimi_code")
+        self.assertEqual((self.root / "config.toml").read_text(), original)
+        (self.root / "config.toml").write_text('[[hooks]]\nevent = "Stop"\ncommand = "notify"\n')
+        tables = kimi_code.session_report(url)
+        self.assertEqual((tables.settings, len(tables.notes)), ([], 1))  # the user's tables, not ours to extend
+
+        log = self.root / "sessions" / "wd_p_1" / "session_s" / "agents" / "main" / "wire.jsonl"
+        log.parent.mkdir(parents=True)
+        log.write_text("{}\n" * 30)
+        state = self.root / "relay" / "kimi_code"
+        found = self.hook.report({"session_id": "session_s", "cwd": "/p"}, self.root, state)
+        self.assertEqual((found["session"], found["transcript"], found["lines"]), ("session_s", str(log), 30))
+        with log.open("a") as stream:
+            stream.write("{}\n" * 6)
+        self.assertEqual(self.hook.report({"session_id": "session_s"}, self.root, state)["lines"], 36)  # only what was added
+        recovery = HARNESSES["kimi_code"].native(Local.from_json({**found, "lines": 36})).message("S")
+        self.assertIn(f"  {log}\n  window 1: lines 1–36   ← the conversation this note summarizes\n"
+                      "  window 2 (the one you are in now) starts at line 37 with", recovery)
+
+
+class LocalReportTests(unittest.TestCase):
+    def test_a_report_leaves_out_what_did_not_change(self) -> None:
+        store = LocalStore()
+        store.update({"harness": "h", "session": "s", "transcript": "/t", "files": [{"path": "/a", "content": "a"}]})
+        later = store.update({"harness": "h", "session": "s", "tasks": [{"id": "x"}]})
+        self.assertEqual((later.transcript, [f.path for f in later.files], [t.id for t in later.tasks]), ("/t", ["/a"], ["x"]))
+
+    def test_a_request_finds_the_report_on_its_own_conversation(self) -> None:
+        store = LocalStore()
+        store.update({"harness": "h", "session": "s", "opening": "fix it"})
+        store.update({"harness": "h", "session": "s", "agent": "a1", "opening": "look into why tests fail, then fix it"})
+        self.assertEqual(store.find("h", "s", "<reminder/>look into why tests fail, then fix it").agent, "a1")
+        self.assertIsNone(store.find("h", "s", "<reminder/>fix it").agent)
+        self.assertIsNone(store.find("h", "s", "fix it now").agent)  # no conversation of its own: the session's main
+        self.assertIsNone(store.find("h", "other", "fix it"))
 
 
 class ClaudeCodeCompactTests(unittest.TestCase):
@@ -191,6 +266,20 @@ class EndpointTests(unittest.TestCase):
         done = client.post("/relay/v1/compact", json={**request, "summaries": {asked["key"]: "c1"}}).json()
         self.assertEqual(done["messages"][0], {"ref": 0})
         self.assertEqual(client.post("/relay/v1/compact", json={"harness": "nope"}).status_code, 500)
+
+    def test_a_harness_report_is_kept_and_found_by_the_conversation_it_is_on(self) -> None:
+        engine = Engine(Compaction())
+        client = TestClient(create_app(engine))
+        main = {"harness": "claude_code", "session": "s", "opening": "<system-reminder>x</system-reminder>read the files",
+                "transcript": "/t/s.jsonl", "files": [{"path": "/p/a.txt", "content": "a"}]}
+        agent = {**main, "agent": "a1", "opening": "read file b and report its code", "files": []}
+        self.assertEqual(client.post("/relay/v1/local", json=main).json(), {"ok": True, "files": True})
+        client.post("/relay/v1/local", json=agent)
+        self.assertEqual(engine.locals.find("claude_code", "s", "<system-reminder>y</system-reminder>read the files").files[0].path,
+                         "/p/a.txt")
+        self.assertEqual(engine.locals.find("claude_code", "s", "read file b and report its code").agent, "a1")
+        self.assertIsNone(engine.locals.find("claude_code", "other", "read the files"))
+        self.assertEqual(client.post("/relay/v1/local", json=[]).status_code, 400)
 
 
 if __name__ == "__main__":

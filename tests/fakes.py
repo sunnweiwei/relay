@@ -16,7 +16,7 @@ import re
 import socket
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
@@ -30,6 +30,7 @@ from relay.providers import Upstream
 
 FINAL_TEXT = "FAKE FINAL ANSWER"
 COMPACTION_MARKER = "CONTEXT CHECKPOINT COMPACTION"
+CLAUDE_CODE_COMPACTION = "Your task is to create a detailed summary of"  # `/compact`, auto-compact (all variants)
 _SUMMARY = re.compile(r"FAKE SUMMARY: (\d+) tool results")
 
 
@@ -42,10 +43,16 @@ class FakeUpstream:
         max_prompt_tokens: int | None = None,
         fail_summaries: bool = False,
         arguments: dict[str, Any] | None = None,
+        script: list[dict[str, Any]] | Callable[[int, list[tuple[str, str, int]]], Any] | None = None,
     ) -> None:
         self.tool_calls = tool_calls
         self.command = command
         self.arguments = arguments or {}  # extra exec_command arguments, e.g. an escalation request
+        # Tool calls to make instead of the shell command, in order ({"name": ..., "input": {...}},
+        # optionally a "namespace"); the last one repeats once the script runs out. Or a function of
+        # the step and the normalized turns that returns a call, None for the shell command, or the
+        # text of a final answer.
+        self.script = script or []
         self.max_prompt_tokens = max_prompt_tokens
         self.fail_summaries = fail_summaries
         self.requests: list[dict[str, Any]] = []
@@ -66,16 +73,30 @@ class FakeUpstream:
         with self.lock:
             self.requests.append({"path": request.url.path, "headers": dict(request.headers), "body": body})
 
-    def _decide(self, turns: list[tuple[str, str, int]]) -> tuple[str, str | None]:
-        """("summary", text) | ("tool", None) | ("final", text) for normalized turns."""
+    def _decide(self, turns: list[tuple[str, str, int]]) -> tuple[str, str | None, int]:
+        """("summary", text) | ("tool", None) | ("final", text) for normalized turns, and the
+        number of tool results in the current user turn."""
 
-        summarizing = bool(turns) and COMPACTION_MARKER in turns[-1][1]
+        # Claude Code appends system messages (e.g. `<total_tokens>`) after its compaction prompt.
+        last = next((text for role, text, _ in reversed(turns) if role != "system"), "")
+        claude_code = CLAUDE_CODE_COMPACTION in last
+        summarizing = COMPACTION_MARKER in last or claude_code
         if summarizing and self.fail_summaries:
-            return "error", None
+            return "error", None, 0
         steps = _steps(turns[:-1] if summarizing else turns)
         if summarizing:
-            return "summary", f"FAKE SUMMARY: {steps} tool results so far."
-        return ("tool", None) if steps < self.tool_calls else ("final", FINAL_TEXT)
+            summary = f"FAKE SUMMARY: {steps} tool results so far."
+            return "summary", f"<summary>{summary}</summary>" if claude_code else summary, steps
+        if steps >= self.tool_calls:
+            return "final", FINAL_TEXT, steps
+        if callable(self.script) and isinstance(answer := self.script(steps, turns), str):
+            return "final", answer, steps
+        return "tool", None, steps
+
+    def _scripted(self, steps: int, turns: list[tuple[str, str, int]]) -> dict[str, Any] | None:
+        if callable(self.script):
+            return self.script(steps, turns)
+        return self.script[min(steps, len(self.script) - 1)] if self.script else None
 
     async def _other(self, request: Request) -> Response:
         self._record(request, None)
@@ -88,15 +109,21 @@ class FakeUpstream:
         if self.max_prompt_tokens and _prompt_tokens(body) > self.max_prompt_tokens:
             return JSONResponse({"error": {"code": "context_length_exceeded",
                                            "message": "Your input exceeds the context window."}}, 400)
-        action, text = self._decide([_responses_turn(item) for item in items])
+        turns = [_responses_turn(item) for item in items]
+        action, text, steps = self._decide(turns)
         if action == "error":
             return JSONResponse({"error": {"message": "summary failed"}}, 400)
+        if action == "tool" and not (body.get("tools") or any(i.get("type") == "additional_tools" for i in items)):
+            action, text = "final", FINAL_TEXT  # a side request, such as a title for the thread
         if action == "tool":
             n = len(items)
             output = [
                 {"type": "reasoning", "id": f"rs_{n}", "summary": [], "encrypted_content": "ZmFrZQ=="},
                 {"type": "function_call", "id": f"fc_{n}", "call_id": f"call_{n}", "status": "completed",
-                 **_shell_call(body.get("tools") or [], self.command, self.arguments)},
+                 **({**({"namespace": call["namespace"]} if "namespace" in call else {}),
+                     "name": call["name"], "arguments": json.dumps(call["input"])}
+                    if (call := self._scripted(steps, turns)) else _shell_call(body.get("tools") or [], self.command,
+                                                                       self.arguments))},
             ]
         else:
             output = [{"type": "message", "id": "msg_fake", "role": "assistant", "status": "completed",
@@ -122,12 +149,13 @@ class FakeUpstream:
         if self.max_prompt_tokens and _prompt_tokens(body) > self.max_prompt_tokens:
             return JSONResponse({"type": "error", "error": {"type": "invalid_request_error",
                                                             "message": "prompt is too long"}}, 400)
-        action, text = self._decide([_anthropic_turn(message) for message in messages])
+        turns = [_anthropic_turn(message) for message in messages]
+        action, text, steps = self._decide(turns)
         if action == "error":
             return JSONResponse({"type": "error", "error": {"type": "invalid_request_error", "message": "failed"}}, 400)
         if action == "tool" and body.get("tools"):
-            content = [{"type": "tool_use", "id": f"toolu_{len(messages)}", "name": "Bash",
-                        "input": {"command": self.command, "description": "Run"}}]
+            call = self._scripted(steps, turns) or {"name": "Bash", "input": {"command": self.command, "description": "Run"}}
+            content = [{"type": "tool_use", "id": f"toolu_{len(self.requests)}", **call}]  # unique, as after a compaction
         else:
             content = [{"type": "text", "text": text or FINAL_TEXT}]
         stop = "tool_use" if content[0]["type"] == "tool_use" else "end_turn"
@@ -178,7 +206,10 @@ def _responses_turn(item: dict[str, Any]) -> tuple[str, str, int]:
         text = content if isinstance(content, str) else "".join(
             part.get("text", "") for part in content or [] if isinstance(part, dict))
         return item.get("role", ""), text, 0
-    return "tool", "", int(str(item.get("type", "")).endswith("_output"))
+    output = item.get("output")
+    text = output if isinstance(output, str) else "".join(
+        part.get("text", "") for part in output or [] if isinstance(part, dict)) if isinstance(output, list) else ""
+    return "tool", text, int(str(item.get("type", "")).endswith("_output"))
 
 
 def _anthropic_turn(message: dict[str, Any]) -> tuple[str, str, int]:

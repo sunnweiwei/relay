@@ -13,8 +13,9 @@ from pathlib import Path
 from typing import Any
 
 from relay import Compaction, Engine, PrefixStore, ProxyConfig, create_app
+from relay.harnesses.claude_code import CONTINUED
 from relay.prompts import SUMMARY_PREFIX
-from tests.fakes import COMPACTION_MARKER, FINAL_TEXT, FakeUpstream, local_upstreams, serve
+from tests.fakes import CLAUDE_CODE_COMPACTION, COMPACTION_MARKER, FINAL_TEXT, FakeUpstream, local_upstreams, serve
 
 
 def _env(home: Path) -> dict[str, str]:
@@ -42,12 +43,14 @@ def _text(item: dict[str, Any]) -> str:
 class HarnessEndToEndTests(unittest.TestCase):
     """Two turns with enough tool output to force several compactions."""
 
-    cases = {"codex": ("/v1/responses", "input", 11_500), "claude": ("/v1/messages", "messages", 16_500)}
+    # Each compacts as it would itself: its own summary prompt, its own summary message.
+    cases = {"codex": ("/v1/responses", "input", 11_500, COMPACTION_MARKER, SUMMARY_PREFIX),
+             "claude": ("/v1/messages", "messages", 16_500, CLAUDE_CODE_COMPACTION, CONTINUED)}
 
     def run_harness(self, harness: str) -> None:
         if shutil.which(harness) is None:
             self.skipTest(f"{harness} is not installed")
-        path, key, threshold = self.cases[harness]
+        path, key, threshold, marker, prefix = self.cases[harness]
         fake = FakeUpstream(tool_calls=6, command="seq 1 300")
         with serve(fake.app) as upstream, tempfile.TemporaryDirectory() as root:
             config = ProxyConfig(upstreams=local_upstreams(upstream))
@@ -71,14 +74,14 @@ class HarnessEndToEndTests(unittest.TestCase):
                     self.assertIn(FINAL_TEXT, result.stdout)
 
         bodies = fake.bodies(path)
-        summaries = [b for b in bodies if COMPACTION_MARKER in _text(b[key][-1])]
+        summaries = [b for b in bodies if marker in _text(b[key][-1])]
         main = [b for b in bodies if b not in summaries]
         first = bodies.index(summaries[0])
         self.assertGreaterEqual(len(summaries), 2)
         self.assertLess(len(summaries), len(main) / 2)  # rewrites are reused, not recomputed
         for body in bodies[first + 1 :]:
             if body not in summaries:
-                self.assertTrue(any(_text(i).startswith(SUMMARY_PREFIX) for i in body[key]))
+                self.assertTrue(any(_text(i).startswith(prefix) for i in body[key]))
 
     def test_codex(self) -> None:
         self.run_harness("codex")

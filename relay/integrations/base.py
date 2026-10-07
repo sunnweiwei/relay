@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -29,13 +29,17 @@ class Integration(Protocol):
 
 @dataclass(frozen=True)
 class Proxy:
-    """Every request through Relay: the harness's model endpoint points at it."""
+    """Every request through Relay: the harness's model endpoint points at it, and where the
+    harness can be extended, its side reports to Relay what its requests do not show
+    (`report`: the settings that add it, for Relay at a URL)."""
 
     harness: Harness
+    report: Callable[[str], Installation] | None = None
     name = "proxy"
 
     def installation(self, relay_url: str) -> Installation:
-        return Installation(self.harness.settings())
+        side = self.report(relay_url) if self.report else Installation([])
+        return Installation([*self.harness.settings(), *side.settings], side.notes)
 
 
 class SummaryNeeded(Exception):

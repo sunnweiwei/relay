@@ -1,5 +1,6 @@
 {
   "name": "relay",
   "owner": {"name": "Relay"},
-  "plugins": [{"name": "relay", "source": "./relay", "description": "Relay's context strategy as Claude Code's compaction."}]
+  "plugins": [{"name": "relay", "source": "./relay", "description": "Relay's context strategy as Claude Code's compaction."},
+              {"name": "relay-session", "source": "./session", "description": "Claude Code's session, reported to Relay for its compaction."}]
 }
