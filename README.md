@@ -300,9 +300,10 @@ they answered with codes they made up. pi edited least, and late.
 
 Limits: Relay must run on the machine whose files the harness's tools edit (the paper's sandbox
 mirror); the edit is read back at the next request, so the turn that made it stays in the context
-until the model removes it (as in pi-clm); revisions live in Relay's in-memory store, so a restart
-returns the model to its raw history; through Claude Code's hook the instructions and notes cannot
-be delivered, so CLM runs through the proxy.
+until the model removes it (as in pi-clm); revisions live in Relay's store, which is kept on disk
+(`RELAY_CACHE_PATH`), so a restarted Relay keeps them while the harness resends the history they
+were made on (in memory only, a restart returns the model to its raw history); through Claude
+Code's hook the instructions and notes cannot be delivered, so CLM runs through the proxy.
 
 ## Context Folding
 
@@ -451,7 +452,7 @@ Gemini was overloaded during much of it, answering 503s; failed pairs were run a
 | `RELAY_EVENT_LOG` | unset | Append one JSON line per compaction (sizes, timing, the new head). |
 | `RELAY_HOST`, `RELAY_PORT` | `127.0.0.1`, `8787` | Server address for `relay serve`. |
 | `RELAY_CACHE_MAX_ENTRIES`, `RELAY_CACHE_MAX_BYTES`, `RELAY_CACHE_TTL_SECONDS`, `RELAY_CACHE_SECRET` | `4096`, 256 MiB, 6 h, random | Limits of the prefix store. |
-| `RELAY_CACHE_PATH` | `~/.relay/store.json` | Where the prefix store is kept, so a restarted Relay finds its contexts: compactions are not recomputed and CLM edits are not lost (`off`: in memory only). The file holds summaries and strategy state (conversation text), readable by its owner only; without `RELAY_CACHE_SECRET`, a secret is generated once and kept beside it. |
+| `RELAY_CACHE_PATH` | `~/.relay/store-<port>.json` | Where the prefix store is kept (one file per Relay process; written in the background, at most once a second, and on shutdown), so a restarted Relay finds its contexts: compactions are not recomputed and CLM edits are not lost (`off`: in memory only). The file holds summaries and strategy state (conversation text), readable by its owner only; without `RELAY_CACHE_SECRET`, a secret is generated once and kept beside it. |
 
 Set `RELAY_CONTEXT_WINDOW` to the window the harness itself uses (Codex's catalog gives the
 gpt-5.6 and gpt-6 families 272k by default, shown as 258k usable): the table covers older

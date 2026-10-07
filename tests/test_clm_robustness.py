@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from relay.core.engine import Engine
+from relay.core.store import PrefixStore
 from relay.harnesses import Harness
 from relay.protocols import AnthropicMessages, OpenAIResponses
 from relay.strategies import ContextLanguageModel
@@ -60,9 +61,9 @@ class ClmRobustnessTests(unittest.TestCase):
         self.directory = Path(tempfile.mkdtemp())
 
     def engine(self, **options: Any) -> Engine:
-        window = options.pop("window", None)
+        window, store = options.pop("window", None), options.pop("store", None)
         options.setdefault("budget", 200_000)
-        return Engine(ContextLanguageModel(directory=str(self.directory), **options), window=window)
+        return Engine(ContextLanguageModel(directory=str(self.directory), **options), store, window=window)
 
     def send(self, engine: Engine, *items: dict[str, Any], **options: Any):
         return engine.prepare(RESPONSES, HARNESS, body(*items), tenant="t", post=unreachable, **options)
@@ -120,16 +121,19 @@ class ClmRobustnessTests(unittest.TestCase):
         sent = self.send(engine, *history, *call(3, 10))
         self.assertNotIn("REJECTED", receipt(sent))
 
-    # P3: after a restart the model either keeps its edits or is told they are gone.
-    @unittest.expectedFailure
+    # P3: after a restart the model either keeps its edits or is told they are gone. The store on
+    # disk (RELAY_CACHE_PATH) keeps them: a restarted Relay is a new engine on a store loaded from it.
     def test_p3_a_restart_keeps_the_edits_or_says_so(self) -> None:
-        engine = self.engine()
+        def disk() -> PrefixStore:
+            return PrefixStore(path=self.directory / "store.json", secret=b"s" * 32, save_interval=0)
+
+        engine = self.engine(store=disk())
         history = [msg("user", "task"), *call(1, 4_000), *call(2, 4_000)]
         self.send(engine, *history)
         self.edit(lambda s: re.sub(r"output [12] x+", "done", s))
         history += call(3, 10)
         self.assertNotIn("x" * 1_000, json.dumps(self.send(engine, *history).body))
-        restarted = self.engine()
+        restarted = self.engine(store=disk())
         sent = self.send(restarted, *history, *call(4, 10))
         kept = "x" * 1_000 not in json.dumps(sent.body)
         told = receipt(sent) is not None and "NOT applied" in receipt(sent)
