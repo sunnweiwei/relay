@@ -118,6 +118,14 @@ class StoreOnDiskTests(unittest.TestCase):
         store.flush()
         self.assertEqual(json.loads(self.path.read_text())["format"], FORMAT)
 
+    def test_a_writer_thread_writes_what_changed(self) -> None:
+        store = self.store(save_interval=0.05)
+        store.put(store.partition("t"), [b"a"], {"v": 1})  # the request does not wait for the disk
+        deadline = time.time() + 2
+        while not self.path.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(self.store().match(store.partition("t"), [b"a"]), (1, {"v": 1}))
+
     def test_writes_are_throttled_and_flush_writes_the_rest(self) -> None:
         store = self.store(save_interval=3600)
         store.put(store.partition("t"), [b"a"], {"v": 1})
@@ -131,12 +139,13 @@ class StoreOnDiskTests(unittest.TestCase):
     def test_by_default_relay_keeps_its_store_and_secret_in_the_home_folder(self) -> None:
         home = self.path.parent
         with unittest.mock.patch.dict(os.environ, {"HOME": str(home)}):
-            os.environ.pop("RELAY_CACHE_PATH", None), os.environ.pop("RELAY_CACHE_SECRET", None)
+            for name in ("RELAY_CACHE_PATH", "RELAY_CACHE_SECRET", "RELAY_PORT"):
+                os.environ.pop(name, None)
             store = PrefixStore.from_env()
             partition = store.partition("t")
             store.put(partition, [b"a"], {"v": 1})
             store.flush()
-            secret = home / ".relay" / "store.json.secret"
+            secret = home / ".relay" / "store-8787.json.secret"  # one store per Relay process, by its port
             self.assertEqual(secret.stat().st_mode & 0o777, 0o600)
             self.assertEqual((home / ".relay").stat().st_mode & 0o777, 0o700)
             self.assertEqual(PrefixStore.from_env().match(partition, [b"a"]), (1, {"v": 1}))  # restarted

@@ -113,11 +113,16 @@ class AnthropicMessages:
         return lonely
 
     def note(self, items: list[WireItem], text: str) -> list[WireItem]:
-        if not items or items[-1].get("role") != "user":
-            return [*items, self.user_message(text)]
-        content = items[-1].get("content")
+        # A system message may not precede a user turn: the note goes before trailing ones.
+        end = len(items)
+        while end and items[end - 1].get("role") == "system":
+            end -= 1
+        head, tail = items[:end], items[end:]
+        if not head or head[-1].get("role") != "user":
+            return [*head, self.user_message(text), *tail]
+        content = head[-1].get("content")
         blocks = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
-        return [*items[:-1], {**items[-1], "content": [*blocks, {"type": "text", "text": text}]}]
+        return [*head[:-1], {**head[-1], "content": [*blocks, {"type": "text", "text": text}]}, *tail]
 
     def offers_tools(self, body: Body) -> bool:
         return bool(body.get("tools"))

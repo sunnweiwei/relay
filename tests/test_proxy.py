@@ -129,7 +129,7 @@ class ProxyTests(unittest.TestCase):
 
     def test_the_cache_settings_reach_the_engine_that_serves(self) -> None:
         settings = {"RELAY_CACHE_MAX_ENTRIES": "50000", "RELAY_CACHE_MAX_BYTES": "1000000",
-                    "RELAY_CACHE_TTL_SECONDS": "86400"}
+                    "RELAY_CACHE_TTL_SECONDS": "86400", "RELAY_CACHE_PATH": "off"}  # (not in the user's home)
         with unittest.mock.patch.dict(os.environ, settings):
             store = engine_from_env().store
         self.assertEqual((store.max_entries, store.max_bytes, store.ttl_seconds), (50_000, 1_000_000, 86_400.0))

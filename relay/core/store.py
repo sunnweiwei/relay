@@ -7,12 +7,14 @@ carrying a value count toward the limits. Values are soft state: a miss is alway
 recoverable by recomputing from the request.
 
 The store can be kept on disk (`path`, with a fixed `secret`), so that a restarted Relay
-finds the contexts it had. Relay does this by default (`from_env`: ~/.relay/store.json, with a
-secret it generates once and keeps beside it; RELAY_CACHE_PATH=off keeps it in memory): a strategy's result is then not recomputed, and a result that cannot
-be recomputed (the edits a model made under CLM) is not lost. Only the keyed digests of the
+finds the contexts it had. Relay does this by default (`from_env`: ~/.relay/store-<port>.json,
+one per Relay process, with a secret it generates once and keeps beside it; RELAY_CACHE_PATH=off
+keeps it in memory): a strategy's result is then not recomputed, and a result that cannot be
+recomputed (the edits a model made under CLM) is not lost. Only the keyed digests of the
 prefixes are written, never the items; values are written as they are stored (summaries and
-strategy state, conversation text). The file is written at most every `save_interval` seconds
-and by `flush()` (Relay calls it on shutdown), atomically and readable by its owner only.
+strategy state, conversation text). A writer thread, off the request path, writes what changed
+every `save_interval` seconds (0: on every change), as does `flush()` (Relay calls it on
+shutdown), atomically and readable by its owner only.
 """
 
 from __future__ import annotations
@@ -23,7 +25,9 @@ import json
 import logging
 import os
 import secrets
+import threading
 import time
+import weakref
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from copy import deepcopy
@@ -79,15 +83,18 @@ class PrefixStore:
         self._save_interval = save_interval
         self._save_lock = RLock()
         self._dirty = False
-        self._saved_at = time.time()
         if self._path is not None:
             self._load()
+            if save_interval > 0:
+                threading.Thread(target=_write_every, args=(weakref.ref(self), save_interval), daemon=True,
+                                 name="relay-store-writer").start()
 
     @classmethod
     def from_env(cls) -> PrefixStore:
         secret: str | bytes | None = os.getenv("RELAY_CACHE_SECRET")
         ttl = float(os.getenv("RELAY_CACHE_TTL_SECONDS", str(6 * 60 * 60)))
-        path: str | None = os.getenv("RELAY_CACHE_PATH", os.path.join(os.path.expanduser("~"), ".relay", "store.json"))
+        default = os.path.join(os.path.expanduser("~"), ".relay", f"store-{os.getenv('RELAY_PORT', '8787')}.json")
+        path: str | None = os.getenv("RELAY_CACHE_PATH", default)  # (one file per Relay process: they do not share it)
         if path.strip().lower() in ("", "off", "none", "memory"):
             path = None
         if path is not None and not secret:
@@ -154,7 +161,7 @@ class PrefixStore:
             self._lru.move_to_end(node.digest)
             self._evict()
             self._dirty = True
-        if self._path is not None and time.time() - self._saved_at >= self._save_interval:
+        if self._path is not None and self._save_interval <= 0:
             self.flush()
 
     def flush(self) -> None:
@@ -185,7 +192,7 @@ class PrefixStore:
                         nodes.append([missing.digest.hex(), parent])
                     expires = None if node.expires_at is None else wall + node.expires_at - now
                     entries.append([index[id(node)], node.value, expires])
-                self._dirty, self._saved_at = False, wall
+                self._dirty = False
             # Values are replaced, never changed in place, so they are written outside the lock.
             data = json.dumps({"format": FORMAT, "check": self._digest(b"check").hex(), "nodes": nodes,
                                "entries": entries}, separators=(",", ":"))
@@ -290,6 +297,17 @@ class PrefixStore:
             node.parent.children.pop(node.digest, None)
             self._nodes -= 1
             node = node.parent
+
+
+def _write_every(store: weakref.ref[PrefixStore], interval: float) -> None:
+    """A store's writer: what changed, every `interval` seconds, for as long as the store lives."""
+
+    while True:
+        time.sleep(interval)
+        if (live := store()) is None:
+            return
+        live.flush()
+        del live
 
 
 def _kept_secret(path: str) -> bytes | None:
