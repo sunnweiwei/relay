@@ -32,7 +32,7 @@ from threading import RLock
 from typing import Any
 
 log = logging.getLogger("relay")
-FORMAT = 1
+FORMAT = 2  # 2: every node written once, with its parent (1 repeated every entry's whole path)
 
 
 @dataclass(eq=False)
@@ -167,20 +167,28 @@ class PrefixStore:
                 if not self._dirty:
                     return
                 now, wall = self._clock(), time.time()
+                # Each node once, a parent before its children: the prefixes of one conversation share
+                # their nodes, so the file grows with the trie rather than with entries times depth.
+                index: dict[int, int] = {}
+                nodes: list[list[Any]] = []
                 entries = []
                 for node in self._lru.values():  # least recently used first, as they are reloaded
                     if node.value is None or (node.expires_at is not None and node.expires_at <= now):
                         continue
                     trail, step = [], node
-                    while step is not None:
-                        trail.append(step.digest.hex())
+                    while step is not None and id(step) not in index:
+                        trail.append(step)
                         step = step.parent
+                    for missing in reversed(trail):
+                        parent = -1 if missing.parent is None else index[id(missing.parent)]
+                        index[id(missing)] = len(nodes)
+                        nodes.append([missing.digest.hex(), parent])
                     expires = None if node.expires_at is None else wall + node.expires_at - now
-                    entries.append({"path": trail[::-1], "value": node.value, "expires": expires})
+                    entries.append([index[id(node)], node.value, expires])
                 self._dirty, self._saved_at = False, wall
             # Values are replaced, never changed in place, so they are written outside the lock.
-            data = json.dumps({"format": FORMAT, "check": self._digest(b"check").hex(), "entries": entries},
-                              separators=(",", ":"))
+            data = json.dumps({"format": FORMAT, "check": self._digest(b"check").hex(), "nodes": nodes,
+                               "entries": entries}, separators=(",", ":"))
             temporary = f"{self._path}.{os.getpid()}.tmp"
             try:
                 os.makedirs(os.path.dirname(self._path) or ".", mode=0o700, exist_ok=True)
@@ -209,25 +217,32 @@ class PrefixStore:
             log.warning("the prefix store in %s was written with another secret; starting empty", self._path)
             return
         now, wall = self._clock(), time.time()
+        try:
+            written = [(bytes.fromhex(digest), int(parent)) for digest, parent in data["nodes"]]
+            entries = [(int(at), value, expires) for at, value, expires in data["entries"]]
+        except (KeyError, TypeError, ValueError):
+            log.warning("the prefix store in %s is damaged; starting empty", self._path)
+            return
         with self._lock:
-            for entry in data.get("entries", []):
-                try:
-                    trail = [bytes.fromhex(digest) for digest in entry["path"]]
-                    value, expires = entry["value"], entry["expires"]
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if not trail or not isinstance(value, dict) or (expires is not None and expires <= wall):
-                    continue
-                node = self._roots.get(trail[0])
-                if node is None:
-                    node = self._roots[trail[0]] = _Node(trail[0], 0)
-                    self._nodes += 1
-                for digest in trail[1:]:
-                    child = node.children.get(digest)
-                    if child is None:
-                        child = node.children[digest] = _Node(digest, node.depth + 1, node)
+            built: list[_Node | None] = []
+            for digest, parent in written:  # a parent always comes before its children
+                if parent == -1:
+                    node = self._roots.get(digest)
+                    if node is None:
+                        node = self._roots[digest] = _Node(digest, 0)
                         self._nodes += 1
-                    node = child
+                elif 0 <= parent < len(built) and (up := built[parent]) is not None:
+                    node = up.children.get(digest)
+                    if node is None:
+                        node = up.children[digest] = _Node(digest, up.depth + 1, up)
+                        self._nodes += 1
+                else:
+                    node = None
+                built.append(node)
+            for at, value, expires in entries:
+                node = built[at] if 0 <= at < len(built) else None
+                if node is None or not isinstance(value, dict) or (expires is not None and expires <= wall):
+                    continue
                 if node.value is not None:
                     self._bytes -= node.size
                 node.value, node.size = value, len(json.dumps(value, separators=(",", ":")))

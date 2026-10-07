@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from relay.core.engine import Engine
-from relay.core.store import PrefixStore
+from relay.core.store import FORMAT, PrefixStore
 from relay.harnesses import Harness
 from relay.protocols import OpenAIResponses
 from relay.strategies import Compaction, ContextLanguageModel
@@ -42,6 +42,21 @@ class StoreOnDiskTests(unittest.TestCase):
         self.assertEqual(again.match(partition, [b"a", b"b", b"c", b"d"]), (3, {"covered": 3}))
         self.assertEqual(again.match(partition, [b"a", b"b", b"x"]), (2, {"covered": 2}))
         self.assertEqual(len(again), 2)
+
+    def test_a_long_conversation_writes_each_prefix_once(self) -> None:
+        store = self.store()
+        partition = store.partition("t")
+        keys = [bytes([n % 256, n // 256]) for n in range(600)]
+        for depth in range(1, 601):  # one entry per request, as a long session stores them
+            store.put(partition, keys[:depth], {"covered": depth})
+        store.flush()
+        data = json.loads(self.path.read_text())
+        self.assertEqual(len(data["nodes"]), 601)  # the partition and 600 prefixes, not 600 * 300 digests
+        self.assertLess(self.path.stat().st_size, 120_000)
+        again = self.store()
+        self.assertEqual(again.match(partition, keys), (600, {"covered": 600}))
+        self.assertEqual(again.match(partition, keys[:250] + [b"other"]), (250, {"covered": 250}))
+        self.assertEqual(len(again), 600)
 
     def test_only_digests_are_written_never_the_items(self) -> None:
         store = self.store()
@@ -101,7 +116,7 @@ class StoreOnDiskTests(unittest.TestCase):
         self.assertEqual(len(store), 0)
         store.put(store.partition("t"), [b"a"], {"v": 1})
         store.flush()
-        self.assertEqual(json.loads(self.path.read_text())["format"], 1)
+        self.assertEqual(json.loads(self.path.read_text())["format"], FORMAT)
 
     def test_writes_are_throttled_and_flush_writes_the_rest(self) -> None:
         store = self.store(save_interval=3600)
