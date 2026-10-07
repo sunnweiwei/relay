@@ -7,6 +7,7 @@ from typing import Any
 
 from relay.core.engine import Engine
 from relay.core.ir import Context
+from relay.core.store import PrefixStore
 from relay.core.tokens import approx_tokens
 from relay.harnesses import ClaudeCode, Codex, Harness
 from relay.prompts import SUMMARY_PREFIX
@@ -279,3 +280,15 @@ class UnreportedUsageTests(unittest.TestCase):
         engine.record(engine.prepare(CODEC, HARNESS, body(*history), tenant="t", post=upstream), None)
         exchange = engine.prepare(CODEC, HARNESS, body(*history, *step(2, size=800)), tenant="t", post=upstream)
         self.assertTrue(exchange.compacted)
+
+
+class StoreTests(unittest.TestCase):
+    def test_the_engine_keeps_the_store_it_is_given(self) -> None:
+        """A store is falsy while it holds nothing, so a caller's store must not be taken for none."""
+
+        store = PrefixStore(max_entries=99, ttl_seconds=42.0)
+        engine = Engine(Compaction(threshold=10**9), store)
+        self.assertIs(engine.store, store)
+        self.assertEqual((engine.store.max_entries, engine.store.ttl_seconds), (99, 42.0))
+        engine.record(engine.prepare(CODEC, HARNESS, body(msg("user", "task")), tenant="t", post=Upstream()), 10)
+        self.assertEqual(len(store), 1)  # the request went into that store, not into one of the engine's own
