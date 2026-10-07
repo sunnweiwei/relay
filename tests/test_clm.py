@@ -110,7 +110,7 @@ class ClmTests(unittest.TestCase):
         self.assertTrue(self.send(*self.history, *call(3), *call(5)).compacted)
         # A header from another version of the file is refused, not taken for text.
         self.edit(lambda s: s + "\n\n[[CTX_TURN document=0000000000000000 index=9 role=notes id=new-b]]\nMARKER B")
-        receipt = self.send(*self.history, *call(3), *call(4)).body["input"][-1]["content"][0]["text"]
+        receipt = self.send(*self.history, *call(3), *call(5), *call(4)).body["input"][-1]["content"][0]["text"]
         self.assertIn("this header cannot be read", receipt)
 
     def test_wiping_every_block_keeps_the_task(self) -> None:
