@@ -31,12 +31,14 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from ..core.ir import LABELS, Context, Item, Kind, Request, note
-from ..core.tokens import approx_tokens
+from ..core.tokens import item_tokens
 from .base import Summarizer
 
 # The paper's "Managing your context" section (clm_agent/prompts.yaml), with the file's block headers.
@@ -126,18 +128,24 @@ class ContextLanguageModel:
     def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
         if not request.tools:
             return None
-        state, path = request.state or {}, Path(self.directory) / f"{request.conversation}.md"
+        # The file keeps the name it was given on the conversation's first request (the engine's
+        # name for a conversation settles only after its first items).
+        state = request.state or {}
+        path = Path(self.directory) / state.get("file", f"{request.conversation}.md")
         budget = self.budget or request.window or 0
         limit = max(budget - self.reserve, 0)
         # The system prompt is not in the request; the original task is protected as well.
         task = next((n + 1 for n, item in enumerate(request.current) if item.kind is Kind.USER), 0)
         items, tokens, notes = list(request.current), request.tokens, []
-        if state and path.exists() and _digest(edited := path.read_text(encoding="utf-8")) != state["digest"]:
+        if _owner(path) not in (None, state.get("ids")):
+            path = path.with_name(f"{path.stem.split('~')[0]}~{_digest(''.join(_ids(items[task:])))[:8]}.md")
+        elif state and path.exists() and _digest(edited := path.read_text(encoding="utf-8")) != state["digest"]:
             applied, tokens, note = _apply(edited, request, task, state, limit)
             items, notes = applied or items, [note]
         revision = state.get("revision", 0) + (items != list(request.current))
         text = _render(items[task:], _document(request.conversation, revision), revision)
         _write(path, text)
+        _own(path, _ids(items[task:]))
         nudged = state.get("nudged", [])
         if budget:
             nudged, nudge = self._nudge(tokens, budget, limit, nudged) if self.nudges else (nudged, None)
@@ -149,7 +157,8 @@ class ContextLanguageModel:
         guidance = GUIDANCE.format(path=path, budget=f"{budget} tokens" if budget else "not set")
         guidance = Item(Kind.SYSTEM, f"{guidance}\n\n{STEERING}\n\n{self.steering}" if self.steering else guidance)
         return Context((guidance, *items),
-                       {"revision": revision, "digest": _digest(text), "ids": _ids(items[task:]), "nudged": nudged},
+                       {"revision": revision, "digest": _digest(text), "ids": _ids(items[task:]), "nudged": nudged,
+                        "file": path.name},
                        tuple(notes))
 
     def _nudge(self, tokens: int, budget: int, limit: int, nudged: list[float]) -> tuple[list[float], str | None]:
@@ -268,7 +277,8 @@ def _digest(text: str) -> str:
 
 
 def _size(items: list[Item] | tuple[Item, ...]) -> int:
-    return sum(approx_tokens(item.text) for item in items)
+    # Opaque content (encrypted reasoning, signatures) is read by the model too, as the engine counts it.
+    return sum(item_tokens(item) for item in items)
 
 
 def _escape(body: str) -> str:
@@ -277,6 +287,23 @@ def _escape(body: str) -> str:
 
 def _unescape(body: str) -> str:
     return STRUCTURAL.sub(lambda m: f"{m.group(1)[1:]}{m.group(2)}", body)
+
+
+_OWNERS: OrderedDict[str, list[str]] = OrderedDict()
+_LOCK = Lock()
+
+
+def _owner(path: Path) -> list[str] | None:
+    with _LOCK:
+        return _OWNERS.get(str(path))
+
+
+def _own(path: Path, ids: list[str]) -> None:
+    with _LOCK:
+        _OWNERS[str(path)] = ids
+        _OWNERS.move_to_end(str(path))
+        while len(_OWNERS) > 4096:
+            _OWNERS.popitem(last=False)
 
 
 def _write(path: Path, text: str) -> None:
