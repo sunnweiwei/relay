@@ -39,6 +39,7 @@ from typing import Any
 
 from ..core.ir import LABELS, Context, Item, Kind, Request, note
 from ..core.tokens import item_tokens
+from . import clm_checkpoint
 from .base import Summarizer
 
 # The paper's "Managing your context" section (clm_agent/prompts.yaml), with the file's block headers.
@@ -131,12 +132,20 @@ class ContextLanguageModel:
         # The file keeps the name it was given on the conversation's first request (the engine's
         # name for a conversation settles only after its first items).
         state = request.state or {}
+        restored = False
+        if not state and (found := clm_checkpoint.restore(self.directory, request)):
+            request, state = found  # Relay lost its state (a restart): the model's context as it was
+            restored = True
+        if state.get("conversation"):  # the name the file's headers carry, also after Relay restarts
+            request = replace(request, conversation=state["conversation"])
         path = Path(self.directory) / state.get("file", f"{request.conversation}.md")
         budget = self.budget or request.window or 0
         limit = max(budget - self.reserve, 0)
         # The system prompt is not in the request; the original task is protected as well.
         task = next((n + 1 for n, item in enumerate(request.current) if item.kind is Kind.USER), 0)
         items, tokens, notes = list(request.current), request.tokens, []
+        if restored:
+            notes.append("[context manager: Relay restarted; your edited context was restored from its checkpoint.]")
         if _owner(path) not in (None, state.get("ids")):
             path = path.with_name(f"{path.stem.split('~')[0]}~{_digest(''.join(_ids(items[task:])))[:8]}.md")
         elif state and path.exists() and _digest(edited := path.read_text(encoding="utf-8")) != state["digest"]:
@@ -156,10 +165,10 @@ class ContextLanguageModel:
             notes.append(f"[context: ~{tokens} tokens]")
         guidance = GUIDANCE.format(path=path, budget=f"{budget} tokens" if budget else "not set")
         guidance = Item(Kind.SYSTEM, f"{guidance}\n\n{STEERING}\n\n{self.steering}" if self.steering else guidance)
-        return Context((guidance, *items),
-                       {"revision": revision, "digest": _digest(text), "ids": _ids(items[task:]), "nudged": nudged,
-                        "file": path.name},
-                       tuple(notes))
+        state = {"revision": revision, "digest": _digest(text), "ids": _ids(items[task:]), "nudged": nudged,
+                 "file": path.name, "conversation": request.conversation}
+        clm_checkpoint.save(self.directory, request, items, state)
+        return Context((guidance, *items), state, tuple(notes))
 
     def _nudge(self, tokens: int, budget: int, limit: int, nudged: list[float]) -> tuple[list[float], str | None]:
         """The paper's nudges: urgent on every request past 90% of the limit, else the highest tier

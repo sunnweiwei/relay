@@ -121,7 +121,6 @@ class ClmRobustnessTests(unittest.TestCase):
         self.assertNotIn("REJECTED", receipt(sent))
 
     # P3: after a restart the model either keeps its edits or is told they are gone.
-    @unittest.expectedFailure
     def test_p3_a_restart_keeps_the_edits_or_says_so(self) -> None:
         engine = self.engine()
         history = [msg("user", "task"), *call(1, 4_000), *call(2, 4_000)]

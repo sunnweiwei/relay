@@ -300,9 +300,10 @@ they answered with codes they made up. pi edited least, and late.
 
 Limits: Relay must run on the machine whose files the harness's tools edit (the paper's sandbox
 mirror); the edit is read back at the next request, so the turn that made it stays in the context
-until the model removes it (as in pi-clm); revisions live in Relay's in-memory store, so a restart
-returns the model to its raw history; through Claude Code's hook the instructions and notes cannot
-be delivered, so CLM runs through the proxy.
+until the model removes it (as in pi-clm); revisions are also checkpointed beside the context files
+(`.checkpoints/`, readable by their owner only), so a restarted Relay restores them when the harness
+resends the history they were made on (not a history the harness has since rewritten); through
+Claude Code's hook the instructions and notes cannot be delivered, so CLM runs through the proxy.
 
 ## Context Folding
 
