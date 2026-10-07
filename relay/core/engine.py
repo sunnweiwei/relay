@@ -69,7 +69,7 @@ class Engine:
         retry_after: float = 60.0,
     ) -> None:
         self.strategy = strategy
-        self.store = store or PrefixStore()
+        self.store = PrefixStore() if store is None else store  # a store is falsy while it is empty
         self.window = window
         self.event_log = event_log
         self.retry_after = retry_after

@@ -79,6 +79,7 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
         yield
         await app.state.client.aclose()
         app.state.summary_client.close()
+        engine.store.flush()  # a store kept on disk: what changed since it was last written
 
     async def handle(request: Request) -> Response:
         if request.headers.get("upgrade"):  # e.g. Codex tries WebSockets first, then HTTP
