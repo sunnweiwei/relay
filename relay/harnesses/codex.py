@@ -48,6 +48,7 @@ BUNDLE = (
     "apps_instructions",
     "plugins_instructions",
     "tools",
+    "git_attribution",  # extensions' sections follow the built-in ones
     "model_catalog",
     "recommended_plugins",
 )
@@ -89,6 +90,17 @@ AUTO_REVIEW = "\n\n`approvals_reviewer` is `auto_review`"
 AFTER_APPROVAL = (" The writable root", "## Denied filesystem reads", "Additional permission paths/globs are omitted.",
                   "</permissions instructions>")
 
+# `<environment_context>` (codex-rs/core/src/context/world_state/environment.rs): an update lists
+# only the environments that changed, then every turn-wide value as it is now.
+ENV_OPEN, ENV_CLOSE = "<environment_context>", "</environment_context>"
+ENV_VALUES = ("<cwd>", "<status>", "<error>", "<shell>")  # one environment's values
+_ENVIRONMENT = re.compile(r'    <environment id="([^"]*)"(?: primary="(true|false)")?( status="unavailable" /)?>\n')
+_REMOVED = re.compile(r'  <(?:shell_version|current_date) status="unavailable" />\n')
+# Its `<subagents>` lists the live child threads, but a change to them alone renders no update:
+# the multi-agent (v1) tools that spawn, close and resume them show the changes since.
+_SUBAGENTS = re.compile(r"  <subagents>\n((?:    .*\n)*)  </subagents>\n")
+AGENT_TOOLS = ("spawn_agent", "close_agent", "resume_agent")
+
 
 class Codex(Harness):
     name = "codex"
@@ -112,7 +124,8 @@ class Codex(Harness):
 
     def state(self, codec: Codec, items: list[WireItem]) -> State:
         """Re-render the initial context from the context updates in the history, like Codex:
-        its per-request prefix stays first, and the rendering joins the context block."""
+        its per-request prefix stays first, and the rendering joins the context block; mid-turn,
+        the updates written after the model's last response come after it."""
 
         rendering = rebuild(items) if codec.name == "openai_responses" else None
         if rendering is None:
@@ -127,8 +140,17 @@ class Codex(Harness):
                 *(kept(part, Kind.CONTEXT) if isinstance(part, int)
                   else Item(Kind.CONTEXT, codec.classify(part).text, wire=json.dumps(part, ensure_ascii=False))
                   for part in rendering.context),
+                *(replace(self.refine(codec.classify(items[index])), ref=index) for index in rendering.trailing),
             ),
         )
+
+    def place(self, head: tuple[Item, ...], state: tuple[Item, ...], mid_turn: bool) -> tuple[Item, ...]:
+        """Like Codex, except that mid-turn the updates newer than everything the head keeps (those
+        that open the next step) follow the compacted history."""
+
+        refs = [item.ref for item in head if item.ref is not None]
+        newer = tuple(item for item in state if mid_turn and refs and item.ref is not None and item.ref > max(refs))
+        return (*super().place(head, tuple(item for item in state if item not in newer), mid_turn), *newer)
 
     def settings(self) -> list[Setting]:
         """Re-point the built-in OpenAI provider, so Codex keeps its own login and its
@@ -159,6 +181,7 @@ class Rendering:
 
     pinned: tuple[int, ...]  # per-request prefix (`additional_tools`, base instructions)
     context: tuple[int | WireItem, ...]  # the re-rendered initial context
+    trailing: tuple[int, ...] = ()  # mid-turn, the updates that follow the compacted history
 
 
 def section(text: str) -> str | None:
@@ -171,6 +194,11 @@ def section(text: str) -> str | None:
         return None
     name = match.group(1)  # e.g. "permissions instructions", or a tag with attributes
     return name.split()[0] if "=" in name else name
+
+
+def _foldable(text: str) -> bool:
+    key = section(text)
+    return key in BUNDLE or key in SEPARATE or key in USER_CONTEXT or text.startswith(PREFIX_SAVED)
 
 
 def is_context(item: WireItem) -> bool:
@@ -199,12 +227,20 @@ def rebuild(items: list[WireItem]) -> Rendering | None:
 
     last_agent = agent[-1]
     pending = any(_is_user_turn(item) for item in items[last_agent + 1 :])
-    model_switch = None
+    # Mid-turn, Codex compacts with the state it built before the model's last response; the
+    # updates written after that response open the next step, after the compacted history.
+    settled = len(items) if pending else _last_response(items, last_agent)
+    model_switch, trailing, environment = None, [], start
     for index in range(end, len(items)):
         if not is_context(items[index]):
             continue
+        if index > settled and all(_foldable(text) for text in _parts(items[index]) or []):
+            trailing.append(index)
+            continue
         for text in _parts(items[index]) or []:
             key = section(text)
+            if key == "environment_context":
+                environment = index
             if key == "model_switch":
                 # Rendered only at the start of the turn that switched models.
                 model_switch = text if pending and index > last_agent else None
@@ -214,8 +250,9 @@ def rebuild(items: list[WireItem]) -> Rendering | None:
                 _approve(render, _prefix_list(text[len(PREFIX_SAVED):]) or [])
     if model_switch is not None:
         _apply(render, "model_switch", model_switch)
+    _follow_subagents(render, items, environment, settled)
     context = tuple(message.wire() for message in render if message.parts)
-    return Rendering(tuple(pinned), context)
+    return Rendering(tuple(pinned), context, tuple(trailing))
 
 
 @dataclass
@@ -261,11 +298,175 @@ def _apply(render: list[_Message], key: str, text: str) -> None:
             position = message.keys.index(key)
             if removed:
                 message.remove(position)
+            elif key == "environment_context":
+                message.set(position, _environment_update(message.parts[position]["text"], text))
             else:
                 message.set(position, text)
             return
     if not removed:
         _insert(render, key, text)
+
+
+@dataclass
+class _Environments:
+    """An `<environment_context>`: each environment's (primary, values) by id, None for the single
+    environment rendered without one (or None if unavailable), then the turn-wide values."""
+
+    environments: dict[str | None, tuple[str | None, list[str]] | None]
+    rest: str
+
+    @classmethod
+    def parse(cls, text: str) -> _Environments | None:
+        if not (text.startswith(ENV_OPEN + "\n") and text.endswith(ENV_CLOSE)):
+            return None
+        lines = text[len(ENV_OPEN) + 1 : -len(ENV_CLOSE)].splitlines(keepends=True)
+        environments: dict[str | None, tuple[str | None, list[str]] | None] = {}
+        i = 0
+        if lines[:1] == ["  <environments>\n"]:
+            i = 1
+            while i < len(lines) and lines[i] != "  </environments>\n":
+                match = _ENVIRONMENT.fullmatch(lines[i])
+                if match is None:
+                    return None
+                i += 1
+                if match.group(3):
+                    environments[match.group(1)] = None
+                    continue
+                values = []
+                while i < len(lines) and lines[i].startswith("      "):
+                    values.append(lines[i][6:])
+                    i += 1
+                if lines[i : i + 1] != ["    </environment>\n"]:
+                    return None
+                environments[match.group(1)] = (match.group(2), values)
+                i += 1
+            if i == len(lines):
+                return None
+            i += 1
+        else:
+            values = []
+            while i < len(lines) and lines[i].startswith(tuple(f"  {tag}" for tag in ENV_VALUES)):
+                values.append(lines[i][2:])
+                i += 1
+            if values:
+                environments[None] = (None, values)
+        return cls(environments, "".join(lines[i:]))
+
+    def render(self) -> str | None:
+        """Codex's full rendering: a single available environment without an id, else all of them."""
+
+        listed = sorted(self.environments.items(), key=lambda entry: (entry[0] or "").encode())
+        body = ""
+        if len(listed) == 1 and not any(v.startswith("<status>") for v in listed[0][1][1]):
+            body = "".join(f"  {value}" for value in listed[0][1][1])
+        elif listed:
+            body = "  <environments>\n"
+            for id, (primary, values) in listed:
+                if id is None or (len(listed) > 1 and primary is None):
+                    return None
+                attribute = f' primary="{primary}"' if len(listed) > 1 else ""
+                body += f'    <environment id="{id}"{attribute}>\n'
+                body += "".join(f"      {value}" for value in values) + "    </environment>\n"
+            body += "  </environments>\n"
+        return f"{ENV_OPEN}\n{body}{self.rest}{ENV_CLOSE}"
+
+
+def _environment_update(text: str, update: str) -> str:
+    """The environment context after an update: unchanged environments carried over, the changed
+    ones and the turn-wide values (`<subagents>` too) taken from the update."""
+
+    current, new = _Environments.parse(text), _Environments.parse(update)
+    if current is None or new is None:
+        return update
+    if None in new.environments:
+        environments = new.environments  # the single environment, rendered in full
+    elif not new.environments:
+        environments = current.environments
+    else:  # a listing that replaces a single environment names every environment
+        environments = {id: env for id, env in current.environments.items() if id is not None}
+        environments.update(new.environments)
+    available = {id: env for id, env in environments.items() if env is not None}
+    rendered = _Environments(available, _REMOVED.sub("", new.rest)).render()
+    return update if rendered is None else rendered
+
+
+def _last_response(items: list[WireItem], last_agent: int) -> int:
+    """Where the model's last response (its reasoning, messages and calls) begins."""
+
+    def produced(item: WireItem) -> bool:
+        return _is_agent(item) and not item.get("type", "").endswith("_output")
+
+    start = next((i for i in range(last_agent, -1, -1) if produced(items[i])), 0)
+    while start > 0 and produced(items[start - 1]):
+        start -= 1
+    return start
+
+
+def _follow_subagents(render: list[_Message], items: list[WireItem], since: int, settled: int) -> None:
+    """Apply the child threads spawned, closed and resumed after the last environment context by
+    calls made before `settled`. A Codex process that resumes the session starts without the
+    threads left open, which the history does not show."""
+
+    message = next((m for m in render if "environment_context" in m.keys), None)
+    if message is None:
+        return
+    position = message.keys.index("environment_context")
+    text = message.parts[position]["text"]
+    parsed = _Environments.parse(text)
+    if parsed is None:
+        return
+    listed = _SUBAGENTS.search(parsed.rest)
+    agents = [line[4:-1] for line in listed.group(1).splitlines(keepends=True)] if listed else []
+    calls = {item.get("call_id"): item for item in items[:settled]
+             if item.get("type") == "function_call" and item.get("name") in AGENT_TOOLS
+             and item.get("namespace") in (None, "multi_agent_v1")}
+    nicknames: dict[str, str | None] = {}
+    changed = False
+    for index, item in enumerate(items):
+        call = calls.get(item.get("call_id")) if item.get("type") == "function_call_output" else None
+        result, arguments = (_json(_output_text(item)), _json(call.get("arguments"))) if call else (None, None)
+        if not (isinstance(result, dict) and isinstance(arguments, dict)):
+            continue
+        name = call["name"]
+        agent = result.get("agent_id") if name == "spawn_agent" else arguments.get(
+            "target" if name == "close_agent" else "id")
+        if not isinstance(agent, str) or (name == "close_agent" and "previous_status" not in result) or (
+                name == "resume_agent" and "status" not in result):
+            continue
+        if name == "spawn_agent":
+            nicknames[agent] = result.get("nickname")
+        if index < since:
+            continue
+        present = [line for line in agents if line == f"- {agent}" or line.startswith(f"- {agent}: ")]
+        if name == "close_agent" and present:
+            agents = [line for line in agents if line not in present]
+            changed = True
+        elif name != "close_agent" and not present:
+            nickname = nicknames.get(agent)
+            agents.append(f"- {agent}: {nickname}" if nickname else f"- {agent}")
+            changed = True
+    if not changed:
+        return
+    block = "".join(f"    {line}\n" for line in agents)
+    block = f"  <subagents>\n{block}  </subagents>\n" if agents else ""
+    rest = parsed.rest[: listed.start()] + block + parsed.rest[listed.end():] if listed else parsed.rest + block
+    # Only the turn-wide values change: the environments stay as written (unavailable ones too).
+    message.set(position, text[: len(text) - len(ENV_CLOSE) - len(parsed.rest)] + rest + ENV_CLOSE)
+
+
+def _output_text(item: WireItem) -> str | None:
+    output = item.get("output")
+    if isinstance(output, list):
+        texts = [part.get("text") for part in output if isinstance(part, dict)]
+        return "".join(texts) if all(isinstance(t, str) for t in texts) else None
+    return output if isinstance(output, str) else None
+
+
+def _json(text: Any) -> Any:
+    try:
+        return json.loads(text) if isinstance(text, str) else None
+    except json.JSONDecodeError:
+        return None
 
 
 def _approve(render: list[_Message], added: list[list[str]]) -> None:

@@ -54,6 +54,7 @@ from relay.strategies.selfcompact import RUBRIC, SUMMARIZER  # noqa: E402
 
 IMAGE = "relay-harness-test"
 CODES = ["amber", "birch", "cobalt", "dune", "ember", "fjord", "garnet", "harbor"]
+SEPARATOR = r"[\s,`'\"]+(?:and\s+[`'\"]?)?"  # between codes in an answer (some models quote them, or end with "and")
 RULES = ("strictly one after another: request one file, wait until you have seen its content, then "
          "request the next. Never request two files at once, and read each file in full "
          "(for example `cat file_1.txt`; no head, tail or grep). Each file ends with a line starting "
@@ -645,7 +646,7 @@ ASKED = tuple(json.dumps(prompt[:80])[1:-1] for prompt in (SUMMARIZATION_PROMPT,
 def own_words(summary: str) -> str:
     """A summary's own words as they appear inside a JSON body (its start is the fixed prefix)."""
 
-    return json.dumps(summary)[-201:-1]
+    return json.dumps(summary)[1:-1][-200:]
 MODEL_CALLS = ("/responses", "/chat/completions", "/messages", ":generateContent", ":streamGenerateContent")
 
 
@@ -779,7 +780,7 @@ def evaluate(name: str, home: Path, need: tuple[int, int] | None = None, selfcom
                       if not same_call(first_read.setdefault((conversation, n), newest), newest)]:
             problems.append(f"files read again: {[f'file_{n}.txt' for n in reread]}")
     for turn, (answer, codes) in enumerate(zip(answers, (CODES[:4], CODES) if two_turns else (CODES,)), start=1):
-        if not re.search(r"[\s,]+".join(codes), answer.lower()):
+        if not re.search(SEPARATOR.join(codes), answer.lower()):
             problems.append(f"turn {turn} answer is wrong: {answer[-120:]!r}")
     if "failed; forwarding" in log or "could not prepare" in log:
         problems.append("a compaction failed (see relay.log)")
@@ -882,7 +883,7 @@ def evaluate_hook(name: str, home: Path) -> dict:
                       if not same_call(first_read.setdefault((task(request), n), newest), newest)]:
             problems.append(f"files read again: {[f'file_{n}.txt' for n in reread]}")
     for turn, (answer, wanted) in enumerate(zip(answers, (CODES[:4], CODES)), start=1):
-        if not re.search(r"[\s,]+".join(wanted), answer.lower()):
+        if not re.search(SEPARATOR.join(wanted), answer.lower()):
             problems.append(f"turn {turn} answer is wrong: {answer[-120:]!r}")
     if "hook compaction failed" in log:
         problems.append("a hook compaction failed (see relay.log)")
@@ -971,7 +972,7 @@ def evaluate_clm(name: str, home: Path, steering: str | None = None) -> dict:
     turns = 2 if SPECS[name].resume else 1
     wrong = [f"turn {turn} answer is wrong: {answer[-120:]!r}"
              for turn, (answer, wanted) in enumerate(zip(answers[:turns], (CODES[:4], CODES)), start=1)
-             if not re.search(r"[\s,]+".join(wanted), answer.lower())]
+             if not re.search(SEPARATOR.join(wanted), answer.lower())]
     if not steering:
         problems += wrong
     else:
@@ -1223,8 +1224,8 @@ def rejected(trace: list[dict]) -> list[str]:
     return [f"{n} model calls rejected"] if (n := sum(r["status"] >= 400 for r in trace if "status" in r)) else []
 
 
-ALL_CODES = re.compile(r"[\s,]+".join(CODES))
-FOUR_CODES = re.compile(r"[\s,]+".join(CODES[:4]))
+ALL_CODES = re.compile(SEPARATOR.join(CODES))
+FOUR_CODES = re.compile(SEPARATOR.join(CODES[:4]))
 
 
 def evaluate_selfcompact(name: str, home: Path) -> dict:
@@ -1366,7 +1367,7 @@ def evaluate_rlm(name: str, home: Path, persistent: bool = False) -> dict:
     if persistent and not later:
         problems.append("no run found the earlier contexts")
     for turn, answer in enumerate(answers, start=1):
-        if not re.search(r"[\s,]+".join(CODES[:3]), answer.lower()):
+        if not re.search(SEPARATOR.join(CODES[:3]), answer.lower()):
             problems.append(f"turn {turn} answer is wrong: {answer[-120:]!r}")
     problems += rejected(trace)
     return {"name": f"{name} ({'rlm_persistent' if persistent else 'rlm'})", "passed": not problems,

@@ -111,6 +111,13 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(fake.bodies("/v1/responses")[-1]["input"], body["input"])
 
+    def test_a_request_relay_cannot_read_is_forwarded_as_it_is(self) -> None:
+        body = {"model": "m", "messages": ["not a message"], "stream": False}
+        fake = FakeUpstream()
+        with relay(fake) as (url, _), self.assertLogs("relay", "WARNING"):
+            httpx.post(f"{url}/v1/messages", json=body, headers={"x-claude-code-session-id": "s"})
+        self.assertEqual(fake.bodies("/v1/messages")[-1], body)  # (the upstream's to answer)
+
     def test_other_routes_pass_through(self) -> None:
         fake = FakeUpstream()
         with relay(fake) as (url, _):

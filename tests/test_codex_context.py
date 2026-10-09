@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from relay.core.engine import Engine
+from relay.core.ir import Item, Kind
 from relay.harnesses import Codex, Harness
 from relay.harnesses.codex import rebuild
 from relay.prompts import SUMMARY_PREFIX
@@ -88,13 +89,44 @@ class RebuildRuleTests(unittest.TestCase):
                                   "AGENTS.md instructions.\n\nbe thorough")
         removed = "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nThe previously provided AGENTS.md instructions " \
                   "no longer apply.\n</INSTRUCTIONS>"
-        self.assertEqual(rendered([*START, msg("user", replaced)])[1],
+        self.assertEqual(rendered([*START, msg("user", replaced), CALL, OUTPUT])[1],
                          msg("user", AGENTS.replace("be brief", "be thorough"), ENV))
-        self.assertEqual(rendered([*START, msg("user", removed)])[1], msg("user", ENV))
+        self.assertEqual(rendered([*START, msg("user", removed), CALL, OUTPUT])[1], msg("user", ENV))
+
+    def test_environment_updates_keep_the_environments_they_leave_out(self) -> None:
+        def env(*lines: str) -> str:
+            return "<environment_context>\n" + "".join(f"  {line}\n" for line in lines) + "</environment_context>"
+
+        tail = ("<current_date>2026-10-04</current_date>", "<timezone>UTC</timezone>")
+        full = env("<cwd>/a</cwd>", "<shell>bash</shell>", "<current_date>2026-10-03</current_date>",
+                   "<timezone>UTC</timezone>", "<subagents>", '  <agent name="x" />', "</subagents>")
+        start = [*START[:3], msg("user", AGENTS, full), *START[4:]]
+        # The date changed overnight: the update leaves the environment out and has no subagents now.
+        self.assertEqual(rendered([*start, msg("user", env(*tail)), CALL, OUTPUT])[1],
+                         msg("user", AGENTS, env("<cwd>/a</cwd>", "<shell>bash</shell>", *tail)))
+        moved = env("<cwd>/b</cwd>", "<shell>zsh</shell>", '<shell_version status="unavailable" />', *tail)
+        self.assertEqual(rendered([*start, msg("user", moved), CALL, OUTPUT])[1],
+                         msg("user", AGENTS, env("<cwd>/b</cwd>", "<shell>zsh</shell>", *tail)))
+
+    def test_environment_updates_name_only_the_environments_that_changed(self) -> None:
+        def env(*environments: str) -> str:
+            return ("<environment_context>\n  <environments>\n" + "".join(environments)
+                    + "  </environments>\n  <timezone>UTC</timezone>\n</environment_context>")
+
+        def one(id: str, cwd: str, primary: str) -> str:
+            return f'    <environment id="{id}" primary="{primary}">\n      <cwd>{cwd}</cwd>\n    </environment>\n'
+
+        start = [*START[:3], msg("user", AGENTS, env(one("local", "/a", "true"), one("remote", "/r", "false"))),
+                 *START[4:]]
+        self.assertEqual(rendered([*start, msg("user", env(one("remote", "/s", "false"))), CALL, OUTPUT])[1],
+                         msg("user", AGENTS, env(one("local", "/a", "true"), one("remote", "/s", "false"))))
+        gone = env(one("local", "/a", "true"), '    <environment id="remote" status="unavailable" />\n')
+        self.assertEqual(rendered([*start, msg("user", gone), CALL, OUTPUT])[1], msg(
+            "user", AGENTS, "<environment_context>\n  <cwd>/a</cwd>\n  <timezone>UTC</timezone>\n</environment_context>"))
 
     def test_new_section_is_inserted_in_render_order(self) -> None:
         skills = "<skills_instructions>\n## Skills\n</skills_instructions>"
-        bundle = rendered([*START, msg("developer", skills)])[0]
+        bundle = rendered([*START, msg("developer", skills), CALL, OUTPUT])[0]
         texts = [part["text"] for part in bundle["content"]]
         self.assertEqual(texts, [skills, *(part["text"] for part in BUNDLE["content"])])
 
@@ -117,12 +149,55 @@ class RebuildRuleTests(unittest.TestCase):
 
     def test_saved_prefixes_leave_a_permissions_text_without_a_list_alone(self) -> None:
         saved = msg("developer", 'Approved command prefix saved:\n- ["ls"]')
-        self.assertEqual(rendered([*START, saved]), rendered(START))
+        self.assertEqual(rendered([*START, saved, CALL, OUTPUT]), rendered(START))
         truncated = msg("developer", '<permissions instructions>\n## Approved command prefixes\nThe following prefix '
                         'rules have already been approved: - ["pwd"]...\n[Some commands were truncated]\n'
                         "</permissions instructions>")
-        history = [TOOLS, BASE, truncated, msg("user", ENV), TASK, CALL, OUTPUT, saved]
+        history = [TOOLS, BASE, truncated, msg("user", ENV), TASK, CALL, OUTPUT, saved, CALL, OUTPUT]
         self.assertEqual(rendered(history), [without_ids([truncated])[0], msg("user", ENV)])
+
+    def test_mid_turn_updates_after_the_last_response_follow_the_compacted_history(self) -> None:
+        saved = msg("developer", 'Approved command prefix saved:\n- ["ls"]')
+        history = [*START, saved]  # written when the next step began, after Codex compacted
+        context = rebuild(history)
+        self.assertEqual(context.trailing, (len(START),))
+        self.assertEqual(rendered(history), rendered(START))
+        state = Codex().state(OpenAIResponses(), history)
+        head = (Item(Kind.USER, "fix it", ref=4), Item(Kind.SUMMARY, "S"))
+        placed = Codex().place(head, state.items, mid_turn=True)
+        self.assertEqual([(item.kind, item.ref) for item in placed][-3:],
+                         [(Kind.USER, 4), (Kind.SUMMARY, None), (Kind.SYSTEM, len(START))])
+
+    def test_subagents_follow_the_agents_spawned_closed_and_resumed(self) -> None:
+        def agent_call(n: int, name: str, arguments: dict[str, Any], output: dict[str, Any]) -> list[dict[str, Any]]:
+            return [{"type": "function_call", "call_id": f"a{n}", "namespace": "multi_agent_v1", "name": name,
+                     "arguments": json.dumps(arguments)},
+                    {"type": "function_call_output", "call_id": f"a{n}", "output": json.dumps(output)}]
+
+        spawned = [*agent_call(1, "spawn_agent", {"message": "go"}, {"agent_id": "A", "nickname": "Ada"}),
+                   *agent_call(2, "spawn_agent", {"message": "go"}, {"agent_id": "B", "nickname": None})]
+        close = agent_call(3, "close_agent", {"target": "A"}, {"previous_status": "running"})
+        resume = agent_call(4, "resume_agent", {"id": "A"}, {"status": "running"})
+
+        def subagents(history: list[dict[str, Any]]) -> str:
+            return rendered(history)[1]["content"][1]["text"].removeprefix(ENV.removesuffix("</environment_context>"))
+
+        self.assertEqual(subagents([*START, *spawned, *close, CALL, OUTPUT]), "  <subagents>\n    - B\n  </subagents>\n"
+                         "</environment_context>")
+        self.assertEqual(subagents([*START, *spawned, *close, *resume, CALL, OUTPUT]),
+                         "  <subagents>\n    - B\n    - A: Ada\n  </subagents>\n</environment_context>")
+        # Mid-turn Codex compacts with the agents as they were before its last response.
+        self.assertEqual(subagents([*START, *spawned, *close]),
+                         "  <subagents>\n    - A: Ada\n    - B\n  </subagents>\n</environment_context>")
+        failed = [close[0], {**close[1], "output": "agent not found"}]
+        self.assertEqual(rendered([*START, *failed, CALL, OUTPUT]), rendered(START))
+        # An environment that went unavailable stays as Codex wrote it.
+        listing = ('<environment_context>\n  <environments>\n    <environment id="local" primary="true">\n'
+                   '      <cwd>/a</cwd>\n    </environment>\n    <environment id="remote" primary="false" status="unavailable" />\n'
+                   '  </environments>\n  <timezone>UTC</timezone>\n</environment_context>')
+        start = [*START[:3], msg("user", AGENTS, listing), *START[4:]]
+        self.assertEqual(rendered([*start, *spawned, CALL, OUTPUT])[1]["content"][1]["text"], listing.replace(
+            "</environment_context>", "  <subagents>\n    - A: Ada\n    - B\n  </subagents>\n</environment_context>"))
 
     def test_app_server_clients_are_detected_by_codex_turn_metadata(self) -> None:
         self.assertTrue(Codex().matches({"originator": "my-ide", "x-codex-turn-metadata": "{}"}))

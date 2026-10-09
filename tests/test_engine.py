@@ -153,6 +153,30 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(exchange.body["input"][-1], trigger)
         self.assertEqual(exchange.keys, [])  # its usage does not anchor the conversation's estimate
 
+    def test_claude_code_compacting_itself_is_recognized_behind_trailing_system_messages(self) -> None:
+        def turn(n: int) -> list[dict[str, Any]]:
+            return [{"role": "assistant", "content": [{"type": "tool_use", "id": f"t{n}", "name": "Bash", "input": {}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{n}", "content": "x" * 800}]}]
+
+        tokens_left = {"role": "system", "content": "<total_tokens>14984149 tokens left</total_tokens>"}
+        history = [{"role": "user", "content": "task"}, *turn(1), *turn(2)]
+        # Claude Code 2.1.280: the prompt joins the last tool result and a system message follows it.
+        for prompt in ("Your task is to create a detailed summary of the conversation so far, paying close attention",
+                       "Your task is to create a detailed summary of this conversation. This summary will be placed",
+                       "Your task is to create a detailed summary of the RECENT portion of the conversation"):
+            last = history[-1]
+            asks = {"role": "user", "content": [*last["content"], {"type": "text", "text": f"CRITICAL: ...\n\n{prompt}"}]}
+            request = {"model": "claude-opus-5-5", "messages": [*history[:-1], asks, tokens_left]}
+            upstream = Upstream()
+            engine = Engine(Compaction(threshold=300, min_gain=0))
+            exchange = engine.prepare(AnthropicMessages(), ClaudeCode(), request, tenant="t", post=upstream)
+            with self.subTest(prompt[:60]):
+                self.assertEqual((exchange.compacted, upstream.requests), (False, []))
+        plain = {"model": "claude-opus-5-5", "messages": [*history, tokens_left]}  # the same size, no prompt
+        engine = Engine(Compaction(threshold=300, min_gain=0))
+        upstream = Upstream((200, {"content": [{"type": "text", "text": "S"}], "stop_reason": "end_turn"}))
+        self.assertTrue(engine.prepare(AnthropicMessages(), ClaudeCode(), plain, tenant="t", post=upstream).compacted)
+
     def test_tenants_do_not_share_state(self) -> None:
         upstream = Upstream()
         request = body(msg("user", "task"), *step(1), *step(2))

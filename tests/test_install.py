@@ -74,7 +74,8 @@ class InstallTests(unittest.TestCase):
                 install.install(name, "http://127.0.0.1:8787", HARNESSES[name].settings())
             codex = tomllib.loads((self.root / "codex/config.toml").read_text())
             self.assertEqual((codex["model_auto_compact_token_limit"], codex["mcp_servers"]), (10**9, {"docs": {"command": "docs"}}))
-            self.assertIn("max_context_size = 1000000000", (self.root / "kimi/config.toml").read_text())
+            kimi = tomllib.loads((self.root / "kimi/config.toml").read_text())["models"]["test"]
+            self.assertEqual((kimi["max_context_size"], kimi["max_output_size"]), (10**9, 200000))  # output as before
             self.assertIn("compression:\n  enabled: false", (self.root / "hermes/config.yaml").read_text())
             self.assertIn("thresholdRatio: 0.7\n    auto: false", (self.root / "dsh/cordis.patch.yml").read_text())
             for name in ("deepseek_harness", "hermes", "kimi_code", "codex"):
