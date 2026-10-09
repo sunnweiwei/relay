@@ -22,7 +22,9 @@ COMMAND = re.compile(
     r"<(command-name|command-message|command-args|local-command-stdout|local-command-stderr|local-command-caveat)>"
     r".*?</\1>", re.S)
 SUMMARY_PREFIX = "This session is being continued from a previous conversation"
-COMPACT_PROMPT = "Your task is to create a detailed summary of the conversation so far"  # `/compact`, auto-compact
+# `/compact` and auto-compact, in every variant: "... of the conversation so far", "... of this
+# conversation" (the earlier part, recent messages kept) and "... of the RECENT portion ...".
+COMPACT_PROMPT = "Your task is to create a detailed summary of"
 
 
 def settings_file() -> Path:
@@ -44,9 +46,11 @@ class ClaudeCode(Harness):
         return super().refine(item)  # context only when nothing but injected blocks remains
 
     def compacting(self, codec: Codec, items: list[WireItem]) -> bool:
-        """`/compact` (and auto-compact) appends its prompt to the last user message."""
+        """`/compact` (and auto-compact) appends its prompt to the last user message, which system
+        messages such as `<total_tokens>` may follow."""
 
-        return bool(items) and COMPACT_PROMPT in codec.classify(items[-1]).text
+        last = next((item for item in map(codec.classify, reversed(items)) if item.kind is not Kind.SYSTEM), None)
+        return last is not None and COMPACT_PROMPT in last.text
 
     def state_key(self, item: Item) -> str | None:
         """System messages that restate the environment, or which MCP servers' instructions apply."""

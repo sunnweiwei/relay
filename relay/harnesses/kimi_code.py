@@ -10,6 +10,7 @@ from ..core.ir import Item
 from ..install import Setting
 from .base import NEVER, Harness
 
+DEFAULT_CONTEXT = 262_144  # Kimi Code's max_context_size where a model names none
 DEFAULTS = {  # by provider type, for providers without an explicit base_url
     "kimi": "https://api.moonshot.ai/v1",
     "openai": "https://api.openai.com/v1",
@@ -38,6 +39,10 @@ class KimiCode(Harness):
             *(Setting(config, ("providers", name, "base_url"), endpoint=DEFAULTS.get(provider.get("type"), ""))
               for name, provider in current.get("providers", {}).items()
               if provider.get("base_url") or provider.get("type") in DEFAULTS),
-            # Kimi Code compacts near a model's max_context_size, which must be positive.
+            # Kimi Code compacts near a model's max_context_size, which must be positive. It also asks
+            # for up to that size less the prompt as output, unless max_output_size caps it: the cap
+            # keeps the output it asked for before (an upstream may reject a billion tokens).
             *(Setting(config, ("models", name, "max_context_size"), NEVER) for name in current.get("models", {})),
+            *(Setting(config, ("models", name, "max_output_size"), model.get("max_context_size", DEFAULT_CONTEXT))
+              for name, model in current.get("models", {}).items() if "max_output_size" not in model),
         ]
