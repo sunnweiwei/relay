@@ -92,7 +92,9 @@ Three layers keep strategies free of harness and protocol details:
   (`identity`, robust to instructions re-rendered in place and resumed histories), the
   harness's current state (`state`: its instructions, environment, modes at their latest
   version), where that state goes after a compaction (`place`), and which requests are the
-  harness compacting itself (`compacting`: they get the stored context but never a new one);
+  harness compacting itself (`compacting`: they get the stored context but never a new one),
+  and, where it uses the protocol its own way, a variant of the codec (`codec`: DeepSeek
+  Harness's user messages, merged on its Messages route, taken apart into items);
 - the **strategy** sees only the conversation (user, assistant, tool items and summaries)
   and decides, on every request, what the model sees. The harness's own items are put back
   into every answer where the harness sent them (after a summary, where the harness puts its
@@ -489,7 +491,7 @@ starts, and `relay set` restarts the service for them.
 | `anthropic_base_url` | `https://api.anthropic.com` | Upstream for the Messages API. |
 | `openai_api_key`, `anthropic_api_key` | unset | Replace the harness's credentials for that upstream. |
 | `harness` | detected | Force a harness profile by name, e.g. `codex`, `hermes`, `generic`. |
-| `event_log` | unset | Append one JSON line per compaction (sizes, timing, the new head). |
+| `event_log` | unset | Append one JSON line per compaction (sizes, timing, the new head, and the usage of the summary requests it made). |
 | `host`, `port` | `127.0.0.1`, `8787` | Server address for `relay serve`. |
 | `cache_max_entries`, `cache_max_bytes`, `cache_ttl_seconds`, `cache_secret` | `4096`, 256 MiB, 6 h, random | Limits of the prefix store. |
 | `cache_path` | `~/.relay/store-<port>.json` | Where the prefix store is kept (one file per Relay process; written in the background, at most once a second, and on shutdown), so a restarted Relay finds its contexts: compactions are not recomputed and CLM edits are not lost (`off`: in memory only). The file holds summaries and strategy state (conversation text), readable by its owner only; without `cache_secret`, a secret is generated once and kept beside it. |

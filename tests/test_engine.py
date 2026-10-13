@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 import unittest.mock
+from pathlib import Path
 from typing import Any
 
 from relay.core.engine import Engine
@@ -87,6 +89,14 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(upstream.requests), 1)  # no new summary
         self.assertEqual(second.body["input"][:3], first.body["input"])
         self.assertEqual(second.body["input"][3:], step(3, size=10))
+
+    def test_the_usage_of_relays_own_summary_requests_is_logged(self) -> None:
+        usage = {"input_tokens": 1200, "input_tokens_details": {"cached_tokens": 1000}, "output_tokens": 80}
+        log = Path(tempfile.mkdtemp()) / "events.jsonl"
+        self.engine = Engine(Compaction(threshold=300, min_gain=0), event_log=str(log))
+        status, payload = SUMMARY_OK
+        self.prepare(body(msg("user", "task"), *step(1), *step(2)), Upstream((status, {**payload, "usage": usage})))
+        self.assertEqual(json.loads(log.read_text().splitlines()[-1])["summary_usage"], [usage])
 
     def test_reported_usage_anchors_the_next_estimate(self) -> None:
         upstream = Upstream()
