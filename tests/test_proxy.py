@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
+import tempfile
 import unittest
 import unittest.mock
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -124,6 +127,18 @@ class ProxyTests(unittest.TestCase):
             self.assertEqual(httpx.get(f"{url}/v1/models").status_code, 404)
             httpx.get(f"{url}/api/hello")
         self.assertEqual([r["path"] for r in fake.requests], ["/v1/models", "/api/hello"])
+
+    def test_the_trace_counts_items_as_the_harness_codec_reads_them(self) -> None:
+        body = messages_body(1)
+        body["messages"][-1]["content"].append({"type": "text", "text": "Current runtime context. cwd=/w"})
+        fake = FakeUpstream()
+        with tempfile.TemporaryDirectory() as tmp, serve(fake.app) as upstream:
+            trace = Path(tmp) / "trace.jsonl"
+            config = ProxyConfig(upstreams=local_upstreams(upstream), harness="deepseek_harness", trace=str(trace))
+            with serve(create_app(Engine(NEVER, PrefixStore()), config)) as url:
+                httpx.post(f"{url}/v1/messages", json=body, headers={"x-api-key": "tenant"})
+            record = json.loads(trace.read_text().splitlines()[0])
+        self.assertEqual((record["items"], record["sent"]), (4, 4))  # its tool results and its snapshot apart
 
     def test_configured_api_keys_replace_client_credentials(self) -> None:
         fake = FakeUpstream()
