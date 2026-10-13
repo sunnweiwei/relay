@@ -144,10 +144,12 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
             trace(path=request.url.path, summary_request=payload, summary_status=response.status_code, answer=result)
             return response.status_code, result
 
+        harness = detect(request.headers, config.harness, request.url.path)
+
         def prepare(force: bool = False) -> Exchange:
             return engine.prepare(
                 codec,
-                detect(request.headers, config.harness, request.url.path),
+                harness,
                 body,
                 tenant=next((request.headers[h] for h in TENANT_HEADERS if h in request.headers), ""),
                 post=post,
@@ -160,8 +162,9 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
             log.exception("could not prepare the request; forwarding it unchanged")
             return await _passthrough(client, "POST", url, headers, content)
 
+        items = harness.codec(codec).items  # as the engine counts them
         trace(path=request.url.path, user_agent=request.headers.get("user-agent"),
-              items=len(codec.items(body)), sent=len(codec.items(exchange.body)),
+              items=len(items(body)), sent=len(items(exchange.body)),
               rewritten=exchange.body is not body, compacted=exchange.compacted, body=body,
               forwarded=exchange.body if exchange.body is not body else None,
               cache={"depth": exchange.depth, "covered": exchange.state.get("covered", 0), "diverged": exchange.diverged})
