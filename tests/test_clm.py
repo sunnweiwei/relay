@@ -177,7 +177,7 @@ class ClmTests(unittest.TestCase):
     def test_a_steering_policy_joins_the_guidance_and_nudges_can_be_off(self) -> None:
         policy = "Mask each tool result once you have used it."
         self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory),
-                                                  steering=policy, nudges=False))
+                                                  steering=policy, nudges=False, guard=False))
         history = [msg("user", "read the files")]
         for i in range(1, 45):
             history += call(i)
@@ -195,6 +195,35 @@ class ClmTests(unittest.TestCase):
             found += [m.group(1) or "urgent" for m in re.finditer(r"at ~(\d+%) of your|\(URGENT\)", note)]
         self.assertEqual(found[:3], ["25%", "50%", "75%"])
         self.assertTrue(len(found) > 4 and set(found[3:]) == {"urgent"})
+
+    def test_past_the_limit_the_oldest_new_tool_results_are_withheld_to_files(self) -> None:
+        self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory)))
+        history = [msg("user", "read the files")]
+        for i in range(1, 45):
+            history += call(i)
+            sent = self.send(*history)
+        items, readout = sent.body["input"], sent.body["input"][-1]["content"][0]["text"]
+        self.assertLessEqual(int(re.search(r"\[context: ~(\d+)/3800 tokens\]$", readout).group(1)), 3800)
+        outputs = [i["output"] for i in items if i.get("type") == "function_call_output"]
+        self.assertTrue(outputs[0].startswith("[context manager: overflow guard] tool result"))
+        self.assertEqual(outputs[-1], call(44)[1]["output"])  # the newest stays
+        file = Path(re.search(r"Full text: (\S+)", outputs[0]).group(1))
+        self.assertEqual(file.read_text(), call(1)[1]["output"])
+        # Withheld for good: the next request carries the same notes, before what is new.
+        later = self.send(*history, *call(45)).body["input"]
+        self.assertEqual([i for i in later if i.get("type") == "function_call_output"][0]["output"], outputs[0])
+
+    def test_what_an_edit_kept_is_never_withheld(self) -> None:
+        self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory)))
+        history = [msg("user", "read the files"), *call(1), *call(2)]
+        self.send(*history)
+        self.edit(lambda s: re.sub(r"output 2 x+", "output 2: SHORT", s))
+        for i in range(3, 40):
+            history += call(i)
+            sent = self.send(*history)
+        outputs = [i["output"] for i in sent.body["input"] if i.get("type") == "function_call_output"]
+        self.assertEqual(outputs[:2], [call(1)[1]["output"], "output 2: SHORT"])
+        self.assertTrue(outputs[2].startswith("[context manager: overflow guard]"))
 
 
 if __name__ == "__main__":

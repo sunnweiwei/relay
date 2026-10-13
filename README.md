@@ -281,7 +281,12 @@ else changes (the codec knows how its protocol pairs calls: removing one of seve
 leaves the others calls). A file without block headers replaces everything after the task with one
 note. The edited context is stored like any other, so it holds for every later request of the
 conversation; the harness's own context (instructions, environment, reminders) stays out of the
-file and where the harness sent it, which also keeps the system prompt's cache. Two changes adapt the paper's loop, which ran until the task was submitted, to
+file and where the harness sent it, which also keeps the system prompt's cache. The budget holds as
+pi-clm holds it, with its overflow guard (`clm_guard`): a request past the limit has the oldest tool
+results since the model's last accepted edit replaced, one by one, by a note naming a file (in
+`withheld/` beside the context file) with the full text, until it fits, and a notice says so; what
+the model's edits kept is never withheld, and nothing is re-run. (The paper's harness enforces the
+budget too, by rolling back the newest turns and demanding a compaction.) Two changes adapt the paper's loop, which ran until the task was submitted, to
 chat harnesses, which end the turn on the first reply without a tool call: the instructions say
 that receipts, readouts and nudges come from the context manager and that the user's request
 goes on after them, and the urgent nudge says "compact … before anything else, … then continue
@@ -475,6 +480,7 @@ starts, and `relay set` restarts the service for them.
 | `clm_dir` | `/tmp/.live_ctx` | CLM: where the context files live; the harness's tools must be able to edit files there (inside the workspace for a sandboxed harness; Relay writes a `.gitignore` there). |
 | `clm_steering` | unset | CLM: a file holding a context-management policy in words, added to the model's guidance (see `tests/docker/steering/`). |
 | `clm_nudges` | `on` | CLM: `off` drops the budget nudges (the size readout stays), as in the paper's steering runs. |
+| `clm_guard` | `on` | CLM: pi-clm's overflow guard. A request past the budget less the reserve has the oldest tool results since the model's last accepted edit replaced, one by one, by a note naming a file with the full text, until it fits. `off` leaves the budget to the model, as the size readout and nudges ask. |
 | `compact_min_gain` | `0.1` | Skip compactions that free less than this share of the threshold (or growth). |
 | `openai_base_url` | `https://api.openai.com/v1` | Upstream for the Responses API. |
 | `anthropic_base_url` | `https://api.anthropic.com` | Upstream for the Messages API. |

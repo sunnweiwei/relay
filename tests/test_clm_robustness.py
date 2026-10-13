@@ -139,8 +139,7 @@ class ClmRobustnessTests(unittest.TestCase):
         told = receipt(sent) is not None and "NOT applied" in receipt(sent)
         self.assertTrue(kept or told, "after a restart the edits are silently gone")
 
-    # P4: a request the upstream rejected as too long is retried smaller.
-    @unittest.expectedFailure
+    # P4: a request the upstream rejected as too long is retried smaller (the overflow guard).
     def test_p4_a_forced_retry_fits_the_window(self) -> None:
         engine = self.engine(budget=None, window=8_000)
         history = [msg("user", "task"), *[item for i in range(1, 30) for item in call(i, 2_000)]]

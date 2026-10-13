@@ -24,6 +24,12 @@ ran until the task was submitted. A steering document (the `clm_steering` settin
 instruction) adds a policy of the user's to the guidance; the nudges can be turned off, as in the
 paper's steering runs (`clm_nudges` off). Requests that offer no tools
 (a title, a quota check) are left alone.
+
+The budget holds as pi-clm holds it (its overflow guard, `clm_guard`, on by default): a request past
+the limit has the oldest tool results since the last accepted edit, one by one, replaced by a note
+naming a file (in `withheld/` beside the context file) with the full text, until it fits, and is told
+so. The newest results go last: the result the model just asked for is often a re-read of one
+withheld before. What the model's edits kept is never withheld; nothing is re-run.
 """
 
 from __future__ import annotations
@@ -93,6 +99,7 @@ NUDGES = {
           "touch are usually followed by re-doing the deleted work. " + NOTE_CONTRACT,
 }
 URGENT = 0.9  # of the limit: nudged on every request past it
+WITHHELD = "[context manager: overflow guard]"
 STEERING = "## Your context-management policy\n\nFollow this policy where it differs from the advice above:"
 META = "[[LIVE_CONTEXT version=1 revision={revision} document={document}]]"
 COMMENT = "# Edit block bodies, delete blocks or add new ones. Keep the first line and the header of every block you keep."
@@ -111,6 +118,7 @@ class ContextLanguageModel:
     directory: str = "/tmp/.live_ctx"  # where the files live: the model's tools must reach it
     steering: str = ""  # a context-management policy in words, added to the guidance (the paper's s)
     nudges: bool = True  # the budget nudges; the size readout stays
+    guard: bool = True  # pi-clm's overflow guard: past the limit, the oldest new tool results are withheld
     name: str = "clm"
 
     @classmethod
@@ -119,11 +127,13 @@ class ContextLanguageModel:
         return cls(budget=int(budget) if budget else None, reserve=int(settings.value("clm_reserve", "2048")),
                    directory=settings.value("clm_dir", "/tmp/.live_ctx"),
                    steering=Path(steering).read_text(encoding="utf-8").strip() if steering else "",
-                   nudges=settings.value("clm_nudges", "on").lower() not in ("0", "off", "false"))
+                   nudges=settings.value("clm_nudges", "on").lower() not in ("0", "off", "false"),
+                   guard=settings.value("clm_guard", "on").lower() not in ("0", "off", "false"))
 
     def fingerprint(self) -> dict[str, Any]:
         return {"name": self.name, "budget": self.budget, "reserve": self.reserve, "directory": self.directory,
-                "guidance": GUIDANCE, "nudges": NUDGES if self.nudges else None, "steering": self.steering}
+                "guidance": GUIDANCE, "nudges": NUDGES if self.nudges else None, "steering": self.steering,
+                "guard": self.guard}
 
     def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
         if not request.tools:
@@ -137,11 +147,17 @@ class ContextLanguageModel:
         # The system prompt is not in the request; the original task is protected as well.
         task = next((n + 1 for n, item in enumerate(request.current) if item.kind is Kind.USER), 0)
         items, tokens, notes = list(request.current), request.tokens, []
+        anchor = state.get("anchor", task)  # where what the model's last accepted edit kept ends
         if _owner(path) not in (None, state.get("ids")):
             path = path.with_name(f"{path.stem.split('~')[0]}~{_digest(''.join(_ids(items[task:])))[:8]}.md")
         elif state and path.exists() and _digest(edited := path.read_text(encoding="utf-8")) != state["digest"]:
             applied, tokens, note = _apply(edited, request, task, state, limit)
             items, notes = applied or items, [note]
+            if applied:  # (the items after the file it was written from follow the edited ones)
+                anchor = len(applied) - (len(request.current) - task - len(state["ids"]))
+        if self.guard and limit and tokens > limit:
+            items, tokens, notice = _guard(items, tokens, limit, anchor, path)
+            notes += [notice] if notice else []
         revision = state.get("revision", 0) + (items != list(request.current))
         text = _render(items[task:], _document(request.conversation, revision), revision)
         _write(path, text)
@@ -158,7 +174,7 @@ class ContextLanguageModel:
         guidance = Item(Kind.SYSTEM, f"{guidance}\n\n{STEERING}\n\n{self.steering}" if self.steering else guidance)
         return Context((guidance, *items),
                        {"revision": revision, "digest": _digest(text), "ids": _ids(items[task:]), "nudged": nudged,
-                        "file": path.name},
+                        "file": path.name, "anchor": anchor},
                        tuple(notes))
 
     def _nudge(self, tokens: int, budget: int, limit: int, nudged: list[float]) -> tuple[list[float], str | None]:
@@ -245,6 +261,35 @@ def _apply(edited: str, request: Request, task: int, state: dict[str, Any],
     else:
         receipt = f"[context file: edit applied — context ~{before}->{after} tokens, {len(items) - len(current) + end} turns]"
     return items, after, receipt
+
+
+def _guard(items: list[Item], tokens: int, limit: int, anchor: int, path: Path) -> tuple[list[Item], int, str | None]:
+    """pi-clm's overflow guard: tool results from `anchor` on, oldest first, give way to a note
+    naming a file with their full text until the request fits; the notice tells the model, in
+    pi-clm's words."""
+
+    items, withheld = list(items), 0
+    for n in range(anchor, len(items)):
+        if tokens <= limit:
+            break
+        item = items[n]
+        if item.kind is not Kind.TOOL_RESULT or item.text.startswith(WITHHELD) or not item.text.strip():
+            continue
+        size, file = item_tokens(item), path.parent / "withheld" / f"{path.stem}.{_digest(item.text)[:12]}.txt"
+        _write(file, item.text)
+        items[n] = replace(item, text=f"{WITHHELD} tool result (~{size:,} tokens) withheld over budget. Full text: {file}",
+                           media=())
+        tokens += item_tokens(items[n]) - size
+        withheld += 1
+    if not withheld:
+        return items, tokens, None
+    still = "" if tokens <= limit else " and still over the limit; edit your context now"
+    return items, tokens, (
+        f"[CLM BUDGET] Overflow guard: the request would have exceeded the limit of {limit:,} tokens, so {withheld} tool "
+        f"result{'s were' if withheld > 1 else ' was'} withheld from your context and replaced by notes with file paths. "
+        f"Estimated request is now {tokens:,} tokens{still}. Nothing was re-run; the full outputs are in the files named "
+        "in the notes. Free space in your context (see Managing your context) and re-read only what you need, e.g. "
+        "with offset/limit.")
 
 
 def _render(items: list[Item], document: str, revision: int) -> str:
