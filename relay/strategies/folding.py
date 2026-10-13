@@ -10,17 +10,21 @@ task, the returned message is: ...". The harness's own tools stand in for FoldAg
 opens and to the returned message when it folds. Everything before the branch call stays as it was,
 so the prompt cache holds through it. A branch cannot branch (FoldAgent's rule); a call to do so is
 answered by its message to return first. The conversation itself says which branches are open or
-done, so the strategy keeps no state.
+done, so the strategy keeps no state. Fixed-threshold compaction is the fallback, as in AutoCompact:
+when the context as folded still reaches the compaction threshold (the agent did not branch, or a
+branch grew past it), the conversation is compacted as `compaction` compacts it.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..core.ir import Context, Item, Kind, Request
+from ..core.tokens import item_tokens
 from .base import Summarizer
+from .compaction import Compaction
 from .conversation import signal
 
 GUIDANCE = """## Branches (context folding)
@@ -57,14 +61,15 @@ SIGNAL = re.compile(r"\[(branch|return)\][ \t]*([^\n]*)")  # an echoed signal, t
 
 @dataclass(frozen=True)
 class ContextFolding:
+    fallback: Compaction = field(default_factory=Compaction)  # the fixed-threshold limit, if folding does not hold it
     name: str = "folding"
 
     @classmethod
     def from_settings(cls) -> ContextFolding:
-        return cls()
+        return cls(Compaction.from_settings())
 
     def fingerprint(self) -> dict[str, Any]:
-        return {"name": self.name, "guidance": GUIDANCE, "branch": BRANCH}
+        return {"name": self.name, "fallback": self.fallback.fingerprint(), "guidance": GUIDANCE, "branch": BRANCH}
 
     def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
         if not request.tools:
@@ -97,7 +102,11 @@ class ContextFolding:
             changed = True
             n += 2
         guidance = Item(Kind.SYSTEM, GUIDANCE)
-        return Context((guidance, *(items if changed else request.current)))
+        folded = items if changed else list(request.current)
+        tokens = request.tokens - sum(map(item_tokens, request.current)) + sum(map(item_tokens, folded))
+        if (context := self.fallback.plan(replace(request, tokens=tokens), summarizer)) is not None:
+            return Context((guidance, *context.items))  # (the summary covers the branches' steps too)
+        return Context((guidance, *folded))
 
 
 def _signal(call: Item, result: Item) -> tuple[str, str] | None:

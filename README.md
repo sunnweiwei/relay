@@ -347,6 +347,9 @@ FoldAgent's branch message ("ROLE CHANGE: `MODE: BRANCH`" and the task) when the
 steps and the return call fold away. Nothing before the branch call changes, so the upstream's
 prompt cache serves it on the request after the fold. A branch cannot open another (FoldAgent's
 rule). The conversation itself says which branches are open or done; the strategy keeps no state.
+Fixed-threshold compaction is the fallback, as in AutoCompact: when the context as folded still
+reaches the compaction threshold (the agent did not branch, or a branch grew past it), the
+conversation is compacted as `compaction` compacts it, with its settings.
 
 Checked in Docker with `check.py --strategy folding` (read file_1, read file_2 and file_3 in a
 branch and return their codes, read file_4; then say, without reading, whether file_2's text is
