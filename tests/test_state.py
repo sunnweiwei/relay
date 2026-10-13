@@ -115,9 +115,82 @@ class StateTests(unittest.TestCase):
         state = DeepSeekHarness().state(CODEC, items)
         self.assertEqual([i.ref for i in state.items], [0, 2, 6, 7])  # original instructions, newest snapshot, update
 
-    def test_deepseek_sub_agent_reports_are_context(self) -> None:
+    def test_deepseek_keeps_the_end_of_its_runtime_snapshots(self) -> None:
+        items = [msg("developer", "rules"), msg("user", "task"),
+                 msg("user", "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nplan mode"),
+                 *step(1), msg("user", "Current runtime context: none. Earlier runtime-context snapshots no longer apply."),
+                 *step(2)]
+        state = DeepSeekHarness().state(CODEC, items)
+        self.assertEqual([(i.ref, i.kind) for i in state.items], [(0, Kind.SYSTEM), (5, Kind.CONTEXT)])
+
+    def test_deepseek_keeps_what_became_of_each_instruction_file_in_the_order_it_was_told(self) -> None:
+        reminder = lambda text: msg("user", f"<system-reminder>\n{text}\n</system-reminder>")
+        items = [msg("developer", "rules"), msg("user", "task"), reminder("Instructions from: AGENTS.md\n\nALPHA"), *step(1),
+                 reminder("Updated instructions from: AGENTS.md\n\nBETA"),
+                 reminder("Additional instructions from: my docs/AGENTS.md\n\nuse tabs"), *step(2),
+                 reminder("Updated instructions from: AGENTS.md\n\nGAMMA\n\nInstructions removed: my docs/AGENTS.md\n\n"
+                          "The previously loaded instructions from this file no longer apply."),
+                 reminder("Updated instructions from: AGENTS.md\n\nDELTA"), *step(3)]
+        state = DeepSeekHarness().state(CODEC, items)
+        # The baseline; the file that came into scope; the message that removed it (and held an
+        # update since replaced); the newest update, last. Not the first update (BETA).
+        self.assertEqual([i.ref for i in state.items], [0, 2, 6, 9, 10])
+
+    def test_deepseek_keeps_the_newest_baseline_that_replaced_its_instructions(self) -> None:
+        rebased = "This complete workspace instruction baseline replaces all earlier workspace instruction baselines."
+        reminder = lambda text: msg("user", f"<system-reminder>\n{text}\n</system-reminder>")
+        items = [msg("developer", "rules"), msg("user", "task"), reminder("Instructions from: AGENTS.md\n\nALPHA"), *step(1),
+                 reminder(f"{rebased} The following workspace instructions may be relevant.\n\nInstructions from: AGENTS.md\n\nBETA"),
+                 *step(2), reminder(f"{rebased} No workspace instructions are currently active."), *step(3)]
+        state = DeepSeekHarness().state(CODEC, items)
+        self.assertEqual([i.ref for i in state.items], [0, 2, 8])
+
+    def test_deepseek_s_own_route_merges_messages_and_they_are_items_again(self) -> None:
+        text = lambda t: {"type": "text", "text": t}
+        snapshot = lambda v: text(f"Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\ncwd {v}")
+        reminder = lambda t: text(f"<system-reminder>\n{t}\n</system-reminder>")
+
+        def tool(i: int, *more: dict[str, Any]) -> list[dict[str, Any]]:
+            return [{"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "bash", "input": {}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{i}", "content": "x" * 800}, *more]}]
+
+        history = [{"role": "user", "content": [text("task"), reminder("Instructions from: AGENTS.md\n\nALPHA"), snapshot("/a")]},
+                   *tool(1, snapshot("/b"), reminder("Updated instructions from: AGENTS.md\n\nBETA")),
+                   *tool(2, text("Agent c1 sent a message: "), text("the build is green")),
+                   {"role": "assistant", "content": [text("done")]},
+                   {"role": "user", "content": [snapshot("/c"), text("next")]}]
+        harness, wire = DeepSeekHarness(), AnthropicMessages()
+        codec = harness.codec(wire)
+        self.assertIs(harness.codec(CODEC), CODEC)  # its other routes send them apart
+        kinds = [harness.refine(codec.classify(item)).kind for item in codec.items({"messages": history})]
+        self.assertEqual(kinds, [Kind.USER, Kind.CONTEXT, Kind.CONTEXT,  # the task; its instructions and snapshot
+                                 Kind.TOOL_CALL, Kind.TOOL_RESULT, Kind.CONTEXT, Kind.CONTEXT,
+                                 Kind.TOOL_CALL, Kind.TOOL_RESULT, Kind.CONTEXT, Kind.USER,  # (what the sub-agent wrote)
+                                 Kind.ASSISTANT, Kind.CONTEXT, Kind.USER])  # a snapshot, then what the user typed
+
+        summary = (200, {"content": [text("S")], "stop_reason": "end_turn"})
+        body = {"model": "deepseek-flash", "max_tokens": 100, "tools": [{"name": "bash"}], "messages": history[:3]}
+        sent = Engine(Compaction(threshold=50, min_gain=0)).prepare(wire, harness, body, tenant="t", post=lambda r: summary)
+        message, = sent.body["messages"]  # one user message, as DeepSeek Harness sends them
+        told = [block["text"] for block in message["content"]]
+        self.assertEqual(told[:4], [reminder("Instructions from: AGENTS.md\n\nALPHA")["text"], snapshot("/b")["text"],
+                                    reminder("Updated instructions from: AGENTS.md\n\nBETA")["text"], "task"])
+        self.assertEqual(len(told), 5)  # ... and the summary: the first snapshot and the tool result are gone
+
+    def test_deepseek_notices_are_context(self) -> None:
         for text in ("Agent f1b5 sent a message: The CODE is ember.",
-                     "Background subagent f1b5 finished and will do no further work unless you send it more."):
+                     "Background subagent f1b5 finished and will do no further work unless you send it more.",
+                     "Background subagent f1b5 was stopped before it finished.",
+                     "Background subagent f1b5 ran out of room before it finished.",
+                     "Background subagent f1b5 declined the task.",
+                     "Background subagent f1b5 failed before it finished.",
+                     "Background subagent f1b5 ended abnormally (timeout) before it finished.",
+                     "Its closing message:", "It left no closing message.",
+                     "You are repeating the exact same tool call with identical arguments. Carefully analyze the result.",
+                     "Repeated tool call detected:\n- tool: bash\n- consecutive_calls: 5",
+                     "background job 3 (bash: npm test) finished exit 0. Read its output with job_output.",
+                     "The user switched this session to plan mode.",
+                     "The user switched this session back to the default mode."):
             self.assertEqual(DeepSeekHarness().refine(CODEC.classify(msg("user", text))).kind, Kind.CONTEXT)
 
     def test_pi_keeps_the_system_prompt_it_appended_on_resume(self) -> None:

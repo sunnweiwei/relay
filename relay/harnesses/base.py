@@ -46,6 +46,12 @@ class Harness:
     def matches(self, headers: Mapping[str, str]) -> bool:
         return False
 
+    def codec(self, codec: Codec) -> Codec:
+        """The codec for this harness's requests: the protocol's own, or a variant of it where the
+        harness uses the protocol in a way that needs one."""
+
+        return codec
+
     def refine(self, item: Item) -> Item:
         """Reclassify user-role items the harness wrote itself (context, summaries)."""
 

@@ -88,6 +88,7 @@ class Engine:
         post: Post,
         force: bool = False,
     ) -> Exchange:
+        codec = harness.codec(codec)
         raw = codec.items(body)
         # Trailing items the harness regenerates on every request (live status, say) are
         # forwarded as they are, but kept out of prefix matching and the strategy's view.

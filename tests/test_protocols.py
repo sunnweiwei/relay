@@ -9,7 +9,7 @@ from pathlib import Path
 from relay.core.ir import Item, Kind, Media
 from relay.core.tokens import bytes_per_token, item_tokens
 from relay.harnesses import ClaudeCode, Codex, detect
-from relay.protocols import AnthropicMessages, Gemini, OpenAIChat, OpenAIResponses
+from relay.protocols import AnthropicMessages, Gemini, MessageParts, OpenAIChat, OpenAIResponses
 
 TRACES = Path(__file__).parent / "traces"
 
@@ -130,6 +130,35 @@ class OpenAIResponsesTests(unittest.TestCase):
         self.assertNotEqual(self.codec.canonical(sent), self.codec.canonical({**resent, "arguments": '{"path": "b.txt"}'}))
         self.assertNotEqual(self.codec.canonical({"type": "item_reference", "id": "a"}),
                             self.codec.canonical({"type": "item_reference", "id": "b"}))
+
+
+class MessagePartsTests(unittest.TestCase):
+    """A harness's merged user messages, taken apart and put together."""
+
+    codec = MessageParts()
+    text = staticmethod(lambda text: {"type": "text", "text": text})
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="}}
+    results = [{"type": "tool_result", "tool_use_id": f"t{n}", "content": "x"} for n in (1, 2)]
+    call = {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{n}", "name": "f", "input": {}} for n in (1, 2)]}
+
+    def test_a_user_message_is_its_tool_results_then_each_text_block_with_its_images(self) -> None:
+        mixed = {"role": "user", "content": [*self.results, self.text("context"), self.text("look"), self.image]}
+        body = {"model": "m", "messages": [{"role": "user", "content": "task"}, self.call, mixed]}
+        items = self.codec.items(body)
+        self.assertEqual([i["content"] for i in items[2:]],
+                         [self.results, [self.text("context")], [self.text("look"), self.image]])
+        self.assertEqual([self.codec.classify(i).kind for i in items[2:]], [Kind.TOOL_RESULT, Kind.USER, Kind.USER])
+        self.assertEqual(self.codec.orphans(items), set())  # the results still answer the message before them
+        self.assertEqual(self.codec.with_items(body, items), body)
+        whole = {"role": "user", "content": [self.image, self.text("look")]}  # one text block: one part
+        self.assertEqual(self.codec.items({"messages": [whole, self.call]}), [whole, self.call])
+
+    def test_consecutive_user_messages_go_out_as_one(self) -> None:
+        kept, summary = {"role": "user", "content": [self.text("task")]}, self.codec.user_message("SUMMARY")
+        merged = {"role": "user", "content": [self.text("task"), self.text("SUMMARY")]}
+        self.assertEqual(self.codec.with_items({"model": "m"}, [kept, summary, self.call])["messages"], [merged, self.call])
+        request = self.codec.summary_request({"model": "m", "messages": []}, [kept], "SUMMARIZE")
+        self.assertEqual(request["messages"], [{"role": "user", "content": [self.text("task"), self.text("SUMMARIZE")]}])
 
 
 class AnthropicMessagesTests(unittest.TestCase):

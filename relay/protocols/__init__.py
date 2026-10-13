@@ -1,4 +1,4 @@
-from .anthropic_messages import AnthropicMessages
+from .anthropic_messages import AnthropicMessages, MessageParts
 from .base import Codec
 from .gemini import Gemini
 from .openai_chat import OpenAIChat
@@ -13,4 +13,4 @@ def codec_for(path: str) -> Codec | None:
     return next((codec for codec in CODECS if path.endswith(codec.paths)), None)
 
 
-__all__ = ["CODECS", "AnthropicMessages", "Codec", "Gemini", "OpenAIChat", "OpenAIResponses", "codec_for"]
+__all__ = ["CODECS", "AnthropicMessages", "Codec", "Gemini", "MessageParts", "OpenAIChat", "OpenAIResponses", "codec_for"]

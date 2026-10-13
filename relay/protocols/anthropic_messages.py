@@ -203,6 +203,55 @@ class AnthropicMessages:
         return status in {400, 413} and any(p in message for p in OVERFLOW_PHRASES)
 
 
+class MessageParts(AnthropicMessages):
+    """The Messages API of a harness that sends consecutive user messages as one (its own context,
+    what the user typed and the results of the model's tool calls share a message): each part
+    is an item, itself a user message, and consecutive user messages go out as one."""
+
+    def items(self, body: Body) -> list[WireItem]:
+        return [part for message in super().items(body) for part in _split(message)]
+
+    def with_items(self, body: Body, items: list[WireItem]) -> Body:
+        return super().with_items(body, _join(items))
+
+    def summary_request(self, body: Body, items: list[WireItem], prompt: str) -> Body:
+        request = super().summary_request(body, items, prompt)
+        return {**request, "messages": _join(request["messages"])}
+
+    def request(self, body: Body, system: str, items: list[WireItem]) -> Body:
+        request = super().request(body, system, items)
+        return {**request, "messages": _join(request["messages"])}
+
+
+def _split(message: WireItem) -> list[WireItem]:
+    """A user message as its parts: the tool results together, then every text block with the
+    blocks after it (its images)."""
+
+    content = message.get("content")
+    if message.get("role") != "user" or not isinstance(content, list):
+        return [message]
+    parts: list[list[dict[str, Any]]] = []
+    for block in content:
+        result = block.get("type") == "tool_result"
+        held = {b.get("type") for b in parts[-1]} if parts else set()
+        if not parts or result != ("tool_result" in held) or (block.get("type") == "text" and "text" in held):
+            parts.append([])
+        parts[-1].append(block)
+    return [{**message, "content": part} for part in parts] if len(parts) > 1 else [message]
+
+
+def _join(items: list[WireItem]) -> list[WireItem]:
+    """Consecutive user messages as one, their blocks in order."""
+
+    messages: list[WireItem] = []
+    for item in items:
+        if messages and messages[-1].get("role") == "user" == item.get("role"):
+            messages[-1] = {**messages[-1], "content": [*_blocks(messages[-1].get("content")), *_blocks(item.get("content"))]}
+        else:
+            messages.append(item)
+    return messages
+
+
 def _blocks(content: Any) -> list[dict[str, Any]]:
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
