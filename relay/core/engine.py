@@ -188,6 +188,7 @@ class Engine:
                                 "items_after": len(answer),
                                 "seconds": round(time.monotonic() - started, 3),
                                 "summary_requests": summarizer.requests,
+                                "summary_usage": summarizer.usage,
                             },
                             stored,
                         )
@@ -382,7 +383,7 @@ class _Summarizer:
         # `window`: in the per-item estimates' terms.
         self.codec, self.body, self.history, self.keep, self.post = codec, body, history, keep, post
         self.budget = int(window * SUMMARY_SHARE) if window else None
-        self.per_token, self.requests = per_token, 0
+        self.per_token, self.requests, self.usage = per_token, 0, []  # (each request's usage, as the upstream reported it)
 
     def summarize(self, cut: int, prompt: str) -> str:
         items = self.history(cut)
@@ -423,6 +424,8 @@ class _Summarizer:
         while True:
             self.requests += 1
             status, payload = self.post(request)
+            if isinstance(payload, dict) and (usage := payload.get("usage") or payload.get("usageMetadata")):
+                self.usage.append(usage)
             answered = isinstance(payload, dict) and self.codec.finished(payload) and self.codec.output_text(payload)
             incomplete = status < 300 and not answered
             if not (incomplete or status in TRANSIENT) or attempt == RETRIES:
