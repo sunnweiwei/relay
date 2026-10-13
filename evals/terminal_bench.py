@@ -15,7 +15,9 @@ where the task containers reach it. CLM's context files live in a host directory
 same path in every task container. Per arm, OUT/<arm> holds Harbor's job and Relay's settings,
 events and log.
 
-The report reads every trial's result and Codex's own session log: the reward, the time it took,
+The report reads every trial's result and Codex's own session log: the reward, the tests passed
+(partial credit: the verifier's own test report, `ctrf.json`, or its per-test lines),
+the time it took,
 its model requests, the largest context the model saw (and how many requests saw more than the
 window), the times the context shrank by a third or more (a compaction, a CLM edit, a fold), and
 the compactions Codex recorded itself.
@@ -26,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -93,6 +96,27 @@ def harbor(arm: str, out: Path, dataset: Path, tasks: list[str], auth: Path, win
     return subprocess.Popen(command, stdout=log, stderr=log, env=env)
 
 
+def tests(verifier: Path) -> tuple[int, int] | None:
+    """Partial credit, as the verifier reported it: its own overall score (`Overall score: N/M`),
+    else the tests passed and run, from its CTRF report or its output's per-test lines (Playwright's
+    ✓/✘, `[PASS]`/`[FAIL]`) or pytest's summary."""
+
+    output = (verifier / "test-stdout.txt").read_text(errors="replace") if (verifier / "test-stdout.txt").exists() else ""
+    if score := re.search(r"Overall score: (\d+)/(\d+)", output):
+        return int(score.group(1)), int(score.group(2))
+    if (report := verifier / "ctrf.json").exists():
+        summary = json.loads(report.read_text())["results"]["summary"]
+        return summary["passed"], summary["tests"]
+    for passed, failed in ((r"^\s*✓\s+\d+ ", r"^\s*[✘×]\s+\d+ "), (r"^\[PASS\] ", r"^\[FAIL\] ")):
+        good, bad = len(re.findall(passed, output, re.M)), len(re.findall(failed, output, re.M))
+        if good + bad:
+            return good, good + bad
+    if counts := re.findall(r"(\d+) (passed|failed)", output.split("\n=")[-1] if output else ""):
+        found = {kind: int(n) for n, kind in counts}
+        return found.get("passed", 0), found.get("passed", 0) + found.get("failed", 0)
+    return None
+
+
 def trial(path: Path, window: int) -> dict:
     result = json.loads((path / "result.json").read_text())
     reward = ((result.get("verifier_result") or {}).get("rewards") or {}).get("reward")
@@ -107,7 +131,8 @@ def trial(path: Path, window: int) -> dict:
     start, end = (result.get(k) for k in ("started_at", "finished_at"))
     minutes = (_time(end) - _time(start)) / 60 if start and end else None
     error = (result.get("exception_info") or {}).get("exception_type")
-    return {"task": path.name.split("__")[0], "reward": reward, "minutes": minutes, "requests": len(sizes),
+    return {"task": path.name.split("__")[0], "reward": reward, "tests": tests(path / "verifier"),
+            "minutes": minutes, "requests": len(sizes),
             "max": max(sizes, default=0), "over": sum(s > window for s in sizes),
             "shrank": sum(b < 2 / 3 * a for a, b in zip(sizes, sizes[1:])), "codex_compacted": compacted,
             "error": error}
@@ -126,7 +151,8 @@ def cell(r: dict | None) -> str:
     notes += [f"shrank {r['shrank']}"]
     notes += [f"codex compacted {r['codex_compacted']}"] if r["codex_compacted"] else []
     notes += [r["error"]] if r["error"] else []
-    return f"{r['reward']} ({', '.join(notes)})"
+    passed = f" [{r['tests'][0]}/{r['tests'][1]}]" if r["tests"] else ""
+    return f"{r['reward']}{passed} ({', '.join(notes)})"
 
 
 def report(out: Path, window: int) -> None:
@@ -141,6 +167,9 @@ def report(out: Path, window: int) -> None:
             cells.append(cell(r))
         print(f"| {task} | " + " | ".join(cells) + " |")
     print("| **score** | " + " | ".join(f"{sum(r['reward'] or 0 for r in arm)}/{len(arm)}" for arm in rows.values()) + " |")
+    print("| **partial credit (mean share)** | " + " | ".join(
+        f"{sum(r['tests'][0] / r['tests'][1] for r in arm if r['tests']) / max(1, sum(1 for r in arm if r['tests'])):.2f}"
+        for arm in rows.values()) + " |")
     for arm in rows:
         events = out / arm / "relay" / "events.jsonl"
         if events.exists():
@@ -156,6 +185,7 @@ def main() -> int:
     parser.add_argument("--tasks", nargs="+", default=TASKS)
     parser.add_argument("--window", type=int, default=128_000)
     parser.add_argument("-n", "--concurrent", type=int, default=2, help="trials at once, per arm")
+    parser.add_argument("--port", type=int, default=PORT, help="the first arm's Relay port (one per arm from there)")
     options = parser.parse_args()
     if options.report:
         report(options.report, options.window)
@@ -169,7 +199,7 @@ def main() -> int:
         for n, arm in enumerate(options.arms):
             out = options.out / arm
             (out / "relay").mkdir(parents=True, exist_ok=True)
-            port = None if arm == "native" else PORT + n
+            port = None if arm == "native" else options.port + n
             if port is not None:
                 relays.append(relay(arm, port, out / "relay", options.window))
             jobs.append(harbor(arm, out, options.dataset, options.tasks, auth, options.window, port, options.concurrent))
