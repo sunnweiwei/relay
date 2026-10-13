@@ -105,8 +105,8 @@ To change the strategy later, run `relay strategy <name>`. It needs no restart.
 | Strategy | What the model sees | Settings |
 | --- | --- | --- |
 | `compaction` (default) | Codex's local compaction: past a threshold, a summary and the recent user messages | `compact_ratio` (0.9 of the window), `compact_threshold`, `compact_growth`, `retain_user_tokens` (20000), `compact_min_gain` (0.1) |
-| `clm` | Context Language Models: the model edits its own context in a file, with its own tools | `clm_budget`, `clm_reserve` (2048), `clm_dir` (/tmp/.live_ctx, a place the harness can write), `clm_nudges` (on), `clm_steering` |
-| `folding` | Context Folding: the agent branches off a sub-task, and the branch's steps fold away when it returns | |
+| `clm` | Context Language Models: the model edits its own context in a file, with its own tools | `clm_budget`, `clm_reserve` (2048), `clm_dir` (/tmp/.live_ctx, a place the harness can write), `clm_nudges` (on), `clm_guard` (on: past the budget, the oldest new tool outputs are set aside in files), `clm_steering` |
+| `folding` | Context Folding: the agent branches off a sub-task, and the branch's steps fold away when it returns | the `compaction` settings, as its fallback |
 | `prolong` | PRO-LONG: compaction, plus a session log the agent can search | `prolong_log` (/tmp/.prolong/log.jsonl) |
 | `selfcompact` | Self-Compact: a rubric decides when the model summarizes its own trajectory | |
 | `autocompact` | AutoCompact: the model decides when to compact | the `compaction` settings, as its fallback |

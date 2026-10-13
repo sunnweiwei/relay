@@ -7,7 +7,7 @@ from typing import Any
 from relay.core.engine import Engine
 from relay.harnesses import Harness
 from relay.protocols import Gemini, OpenAIResponses
-from relay.strategies import ContextFolding
+from relay.strategies import Compaction, ContextFolding
 from relay.strategies.folding import NESTED, RETURNED
 
 CODEC, HARNESS = OpenAIResponses(), Harness()
@@ -107,6 +107,27 @@ class FoldingTests(unittest.TestCase):
         sent = self.send(*self.history, *read(2))
         self.assertFalse(sent.compacted)
         self.assertEqual(sent.body["input"][2:], [*self.history[1:], *read(2)])
+
+    def test_compaction_holds_the_threshold_when_folding_does_not(self) -> None:
+        summary = (200, {"status": "completed", "output": [
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "SUMMARY"}]}]})
+        engine = Engine(ContextFolding(Compaction(threshold=2_000, min_gain=0)))
+        long = [*self.history, *(item for i in range(2, 12) for item in run(i, f"cat big_{i}", "x" * 1_000))]
+        sent = engine.prepare(CODEC, HARNESS, {"model": "m", "input": long, "tools": TOOLS}, tenant="t",
+                              post=lambda r: summary)
+        self.assertTrue(sent.compacted)
+        self.assertIn("SUMMARY", json.dumps(sent.body))
+        self.assertNotIn("x" * 1_000, json.dumps(sent.body))
+
+    def test_a_fold_that_brings_the_context_under_the_threshold_is_enough(self) -> None:
+        engine = Engine(ContextFolding(Compaction(threshold=2_000, min_gain=0)))
+        steps = [item for i in range(2, 9) for item in run(i, f"cat big_{i}", "x" * 1_000)]
+        branch = [*self.history, *BRANCH, *steps, *RETURN]
+        sent = engine.prepare(CODEC, HARNESS, {"model": "m", "input": branch, "tools": TOOLS}, tenant="t",
+                              post=lambda r: self.fail("no summary is asked for"))
+        self.assertTrue(sent.compacted)
+        self.assertNotIn("x" * 1_000, json.dumps(sent.body))
+        self.assertIn(RETURNED.split(":")[0], json.dumps(sent.body))
 
 
 if __name__ == "__main__":
