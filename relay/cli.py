@@ -108,6 +108,14 @@ def main(argv: list[str] | None = None) -> int:
         if options.command == "stop":
             kind = service.stop()
             print(f"stopped Relay ({kind})" if kind else "Relay was not running as a service")
+            if pointed := install.installed():  # (still pointed at Relay: stopping it does not point them back)
+                again = [name for name in pointed if any((str(hook.path), tuple(hook.key)) in install.written(name)
+                                                         for hook in HARNESSES[name].starter(service.start_command()))]
+                failing = [name for name in pointed if name not in again]
+                print("  note: still going through Relay: "
+                      + "; ".join([*([f"{', '.join(again)} start it again with their next session"] if again else []),
+                                   *([f"{', '.join(failing)}: requests fail until `relay start`"] if failing else [])])
+                      + ". `relay uninstall <harness>` points a harness back at its own endpoint.")
             return 0
     except (ValueError, RuntimeError) as error:
         print(f"relay {options.command}: {error}", file=sys.stderr)
@@ -242,6 +250,10 @@ def _uninstall(harness: Harness) -> int:
         print(f"relay uninstall: {error}", file=sys.stderr)
         return 1
     print(f"uninstalled {harness.name}: " + ", ".join(sorted({str(path) for path in paths})))
+    print("  note: the harness's own history was never shortened. A conversation that grew past the model's "
+          "window through Relay is sent whole once it goes direct: Codex has it rejected and cannot compact it "
+          "(Claude Code compacts itself); start a new conversation, or go on with that one through Relay "
+          f"(`relay setup {harness.name}`).")
     return 0
 
 

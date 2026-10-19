@@ -101,6 +101,22 @@ class SetupTests(unittest.TestCase):
         self.assertEqual((settings.value("strategy"), settings.value("clm_budget")), ("clm", "40000"))
         self.assertIn("one already open goes on as it was", out)
 
+    def test_stopping_relay_names_the_harnesses_still_going_through_it(self) -> None:
+        claude = self.root / "claude"
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(claude)}):
+            install.install("codex", "http://127.0.0.1:8787", [])
+            install.install("claude_code", "http://127.0.0.1:8787",
+                            cli.HARNESSES["claude_code"].starter(service.start_command()))  # (as `relay setup` sets it)
+            with mock.patch.object(service, "stop", return_value="process"):
+                code, out = self.run_cli("stop")
+        self.assertEqual(code, 0)
+        self.assertIn("claude_code start it again with their next session", out)
+        self.assertIn("codex: requests fail until `relay start`", out)
+        self.assertIn("`relay uninstall <harness>`", out)
+        code, out = self.run_cli("uninstall", "codex")
+        self.assertEqual(code, 0, out)
+        self.assertIn("go on with that one through Relay (`relay setup codex`)", out)
+
     def test_a_port_something_else_holds_is_given_up_for_a_free_one(self) -> None:
         with mock.patch.object(service, "status", return_value=None), mock.patch.object(service, "taken", return_value=True), \
                 mock.patch.object(service, "free_port", return_value=48123), mock.patch.object(service, "start", return_value="process"), \

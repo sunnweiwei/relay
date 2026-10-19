@@ -70,7 +70,13 @@ values are recorded in `~/.config/relay/installed.json` for `relay uninstall`.
 `relay run <harness> -- <args>` runs Codex or Claude Code through a private, temporary
 Relay instead. `relay install` also turns the harness's own auto-compaction off, so Relay's
 strategy is the one that runs (see [Harness auto-compaction](#harness-auto-compaction));
-`relay uninstall` restores it.
+`relay uninstall` restores it. Relay never shortens the harness's own history, so a conversation
+that grew past the model's window through Relay is sent whole once it goes direct again. Checked
+with each harness against an upstream that rejects it as too long: Claude Code 2.1.294 compacts
+itself and goes on; Codex 0.163.0 has every retry rejected, its own compaction included (its
+compaction request does not fit either), and the conversation cannot go on directly. `relay
+uninstall` and `relay stop` say so, and `relay stop` names the harnesses still going through
+Relay (they fail, or start it again with their hook).
 
 ## Architecture
 

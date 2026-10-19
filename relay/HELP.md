@@ -144,6 +144,13 @@ While a harness points at Relay, it reaches its model only through Relay. If a m
 fails because nothing answers at Relay's address, run `relay start`. If that does not help, read
 the log (`~/.config/relay/relay.log`), or `relay uninstall` the harness.
 
+Going back to the harness on its own: `relay uninstall <harness>`, not `relay stop` alone (a
+harness still pointed at Relay fails, or starts Relay again with its hook) and not by changing
+its endpoint by hand (its own auto-compaction would stay off). Relay never shortened the
+harness's own history: a conversation that grew past the model's window through Relay is sent
+whole once it goes direct. Claude Code then compacts itself; Codex has the request rejected and
+cannot recover the conversation. Start a new conversation, or go on with that one through Relay.
+
 ## Other commands
 
     relay serve                    # run Relay in the foreground (what its daemon runs)
