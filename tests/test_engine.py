@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from relay.core.engine import Engine
-from relay.core.ir import Context
+from relay.core.ir import Context, Item, Kind
 from relay.core.store import PrefixStore
 from relay.core.tokens import approx_tokens
 from relay.harnesses import ClaudeCode, Codex, Harness
@@ -97,6 +97,20 @@ class EngineTests(unittest.TestCase):
         status, payload = SUMMARY_OK
         self.prepare(body(msg("user", "task"), *step(1), *step(2)), Upstream((status, {**payload, "usage": usage})))
         self.assertEqual(json.loads(log.read_text().splitlines()[-1])["summary_usage"], [usage])
+
+    def test_a_summary_request_continues_the_prefix_the_model_saw(self) -> None:
+        class Guided(Compaction):  # a strategy with instructions of its own, on every request
+            def plan(self, request, summarizer):
+                context = super().plan(request, summarizer)
+                return Context((Item(Kind.SYSTEM, "GUIDE"), *(context.items if context else request.current)))
+
+        self.engine = Engine(Guided(threshold=300, min_gain=0))
+        upstream = Upstream()
+        history = [msg("developer", "rules"), msg("user", "task"), *step(1, size=10)]
+        seen = self.prepare(body(*history), upstream).body["input"]
+        self.assertEqual(seen[1]["content"][0]["text"], "GUIDE")
+        self.assertTrue(self.prepare(body(*history, *step(2), *step(3)), upstream).compacted)
+        self.assertEqual(upstream.requests[0]["input"][: len(seen)], seen)  # (the prompt cache holds)
 
     def test_reported_usage_anchors_the_next_estimate(self) -> None:
         upstream = Upstream()
