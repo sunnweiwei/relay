@@ -186,8 +186,11 @@ request, or after Relay joined late, restarted, or the harness compacted itself)
 four bytes of text per token, as Codex does (OpenAI and Gemini tokenizers measured about
 4.6, so it errs high), or 2.5 for Claude (measured 2.7), and counts opaque content the
 model still reads (encrypted reasoning and compactions, redacted thinking, thought
-signatures) at its decoded size. If the upstream still rejects a
-request as too long, Relay compacts and retries it once.
+signatures) at its decoded size. Once the upstream has counted a request of the conversation,
+its new items are estimated at the rate that count showed against Relay's own estimate of the
+same request (bounded to 0.5–4×): text denser than four bytes a token (another language, numbers)
+is counted as the upstream counts it. If the upstream still rejects a request as too long, Relay
+compacts and retries it once.
 
 ## Compaction
 
