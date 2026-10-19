@@ -21,6 +21,7 @@ DEFAULTS = {
 
 class Nanobot(Harness):
     name = "nanobot"
+    verified = "0.3.5"
 
     def settings(self) -> list[Setting]:
         """Wrap the providers the user configured (or, if none, the built-in ones)."""

@@ -23,6 +23,7 @@ DEFAULTS = {
 
 class Hermes(Harness):
     name = "hermes"
+    verified = "0.19.0"
     summaries = ("[CONTEXT COMPACTION — REFERENCE ONLY]", "[CONTEXT SUMMARY]:")  # (and its older one)
 
     def starter(self, command: str) -> list[Setting]:

@@ -27,7 +27,7 @@ from starlette.routing import Route
 
 from ..core.engine import Engine, Exchange
 from ..core.store import PrefixStore
-from ..harnesses import detect
+from ..harnesses import Harness, detect
 from ..protocols import Codec, codec_for
 from ..providers import Upstream, route, upstreams_from_settings
 from ..strategies import STRATEGIES
@@ -95,6 +95,14 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
         except Exception:
             log.exception("could not apply the changed settings; %s goes on", engine.strategy.name)
     detect({}, config.harness)  # reject an unknown forced harness at startup
+    releases: dict[str, str] = {}  # each harness's release, as its latest request said it
+
+    def release(harness: Harness, headers: Mapping[str, str]) -> None:
+        if (version := harness.version(headers)) and releases.get(harness.name) != version:
+            releases[harness.name] = version
+            if harness.newer(version):
+                log.warning("%s %s is newer than the releases its profile was checked against (%s); Relay serves it "
+                            "as the newest of them", harness.name, version, harness.verified)
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
@@ -110,7 +118,9 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
 
         follow()
         return JSONResponse({"relay": "ok", "strategy": engine.strategy.name, "window": engine.window,
-                             "following": following, "pid": os.getpid()})
+                             "following": following, "pid": os.getpid(),
+                             "harnesses": {name: {"release": version, "checked": detect({}, name).verified}
+                                           for name, version in releases.items()}})
 
     async def handle(request: Request) -> Response:
         if request.headers.get("upgrade"):  # e.g. Codex tries WebSockets first, then HTTP
@@ -145,6 +155,7 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
             return response.status_code, result
 
         harness = detect(request.headers, config.harness, request.url.path)
+        release(harness, request.headers)
 
         def prepare(force: bool = False) -> Exchange:
             return engine.prepare(

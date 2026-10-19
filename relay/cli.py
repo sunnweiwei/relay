@@ -210,6 +210,10 @@ def _status() -> int:
             "launchd": "a launchd agent"}
     print(f"kept running by: {kept.get(entry.get('manager'), 'nothing (started by hand?)')}")
     print(f"harnesses set up: {', '.join(install.installed()) or 'none'}")
+    for name, seen in ((now or {}).get("harnesses") or {}).items():  # (as their requests said it)
+        newer = HARNESSES[name].newer(seen["release"])
+        print(f"  {name} {seen['release']}: profile checked against {seen['checked'] or 'no release'}"
+              + (" (newer: served as the newest of those)" if newer else ""))
     print(f"settings: {settings.path()}")
     return 0 if now else 1
 

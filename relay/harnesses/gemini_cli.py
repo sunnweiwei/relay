@@ -17,6 +17,8 @@ CONTEXT_PREFIX = "This is the Gemini CLI. We are setting up the context"
 
 class GeminiCli(Harness):
     name = "gemini_cli"
+    verified = "0.63.0"
+    agent = re.compile(r"\bGeminiCLI[\w-]*/(\d[\w.-]*)")
     # The date, workspace and GEMINI.md, re-rendered in the first user message when they change
     # (`<loaded_context>` alone opens a sub-agent's conversation).
     injected = (REMINDER, re.compile(r"<session_context>.*?</session_context>", re.S),
