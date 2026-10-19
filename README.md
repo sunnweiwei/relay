@@ -239,8 +239,11 @@ context to describe the session as it is now:
 Notifications (background tasks finishing, a sub-agent's report, OpenClaw's reminder of an
 unfinished plan) are events, not state, and are left to the summary. A harness's own
 compaction leaves its summary in the history (`Harness.summaries`: Claude Code's, pi's and
-OpenClaw's, Goose's, Hermes Agent's, Crush's, OpenCode's and Kilo's); a later compaction of
-Relay's summarizes it again rather than keeping it as a user message. Gemini CLI puts its
+OpenClaw's, Goose's, Hermes Agent's, Crush's, OpenCode's and Kilo's, Kimi Code's, DeepSeek
+Harness's checkpoint); a later compaction of Relay's summarizes it again rather than keeping it as
+a user message. The request in which a harness asks for that summary is recognized by its prompt
+(`Harness.compaction_prompts`: Claude Code's, Kimi Code's, DeepSeek Harness's; Codex's by its own
+rules) and never compacted by Relay. Gemini CLI puts its
 summary into its system instruction, nanobot into its system prompt and WorkBuddy into a
 context message: those need nothing.
 

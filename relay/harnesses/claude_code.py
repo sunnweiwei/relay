@@ -13,7 +13,6 @@ from pathlib import Path
 
 from ..core.ir import Item, Kind
 from ..install import Setting
-from ..protocols.base import Codec, WireItem
 from .base import REMINDER, Harness, command_hook
 # Slash commands and their output, which Claude Code writes into a user message, at times
 # together with what the user typed next (`/compact` followed by the next request).
@@ -38,18 +37,12 @@ class ClaudeCode(Harness):
     name = "claude_code"
     injected = (REMINDER, COMMAND)
     summaries = (SUMMARY_PREFIX,)
+    compaction_prompts = (COMPACT_PROMPT,)  # `/compact` and auto-compact append it to the last user message
 
     def matches(self, headers: Mapping[str, str]) -> bool:
         return "x-claude-code-session-id" in headers or headers.get(
             "user-agent", ""
         ).startswith("claude-cli")
-
-    def compacting(self, codec: Codec, items: list[WireItem]) -> bool:
-        """`/compact` (and auto-compact) appends its prompt to the last user message, which system
-        messages such as `<total_tokens>` may follow."""
-
-        last = next((item for item in map(codec.classify, reversed(items)) if item.kind is not Kind.SYSTEM), None)
-        return last is not None and COMPACT_PROMPT in last.text
 
     def state_key(self, item: Item) -> str | None:
         """Reminders that restate its state, wherever they come (after compacting itself it

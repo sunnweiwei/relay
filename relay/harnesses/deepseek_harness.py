@@ -44,11 +44,16 @@ NOTICE = re.compile(
     r"Background subagent \S+ (?:finished|was stopped|ran out of room|declined|failed|ended abnormally)|"
     r"You are repeating the exact same tool call|Repeated tool call detected:|"
     r"background job \S+(?: \(|\n)|The user switched this session (?:to plan mode|back to the default mode)\.")
-PARTS = MessageParts()
+# Its own compaction's checkpoint, in a user message of three or more text blocks: the preamble with
+# the opening tag, the summary, the closing tag.
+CHECKPOINT = "This is an automatically generated checkpoint condensing an earlier span of the conversation"
+PARTS = MessageParts(together=(("<compacted-summary>", "</compacted-summary>"),))
 
 
 class DeepSeekHarness(Harness):
     name = "deepseek_harness"
+    summaries = (CHECKPOINT,)
+    compaction_prompts = ("You are now acting as a compaction engine for this AI coding assistant.",)
 
     def codec(self, codec: Codec) -> Codec:
         """Its own route (the Messages API to DeepSeek) sends consecutive user messages as one, so

@@ -206,10 +206,15 @@ class AnthropicMessages:
 class MessageParts(AnthropicMessages):
     """The Messages API of a harness that sends consecutive user messages as one (its own context,
     what the user typed and the results of the model's tool calls share a message): each part
-    is an item, itself a user message, and consecutive user messages go out as one."""
+    is an item, itself a user message, and consecutive user messages go out as one. `together`:
+    the (opening, closing) markers of what the harness writes over several text blocks (its own
+    summary, say), kept in one part."""
+
+    def __init__(self, together: tuple[tuple[str, str], ...] = ()) -> None:
+        self.together = together
 
     def items(self, body: Body) -> list[WireItem]:
-        return [part for message in super().items(body) for part in _split(message)]
+        return [part for message in super().items(body) for part in _split(message, self.together)]
 
     def with_items(self, body: Body, items: list[WireItem]) -> Body:
         return super().with_items(body, _join(items))
@@ -223,20 +228,28 @@ class MessageParts(AnthropicMessages):
         return {**request, "messages": _join(request["messages"])}
 
 
-def _split(message: WireItem) -> list[WireItem]:
+def _split(message: WireItem, together: tuple[tuple[str, str], ...] = ()) -> list[WireItem]:
     """A user message as its parts: the tool results together, then every text block with the
-    blocks after it (its images)."""
+    blocks after it (its images), but a block that opens one of `together` and the blocks up to
+    the one that closes it as one."""
 
     content = message.get("content")
     if message.get("role") != "user" or not isinstance(content, list):
         return [message]
     parts: list[list[dict[str, Any]]] = []
+    closing = None  # what the open part waits for
     for block in content:
         result = block.get("type") == "tool_result"
         held = {b.get("type") for b in parts[-1]} if parts else set()
-        if not parts or result != ("tool_result" in held) or (block.get("type") == "text" and "text" in held):
+        if closing is None and (not parts or result != ("tool_result" in held)
+                                or (block.get("type") == "text" and "text" in held)):
             parts.append([])
         parts[-1].append(block)
+        text = block.get("text", "") if block.get("type") == "text" else ""
+        if closing is not None:
+            closing = None if closing in text else closing
+        else:
+            closing = next((end for start, end in together if start in text and end not in text.split(start)[-1]), None)
     return [{**message, "content": part} for part in parts] if len(parts) > 1 else [message]
 
 
