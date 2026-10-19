@@ -42,6 +42,7 @@ class Harness:
     name = "generic"
     injected: tuple[re.Pattern[str], ...] = (REMINDER,)  # blocks the harness writes into user messages
     summaries: tuple[str, ...] = ()  # how the summaries of its own compaction start (Codex's: every harness)
+    compaction_prompts: tuple[str, ...] = ()  # what its own compaction asks of the model, in its last message
 
     def matches(self, headers: Mapping[str, str]) -> bool:
         return False
@@ -100,9 +101,13 @@ class Harness:
     def compacting(self, codec: Codec, items: list[WireItem]) -> bool:
         """Whether the request is the harness compacting its own history (its own prompt, or a
         server-side trigger). It gets the stored compaction like any request, as only items before
-        the first changed one can be covered, but never a new one."""
+        the first changed one can be covered, but never a new one. By default: one of its
+        `compaction_prompts` in the last message (system messages, such as a token count, may follow)."""
 
-        return False
+        if not self.compaction_prompts:
+            return False
+        last = next((item for item in map(codec.classify, reversed(items)) if item.kind is not Kind.SYSTEM), None)
+        return last is not None and any(prompt in last.text for prompt in self.compaction_prompts)
 
     def volatile(self, item: Item) -> bool:
         """Whether a trailing item is regenerated on every request rather than appended."""
@@ -139,14 +144,14 @@ class Harness:
         messages kept are what the user wrote, as Codex keeps them: what the harness injected into
         them is state, or was summarized."""
 
-        head = tuple(kept for item in head if (kept := self._typed(item)) is not None)
+        head = tuple(kept for item in head if (kept := self.typed(item)) is not None)
         system = tuple(item for item in state if item.kind is Kind.SYSTEM)
         context = tuple(item for item in state if item.kind is not Kind.SYSTEM)
         last = lambda kind: next((n for n in range(len(head) - 1, -1, -1) if head[n].kind is kind), None)
         at = next(n for n in (last(Kind.USER), last(Kind.SUMMARY), len(head)) if n is not None)
         return (*system, *head[:at], *context, *head[at:])
 
-    def _typed(self, item: Item) -> Item | None:
+    def typed(self, item: Item) -> Item | None:
         """A user message as the user wrote it (None: the harness wrote all of it)."""
 
         if item.kind is not Kind.USER or (text := self.visible(item.text)) == item.text.strip():

@@ -131,15 +131,32 @@ class Engine:
             return conversation[cut] if cut < len(conversation) else len(items)
 
         current = tuple(items[n] for n in conversation)
+        # The strategy sees what the user typed of a user message; the harness's blocks in it are
+        # its state (`place`), forwarded as they came unless the strategy changes the message.
+        typed = {item.ref: view for item in originals if (view := harness.typed(item)) not in (item, None)}
+
+        def seen(item: Item) -> Item:
+            return typed[item.ref] if item.ref in typed and item == originals[item.ref] else item
+
+        def unseen(item: Item) -> Item:
+            if item.kind is not Kind.USER or item.ref not in typed:
+                return item
+            original, view = originals[item.ref], typed[item.ref]
+            if (item.text, item.media) == (view.text, view.media):
+                return original
+            text = (original.text.replace(view.text, item.text, 1) if view.text in original.text
+                    else "\n\n".join([*harness.blocks(original.text), item.text]))  # (its blocks kept)
+            return replace(item, text=text)
         accepted = {raw_index for raw_index in codec.orphans(raw)}  # the harness's own history, as the API took it
 
         def sendable(answer: tuple[Item, ...]) -> tuple[Item, ...]:
+            answer = tuple(map(unseen, answer))
             return tuple(item for item in _sendable(codec, harness, raw, originals, volatile, accepted, answer)
                          if item.kind not in CONTEXT_KINDS or _instruction(item))
 
         request = Request(
-            tuple(item for item in originals if item.kind not in CONTEXT_KINDS),
-            current,
+            tuple(seen(item) for item in originals if item.kind not in CONTEXT_KINDS),
+            tuple(map(seen, current)),
             frozenset(cut for cut in range(len(current) + 1) if position(cut) in legal),
             tokens,
             self.window or harness.window(body.get("model")) or context_window(body.get("model")),
@@ -162,7 +179,7 @@ class Engine:
                 # then the history goes in one summary request, and an overflow splits it.
                 window = None if request.window and state.get("tokens", 0) > request.window else request.window
                 summarizer = _Summarizer(codec, body, lambda cut: wire[: position(cut)], leading, post,
-                                         window and window / scale, per_token)
+                                         window and window / scale, per_token, "\n\n".join(instructions))
                 if (context := self.strategy.plan(request, summarizer)) is not None:
                     answer = sendable(tuple(item for item in context.items if not _instruction(item)))
                     answered = [item.text for item in context.items if _instruction(item)]
@@ -377,11 +394,13 @@ class _Summarizer:
     Codex instead drops the oldest items until the request fits; nothing is dropped here."""
 
     def __init__(self, codec: Codec, body: Body, history: Callable[[int], list[WireItem]], keep: int,
-                 post: Post, window: float | None, per_token: float) -> None:
+                 post: Post, window: float | None, per_token: float, instructions: str = "") -> None:
         # `history(cut)`: the wire items a conversation cut replaces, the harness's own included;
         # `keep`: the leading ones every piece carries (Codex keeps the initial context);
-        # `window`: in the per-item estimates' terms.
+        # `window`: in the per-item estimates' terms; `instructions`: the strategy's, as the
+        # requests the model saw carry them (a summary request is then their prefix, cached).
         self.codec, self.body, self.history, self.keep, self.post = codec, body, history, keep, post
+        self.instructions = instructions
         self.budget = int(window * SUMMARY_SHARE) if window else None
         self.per_token, self.requests, self.usage = per_token, 0, []  # (each request's usage, as the upstream reported it)
 
@@ -392,7 +411,10 @@ class _Summarizer:
             fixed = [*lead, self.codec.user_message(f"{SUMMARY_PREFIX}\n{summary}")] if summary else lead
             overhead = approx_tokens(self.codec.preamble(self.body), self.per_token) + sum(map(self._tokens, fixed))
             piece = _piece(self.codec, rest, budget - overhead, self._tokens) if budget else len(rest)
-            status, payload = self._post(self.codec.summary_request(self.body, [*fixed, *rest[:piece]], prompt))
+            request = self.codec.summary_request(self.body, [*fixed, *rest[:piece]], prompt)
+            if self.instructions:
+                request = self.codec.with_instructions(request, self.instructions)
+            status, payload = self._post(request)
             if self.codec.is_overflow(status, payload):
                 if piece <= _piece(self.codec, rest, 0, self._tokens):
                     raise RuntimeError("a single turn of the history does not fit in a summary request")

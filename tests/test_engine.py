@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import tempfile
 import unittest
 import unittest.mock
@@ -8,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from relay.core.engine import Engine
-from relay.core.ir import Context
+from relay.core.ir import Context, Item, Kind
 from relay.core.store import PrefixStore
 from relay.core.tokens import approx_tokens
 from relay.harnesses import ClaudeCode, Codex, Harness
@@ -28,6 +29,11 @@ def msg(role: str, text: str) -> dict[str, Any]:
 def step(i: int, size: int = 800) -> list[dict[str, Any]]:
     return [{"type": "function_call", "call_id": f"c{i}", "name": "sh", "arguments": "{}"},
             {"type": "function_call_output", "call_id": f"c{i}", "output": "x" * size}]
+
+
+def _text(item: dict[str, Any]) -> str:
+    content = item.get("content")
+    return content if isinstance(content, str) else "".join(p.get("text", "") for p in content or [])
 
 
 def body(*items: dict[str, Any]) -> dict[str, Any]:
@@ -97,6 +103,47 @@ class EngineTests(unittest.TestCase):
         status, payload = SUMMARY_OK
         self.prepare(body(msg("user", "task"), *step(1), *step(2)), Upstream((status, {**payload, "usage": usage})))
         self.assertEqual(json.loads(log.read_text().splitlines()[-1])["summary_usage"], [usage])
+
+    def test_a_summary_request_continues_the_prefix_the_model_saw(self) -> None:
+        class Guided(Compaction):  # a strategy with instructions of its own, on every request
+            def plan(self, request, summarizer):
+                context = super().plan(request, summarizer)
+                return Context((Item(Kind.SYSTEM, "GUIDE"), *(context.items if context else request.current)))
+
+        self.engine = Engine(Guided(threshold=300, min_gain=0))
+        upstream = Upstream()
+        history = [msg("developer", "rules"), msg("user", "task"), *step(1, size=10)]
+        seen = self.prepare(body(*history), upstream).body["input"]
+        self.assertEqual(seen[1]["content"][0]["text"], "GUIDE")
+        self.assertTrue(self.prepare(body(*history, *step(2), *step(3)), upstream).compacted)
+        self.assertEqual(upstream.requests[0]["input"][: len(seen)], seen)  # (the prompt cache holds)
+
+    def test_the_strategy_sees_what_the_user_typed_and_the_harness_s_blocks_stay(self) -> None:
+        reminder = "<system-reminder>\n" + "Instructions from CLAUDE.md. " * 200 + "\n</system-reminder>"
+        first, second = msg("user", f"{reminder}\nfirst task"), msg("user", "second task")
+        history = [first, *step(1), second, *step(2), *step(3)]
+        seen = []
+
+        class Passing(Compaction):  # the conversation back, one user message changed when asked
+            def plan(self, request, summarizer):
+                seen.append([item.text for item in request.current if item.kind is Kind.USER])
+                if request.state == "edit":
+                    return Context(tuple(replace(i, text="FIRST") if i.text == "first task" else i for i in request.current))
+                return Context(request.current, "edit")
+
+        self.engine = Engine(Passing(threshold=10**9))
+        untouched = self.prepare(body(*history), Upstream())
+        self.assertEqual(seen[0], ["first task", "second task"])  # not the harness's reminder
+        self.assertEqual(untouched.body["input"], history)  # forwarded as it came
+        edited = self.prepare(body(*history), Upstream()).body["input"][0]
+        self.assertEqual(_text(edited), f"{reminder}\nFIRST")  # the reminder where it was
+
+        self.engine = Engine(Compaction(threshold=300, min_gain=0, retain_user_tokens=30))
+        upstream = Upstream()
+        compacted = self.prepare(body(*history, msg("user", "x " * 40)), upstream)
+        users = [_text(i) for i in compacted.body["input"] if i.get("role") == "user"]
+        # both kept whole (the reminder took none of the budget), the reminder as the harness's state
+        self.assertEqual(users[:3], ["first task", reminder, "second task"])
 
     def test_reported_usage_anchors_the_next_estimate(self) -> None:
         upstream = Upstream()
