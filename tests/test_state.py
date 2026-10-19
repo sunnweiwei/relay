@@ -145,6 +145,31 @@ class StateTests(unittest.TestCase):
         state = DeepSeekHarness().state(CODEC, items)
         self.assertEqual([i.ref for i in state.items], [0, 2, 8])
 
+    def test_each_harness_knows_its_own_compaction_request(self) -> None:
+        prompts = {
+            ClaudeCode(): "Your task is to create a detailed summary of the conversation so far",
+            KimiCode(): "You are about to run out of context. Create a handoff summary for the\nmodel that will resume",
+            DeepSeekHarness(): "You are now acting as a compaction engine for this AI coding assistant. Condense the",
+        }
+        for harness, prompt in prompts.items():
+            history = [msg("user", "task"), msg("assistant", "done")]
+            self.assertTrue(harness.compacting(CODEC, [*history, msg("user", prompt)]), harness.name)
+            self.assertFalse(harness.compacting(CODEC, [*history, msg("user", "go on")]), harness.name)
+            self.assertFalse(Harness().compacting(CODEC, [*history, msg("user", prompt)]))
+
+    def test_deepseek_s_checkpoint_on_its_own_route_is_one_summary(self) -> None:
+        text = lambda t: {"type": "text", "text": t}
+        checkpoint = [text("This is an automatically generated checkpoint condensing an earlier span of the conversation "
+                           "to free up context.\n\n<compacted-summary>"), text("## Goal\nship it"), text("## Done\nall"),
+                      text("</compacted-summary>")]
+        merged = {"role": "user", "content": [text("task"), *checkpoint, text("go on")]}  # kept, its checkpoint, typed
+        harness = DeepSeekHarness()
+        codec = harness.codec(AnthropicMessages())
+        items = codec.items({"messages": [merged]})
+        self.assertEqual([i["content"] for i in items], [[text("task")], checkpoint, [text("go on")]])
+        self.assertEqual([harness.refine(codec.classify(i)).kind for i in items], [Kind.USER, Kind.SUMMARY, Kind.USER])
+        self.assertEqual(codec.with_items({"messages": [merged]}, items)["messages"], [merged])
+
     def test_deepseek_s_own_route_merges_messages_and_they_are_items_again(self) -> None:
         text = lambda t: {"type": "text", "text": t}
         snapshot = lambda v: text(f"Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\ncwd {v}")
@@ -245,6 +270,9 @@ class StateTests(unittest.TestCase):
             Hermes(): "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into the summary below.",
             Crush(): "## Current State\n- reading file_3.txt",
             OpenCode(): "What did we do so far?",
+            KimiCode(): "The conversation so far has been compacted to free up context. What follows is your own working",
+            DeepSeekHarness(): "This is an automatically generated checkpoint condensing an earlier span of the conversation to "
+                               "free up context.\n\n<compacted-summary>\nS\n</compacted-summary>",
         }
         for harness, text in summaries.items():
             self.assertIs(harness.refine(CODEC.classify(msg("user", text))).kind, Kind.SUMMARY, harness.name)

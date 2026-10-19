@@ -22,6 +22,9 @@ DEFAULTS = {  # by provider type, for providers without an explicit base_url
 
 class KimiCode(Harness):
     name = "kimi_code"
+    # Its own compaction's summary, a user message (its notes around it are system reminders).
+    summaries = ("The conversation so far has been compacted to free up context.",)
+    compaction_prompts = ("You are about to run out of context. Create a handoff summary for the",)
 
     def state_key(self, item: Item) -> str | None:
         """Reminders that restate the date, or the approval mode, whenever it changes."""
