@@ -95,8 +95,9 @@ Three layers keep strategies free of harness and protocol details:
   harness compacting itself (`compacting`: they get the stored context but never a new one),
   and, where it uses the protocol its own way, a variant of the codec (`codec`: DeepSeek
   Harness's user messages, merged on its Messages route, taken apart into items);
-- the **strategy** sees only the conversation (user, assistant, tool items and summaries)
-  and decides, on every request, what the model sees. The harness's own items are put back
+- the **strategy** sees only the conversation (user, assistant, tool items and summaries; of
+  a user message, what the user typed, not the blocks the harness injected into it) and
+  decides, on every request, what the model sees. The harness's own items are put back
   into every answer where the harness sent them (after a summary, where the harness puts its
   state after its own compaction), so a new strategy inherits that, and cache hits, for free.
 

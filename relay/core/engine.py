@@ -131,15 +131,32 @@ class Engine:
             return conversation[cut] if cut < len(conversation) else len(items)
 
         current = tuple(items[n] for n in conversation)
+        # The strategy sees what the user typed of a user message; the harness's blocks in it are
+        # its state (`place`), forwarded as they came unless the strategy changes the message.
+        typed = {item.ref: view for item in originals if (view := harness.typed(item)) not in (item, None)}
+
+        def seen(item: Item) -> Item:
+            return typed[item.ref] if item.ref in typed and item == originals[item.ref] else item
+
+        def unseen(item: Item) -> Item:
+            if item.kind is not Kind.USER or item.ref not in typed:
+                return item
+            original, view = originals[item.ref], typed[item.ref]
+            if (item.text, item.media) == (view.text, view.media):
+                return original
+            text = (original.text.replace(view.text, item.text, 1) if view.text in original.text
+                    else "\n\n".join([*harness.blocks(original.text), item.text]))  # (its blocks kept)
+            return replace(item, text=text)
         accepted = {raw_index for raw_index in codec.orphans(raw)}  # the harness's own history, as the API took it
 
         def sendable(answer: tuple[Item, ...]) -> tuple[Item, ...]:
+            answer = tuple(map(unseen, answer))
             return tuple(item for item in _sendable(codec, harness, raw, originals, volatile, accepted, answer)
                          if item.kind not in CONTEXT_KINDS or _instruction(item))
 
         request = Request(
-            tuple(item for item in originals if item.kind not in CONTEXT_KINDS),
-            current,
+            tuple(seen(item) for item in originals if item.kind not in CONTEXT_KINDS),
+            tuple(map(seen, current)),
             frozenset(cut for cut in range(len(current) + 1) if position(cut) in legal),
             tokens,
             self.window or harness.window(body.get("model")) or context_window(body.get("model")),
