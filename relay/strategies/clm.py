@@ -29,15 +29,19 @@ The budget holds as pi-clm holds it (its overflow guard, `clm_guard`, on by defa
 the limit has the oldest tool results since the last accepted edit, one by one, replaced by a note
 naming a file (in `withheld/` beside the context file) with the full text, until it fits, and is told
 so. The newest results go last: the result the model just asked for is often a re-read of one
-withheld before. What the model's edits kept is never withheld; nothing is re-run.
+withheld before. What the model's edits kept is never withheld; nothing is re-run. As in pi-clm,
+which leaves the recovery from a provider's overflow to Pi's own compaction, a request the upstream
+rejected as too long (Relay retries it forced) is compacted as `compaction` compacts it, and the
+model's file starts over from the compacted context.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from collections import OrderedDict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -45,7 +49,10 @@ from typing import Any
 from ..core.ir import LABELS, Context, Item, Kind, Request, note
 from ..core.tokens import item_tokens
 from .base import Summarizer
+from .compaction import Compaction
 from .. import settings
+
+log = logging.getLogger("relay")
 
 # The paper's "Managing your context" section (clm_agent/prompts.yaml), with the file's block headers.
 GUIDANCE = r"""## Managing your context
@@ -119,6 +126,7 @@ class ContextLanguageModel:
     steering: str = ""  # a context-management policy in words, added to the guidance (the paper's s)
     nudges: bool = True  # the budget nudges; the size readout stays
     guard: bool = True  # pi-clm's overflow guard: past the limit, the oldest new tool results are withheld
+    recovery: Compaction = field(default_factory=Compaction)  # for a request the upstream rejected as too long
     name: str = "clm"
 
     @classmethod
@@ -128,7 +136,8 @@ class ContextLanguageModel:
                    directory=settings.value("clm_dir", "/tmp/.live_ctx"),
                    steering=Path(steering).read_text(encoding="utf-8").strip() if steering else "",
                    nudges=settings.value("clm_nudges", "on").lower() not in ("0", "off", "false"),
-                   guard=settings.value("clm_guard", "on").lower() not in ("0", "off", "false"))
+                   guard=settings.value("clm_guard", "on").lower() not in ("0", "off", "false"),
+                   recovery=Compaction.from_settings())
 
     def fingerprint(self) -> dict[str, Any]:
         return {"name": self.name, "budget": self.budget, "reserve": self.reserve, "directory": self.directory,
@@ -140,7 +149,16 @@ class ContextLanguageModel:
             return None
         # The file keeps the name it was given on the conversation's first request (the engine's
         # name for a conversation settles only after its first items).
-        state = request.state or {}
+        state, recovered = request.state or {}, False
+        try:
+            compacted = self.recovery.plan(request, summarizer) if request.force else None
+        except Exception:  # (no summary: the overflow guard alone fits it in)
+            log.warning("clm: the compaction of a request too long failed; the overflow guard holds it", exc_info=True)
+            compacted = None
+        if compacted is not None:
+            tokens = request.tokens - sum(map(item_tokens, request.current)) + sum(map(item_tokens, compacted.items))
+            request, recovered = replace(request, current=compacted.items, tokens=tokens), True
+            state = {key: state[key] for key in ("file", "ids", "revision") if key in state}  # (the file, rewritten)
         path = Path(self.directory) / state.get("file", f"{request.conversation}.md")
         budget = self.budget or request.window or 0
         limit = max(budget - self.reserve, 0)
@@ -150,7 +168,7 @@ class ContextLanguageModel:
         anchor = state.get("anchor", task)  # where what the model's last accepted edit kept ends
         if _owner(path) not in (None, state.get("ids")):
             path = path.with_name(f"{path.stem.split('~')[0]}~{_digest(''.join(_ids(items[task:])))[:8]}.md")
-        elif state and path.exists() and _digest(edited := path.read_text(encoding="utf-8")) != state["digest"]:
+        elif "digest" in state and path.exists() and _digest(edited := path.read_text(encoding="utf-8")) != state["digest"]:
             applied, tokens, note = _apply(edited, request, task, state, limit)
             items, notes = applied or items, [note]
             if applied:  # (the items after the file it was written from follow the edited ones)
@@ -158,7 +176,7 @@ class ContextLanguageModel:
         if self.guard and limit and tokens > limit:
             items, tokens, notice = _guard(items, tokens, limit, anchor, path)
             notes += [notice] if notice else []
-        revision = state.get("revision", 0) + (items != list(request.current))
+        revision = state.get("revision", 0) + (recovered or items != list(request.current))
         text = _render(items[task:], _document(request.conversation, revision), revision)
         _write(path, text)
         _own(path, _ids(items[task:]))
