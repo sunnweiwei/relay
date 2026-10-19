@@ -56,7 +56,8 @@ class Item:
 
 @dataclass(frozen=True)
 class Request:
-    """One request as the strategy sees it: the conversation only, no system or context items."""
+    """One request as the strategy sees it: the conversation only, no system or context items, and
+    of a user message what the user typed (not what the harness injected into it)."""
 
     history: tuple[Item, ...]  # every item the harness sent, as it sent them
     current: tuple[Item, ...]  # what the model sees if nothing changes: the last context, then what came since
