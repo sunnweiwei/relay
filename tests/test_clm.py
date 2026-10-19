@@ -213,6 +213,28 @@ class ClmTests(unittest.TestCase):
         later = self.send(*history, *call(45)).body["input"]
         self.assertEqual([i for i in later if i.get("type") == "function_call_output"][0]["output"], outputs[0])
 
+    def test_a_request_the_upstream_rejected_as_too_long_is_compacted_as_pi_clm_leaves_it_to_pi(self) -> None:
+        history = [*self.history, *call(3), *call(4)]
+        self.send(*history)  # (no request of its own: under the budget, nothing to recover from)
+        summaries = []
+
+        def upstream(request: dict[str, Any]) -> tuple[int, Any]:
+            summaries.append(request)
+            return 200, {"status": "completed", "output": [
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "SUMMARY"}]}]}
+
+        forced = self.engine.prepare(CODEC, HARNESS, body(*history), tenant="t", post=upstream, force=True)
+        self.assertTrue(forced.compacted)
+        self.assertEqual(len(summaries), 1)
+        texts = [json.dumps(item) for item in forced.body["input"]]
+        self.assertTrue(any("SUMMARY" in text for text in texts))
+        self.assertFalse(any("output 1 " in text for text in texts))  # the old tool results are summarized
+        mirror = self.mirror().read_text()
+        self.assertIn("revision=1", mirror.splitlines()[0])
+        self.assertIn("SUMMARY", mirror)  # the model's file starts over from the compacted context
+        later = self.send(*history, *call(5)).body["input"]  # and it holds for later requests
+        self.assertTrue(any("SUMMARY" in json.dumps(item) for item in later))
+
     def test_what_an_edit_kept_is_never_withheld(self) -> None:
         self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory)))
         history = [msg("user", "read the files"), *call(1), *call(2)]

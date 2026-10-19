@@ -291,8 +291,12 @@ file and where the harness sent it, which also keeps the system prompt's cache. 
 pi-clm holds it, with its overflow guard (`clm_guard`): a request past the limit has the oldest tool
 results since the model's last accepted edit replaced, one by one, by a note naming a file (in
 `withheld/` beside the context file) with the full text, until it fits, and a notice says so; what
-the model's edits kept is never withheld, and nothing is re-run. (The paper's harness enforces the
-budget too, by rolling back the newest turns and demanding a compaction.) Two changes adapt the paper's loop, which ran until the task was submitted, to
+the model's edits kept is never withheld, and nothing is re-run. And as pi-clm leaves the recovery
+from a provider's overflow to Pi's own compaction, a request the upstream rejects as too long is
+compacted as `compaction` compacts it (the model's file then starts over from the compacted
+context); within the window, the budget is the guard's and the model's alone. (The paper's harness
+enforces the budget too, by rolling back the newest turns and demanding a compaction, and ends the
+session when its retries run out.) Two changes adapt the paper's loop, which ran until the task was submitted, to
 chat harnesses, which end the turn on the first reply without a tool call: the instructions say
 that receipts, readouts and nudges come from the context manager and that the user's request
 goes on after them, and the urgent nudge says "compact … before anything else, … then continue
