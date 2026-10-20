@@ -514,7 +514,7 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
     turn = 1800 if strategy.startswith("rlm") else 600  # an RLM works out every step before the model takes it
     # `--cold-start`: `relay setup`, then Relay stopped before each turn (a machine restarted): the
     # harness's hook must start it before its first request.
-    stop = "(cd /relay && python3 -m relay.cli stop >> ~/relay-setup.log 2>&1)" if cold else ""
+    stop = "(cd /relay && python3 -c 'from relay import service; service.stop_process()')" if cold else ""
     setup = f"(cd /relay && python3 -m relay.cli setup {harness} --via {via} >> ~/relay-setup.log 2>&1)\n{stop}"
     container(name, root, env, f"""
         cd /project && timeout {turn} {spec.command} > ~/harness.out 2> ~/harness.err < /dev/null

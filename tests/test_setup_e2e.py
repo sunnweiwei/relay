@@ -3,8 +3,8 @@
 Codex is set up as a user has it (the built-in provider, an API key). One conversation is
 running through `codex exec` and its resumes, another is open in the app server (as the app or
 Remote Control keeps it). Then, as the user (or Codex itself) would: `relay setup codex
---strategy clm`, later `relay strategy folding`, `relay uninstall codex` and `relay stop`, each
-as the command line runs it. What reached the upstream shows which strategy each request had.
+--strategy clm`, later `relay strategy folding` and `relay uninstall codex`, each as the command
+line runs it. What reached the upstream shows which strategy each request had.
 """
 
 from __future__ import annotations
@@ -95,7 +95,11 @@ class SetupMidSessionTests(unittest.TestCase):
                     "HOME": str(self.home), "CODEX_HOME": str(self.home / ".codex"), "NO_COLOR": "1"}
         subprocess.run(["codex", "login", "--with-api-key"], input="sk-test", env=self.env, check=True,
                        capture_output=True, text=True)
-        self.addCleanup(lambda: self.relay("stop"))
+        self.addCleanup(self.stop_relay)
+
+    def stop_relay(self) -> None:  # (the test's own: there is no stopping Relay from its command line)
+        subprocess.run([sys.executable, "-c", "from relay import service; service.stop_process()"], env=self.env,
+                       cwd=Path(__file__).parents[1], check=True)
 
     def relay(self, *args: str) -> str:
         result = subprocess.run([sys.executable, "-m", "relay.cli", *args], env=self.env, cwd=Path(__file__).parents[1],
@@ -150,10 +154,9 @@ class SetupMidSessionTests(unittest.TestCase):
         app.turn(after, "after uninstall")  # new conversations go to the provider again
         app.turn(new, "new thread turn 3")  # one through Relay goes on through it
         self.assertEqual([self.strategy(p) for p in ("after uninstall", "new thread turn 3")], ["none", "folding"])
-        self.assertIn("stopped Relay", self.relay("stop"))
         result = subprocess.run([sys.executable, "-m", "relay.cli", "status"], env=self.env,
                                 cwd=Path(__file__).parents[1], capture_output=True, text=True)
-        self.assertIn("not running", result.stdout)
+        self.assertIn("running at", result.stdout)  # (it runs on for the conversation still open on it)
 
 
 if __name__ == "__main__":

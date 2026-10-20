@@ -58,7 +58,8 @@ Hermes's shell hooks need consent too, so its hook is a plugin.
 
 `relay setup <harness> --autostart` registers Relay with the system's service manager instead:
 a systemd user unit on Linux, a launchd agent on macOS. That starts Relay at login and again if
-it exits, for any harness. `relay stop` removes it.
+it exits, for any harness. Once no harness goes through Relay (`relay uninstall` of the last one),
+it is no longer started at login; the one running goes on for conversations still open.
 
 ## Changing the strategy
 
@@ -76,7 +77,7 @@ history as the harness has it. Switching back finds the earlier strategy's conte
 | --- | --- |
 | Relay already set up, strategy changed | Every conversation, from its next request |
 | First `relay setup` | New conversations. Codex, Claude Code and the other harnesses read their config as a conversation starts: one already open goes on as it was, without Relay, until a new one is started. `codex exec resume` starts again on every turn, so it changes from its next turn. |
-| `relay uninstall <harness>` | New conversations go to the provider directly again. One already open keeps going through Relay, which keeps running until `relay stop`. |
+| `relay uninstall <harness>` | New conversations go to the provider directly again. One already open keeps going through Relay, which keeps running for it (until the machine restarts). |
 
 ## For a coding agent asked to set Relay up
 
@@ -137,16 +138,15 @@ for them:
 
     relay status                   # running?, its strategy, what keeps it running, the harnesses set up
     relay start                    # make sure Relay runs (what the harnesses' hooks run)
-    relay uninstall codex          # put the harness's config back as it was
-    relay stop                     # stop Relay (and remove its service)
+    relay uninstall codex          # put the harness's config back as it was (--all: every harness)
 
 While a harness points at Relay, it reaches its model only through Relay. If a model request
 fails because nothing answers at Relay's address, run `relay start`. If that does not help, read
 the log (`~/.config/relay/relay.log`), or `relay uninstall` the harness.
 
-Going back to the harness on its own: `relay uninstall <harness>`, not `relay stop` alone (a
-harness still pointed at Relay fails, or starts Relay again with its hook) and not by changing
-its endpoint by hand (its own auto-compaction would stay off). Relay never shortened the
+Going back to the harness on its own: `relay uninstall <harness>` (there is no stopping Relay by
+hand: a harness still pointed at it would fail), not changing its endpoint by hand (its own
+auto-compaction would stay off). Relay never shortened the
 harness's own history: a conversation that grew past the model's window through Relay is sent
 whole once it goes direct. Claude Code then compacts itself; Codex has the request rejected and
 cannot recover the conversation. Start a new conversation, or go on with that one through Relay.

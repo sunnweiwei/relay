@@ -5,9 +5,9 @@
   relay strategy [S] [--set ...]    show or change the strategy; the running Relay follows at once
   relay settings | set name=value ... | unset name ...
   relay status                      whether Relay runs, its strategy, the harnesses set up
-  relay uninstall <harness>         restore the harness's config
+  relay uninstall <harness> | --all restore the harness's config (the last one: Relay is no longer
+                                    started at login; it runs on for conversations still open)
   relay start                       make sure Relay runs (harness hooks run it as a session starts)
-  relay stop                        stop Relay (and remove its service)
   relay serve                       run Relay in the foreground (what the service runs)
   relay install <harness> [--via]   only point a harness at Relay (through the proxy, or a hook)
   relay run <harness> [args...]     run a harness through a private proxy
@@ -65,15 +65,15 @@ def main(argv: list[str] | None = None) -> int:
     unset.add_argument("names", nargs="+", metavar="NAME")
     commands.add_parser("status", help="whether Relay runs, its strategy, the harnesses set up")
     commands.add_parser("start", help="make sure Relay runs")
-    commands.add_parser("stop", help="stop Relay (and remove its service)")
     commands.add_parser("help", help="the guide")
     serve = commands.add_parser("serve", help="run Relay in the foreground")
     serve.add_argument("--host")
     serve.add_argument("--port", type=int)
     install_ = commands.add_parser("install", help="only point a harness at Relay")
     uninstall_ = commands.add_parser("uninstall", help="restore a harness")
-    for command in (install_, uninstall_):
-        command.add_argument("harness", choices=harnesses)
+    install_.add_argument("harness", choices=harnesses)
+    uninstall_.add_argument("harness", choices=harnesses, nargs="?")
+    uninstall_.add_argument("--all", action="store_true", help="every harness set up")
     install_.add_argument("--url", help="Relay's address (default: the host and port settings)")
     install_.add_argument("--via", choices=["auto", "proxy", "hook"], default="auto",
                           help="integration path (default: the harness's preferred one)")
@@ -105,18 +105,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Relay runs {now['strategy']} at {service.address()}" if now else
                   f"Relay did not start: see {service.log_file()}", file=sys.stdout if now else sys.stderr)
             return 0 if now else 1
-        if options.command == "stop":
-            kind = service.stop()
-            print(f"stopped Relay ({kind})" if kind else "Relay was not running as a service")
-            if pointed := install.installed():  # (still pointed at Relay: stopping it does not point them back)
-                again = [name for name in pointed if any((str(hook.path), tuple(hook.key)) in install.written(name)
-                                                         for hook in HARNESSES[name].starter(service.start_command()))]
-                failing = [name for name in pointed if name not in again]
-                print("  note: still going through Relay: "
-                      + "; ".join([*([f"{', '.join(again)} start it again with their next session"] if again else []),
-                                   *([f"{', '.join(failing)}: requests fail until `relay start`"] if failing else [])])
-                      + ". `relay uninstall <harness>` points a harness back at its own endpoint.")
-            return 0
     except (ValueError, RuntimeError) as error:
         print(f"relay {options.command}: {error}", file=sys.stderr)
         return 1
@@ -124,7 +112,11 @@ def main(argv: list[str] | None = None) -> int:
     if options.command == "install":
         return _install(harness, options.via, options.url or service.address())
     if options.command == "uninstall":
-        return _uninstall(harness)
+        if options.all == bool(harness):
+            print("relay uninstall: name a harness, or --all", file=sys.stderr)
+            return 1
+        return max([_uninstall(HARNESSES[name]) for name in install.installed()] if options.all else [_uninstall(harness)],
+                   default=0)
     if options.command == "run":
         return _run(config, ALIASES.get(options.harness, options.harness), options.args)
     host = getattr(options, "host", None) or config.host
@@ -254,6 +246,9 @@ def _uninstall(harness: Harness) -> int:
           "window through Relay is sent whole once it goes direct: Codex has it rejected and cannot compact it "
           "(Claude Code compacts itself); start a new conversation, or go on with that one through Relay "
           f"(`relay setup {harness.name}`).")
+    if not install.installed() and service.release() in ("systemd", "launchd"):
+        print("  no harness goes through Relay now: it is no longer started at login, and the one running goes on "
+              "for the conversations still open")
     return 0
 
 

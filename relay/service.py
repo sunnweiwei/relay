@@ -1,4 +1,5 @@
-"""Relay as a process of the user's: started by `relay setup` and `relay start`, stopped by `relay stop`.
+"""Relay as a process of the user's: started by `relay setup` and `relay start`; once no harness goes
+through it, no longer started at login (it runs on until the machine restarts).
 
 A harness pointed at Relay reaches its model only through Relay, so Relay must be running. By
 default it runs as a process of its own (a daemon: its pid and its log in Relay's directory),
@@ -7,7 +8,7 @@ runs a command as a session starts (Claude Code's SessionStart hook) runs `relay
 returns at once while Relay answers and starts it otherwise, so a machine's restart costs
 nothing. `relay setup --autostart` registers Relay with the system's service manager instead
 (a systemd user unit on Linux, a launchd agent on macOS), which starts it at login and again if it
-exits. What runs it is recorded in Relay's directory (`service.json`), for `relay stop` to undo.
+exits. What runs it is recorded in Relay's directory (`service.json`).
 """
 
 from __future__ import annotations
@@ -150,6 +151,7 @@ def start(autostart: bool = False) -> str:
         path.write_text(agent())
         domain = f"gui/{os.getuid()}"
         subprocess.run(["launchctl", "bootout", f"{domain}/{LABEL}"], capture_output=True)
+        subprocess.run(["launchctl", "enable", f"{domain}/{LABEL}"], capture_output=True)  # (if released before)
         _run(["launchctl", "bootstrap", domain, str(path)])
         _remember({"manager": kind, "path": str(path)})
     else:
@@ -205,21 +207,15 @@ def restart() -> None:
         start()
 
 
-def stop() -> str | None:
-    """Stop Relay and remove its service; what had kept it running."""
+def release() -> str | None:
+    """No harness goes through Relay any more: the service manager stops starting it at login. The
+    one running goes on, for the conversations still open on its address; what had kept it running."""
 
-    entry = record()
-    kind = entry.get("manager")
+    kind = record().get("manager")
     if kind == "systemd":
-        subprocess.run(["systemctl", "--user", "disable", "--now", f"{NAME}.service"], capture_output=True)
-        Path(entry["path"]).unlink(missing_ok=True)
-        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+        subprocess.run(["systemctl", "--user", "disable", f"{NAME}.service"], capture_output=True)
     elif kind == "launchd":
-        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
-        Path(entry["path"]).unlink(missing_ok=True)
-    else:
-        stop_process()
-    _remember(None)
+        subprocess.run(["launchctl", "disable", f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
     return kind
 
 

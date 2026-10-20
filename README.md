@@ -24,8 +24,7 @@ relay setup codex --strategy clm   # or: claude, gemini_cli, pi, opencode, kilo,
 codex                              # use the harness exactly as before
 relay strategy folding             # another strategy, for every conversation from its next request
 relay status                       # whether Relay runs, its strategy, the harnesses set up
-relay uninstall codex              # restore its configuration
-relay stop                         # stop Relay and remove its service
+relay uninstall codex              # restore its configuration (--all: every harness set up)
 relay help                         # the guide, for people and for agents setting Relay up
 ```
 
@@ -39,10 +38,12 @@ conversation, which still goes through the proxy. A harness reads its configurat
 started after `relay setup` go through Relay; one already open goes on as it was. Once a harness
 goes through Relay, a strategy changed with `relay strategy` applies to every conversation from
 its next request, with no restart. `relay uninstall` sends new conversations to the provider
-again, and Relay goes on forwarding the ones it served until `relay stop`. Nothing restarts the
-harness. (`tests/test_setup_e2e.py` plays this with the real Codex: a `codex exec` conversation
-and one open in the app server when `relay setup` runs, then `relay strategy`, `relay
-uninstall` and `relay stop`.)
+again, and Relay goes on forwarding the ones it served. There is no stopping Relay by hand: going
+back is uninstalling, and once no harness goes through Relay it is no longer started at login
+(`--autostart`); the one running goes on for the conversations still open on its address, until
+the machine restarts. Nothing restarts the harness. (`tests/test_setup_e2e.py` plays this with
+the real Codex: a `codex exec` conversation and one open in the app server when `relay setup`
+runs, then `relay strategy` and `relay uninstall`.)
 
 `relay install` edits the harness's own configuration file. It wraps whatever endpoint
 the harness is configured with (or its default): the setting becomes
@@ -75,8 +76,7 @@ that grew past the model's window through Relay is sent whole once it goes direc
 with each harness against an upstream that rejects it as too long: Claude Code 2.1.294 compacts
 itself and goes on; Codex 0.163.0 has every retry rejected, its own compaction included (its
 compaction request does not fit either), and the conversation cannot go on directly. `relay
-uninstall` and `relay stop` say so, and `relay stop` names the harnesses still going through
-Relay (they fail, or start it again with their hook).
+uninstall` says so.
 
 ## Architecture
 
@@ -112,7 +112,7 @@ Three layers keep strategies free of harness and protocol details:
 | `relay/core/ir.py` | The strategy contract: `Item` (kind, text, media), `Request` and `Context`. Items keep a reference to their wire item, so whatever a strategy keeps is forwarded byte-for-byte. |
 | `relay/protocols/` | One codec per wire protocol (OpenAI Responses, OpenAI Chat Completions, Anthropic Messages, Gemini): item kinds and text, legal cut points (never between a tool call and its result), prefix canonicalization, synthetic messages, summary requests, usage and overflow errors. |
 | `relay/harnesses/` | Harness profiles: injected context, conversation identity, current state and its placement, the harness's own compaction requests, detection from request headers, and the settings `relay install` writes. |
-| `relay/settings.py`, `relay/service.py`, `relay/cli.py` | Relay's settings file (`relay set`, `relay strategy`), which a running Relay follows; Relay as a service of the user's (`relay setup`, `relay stop`); the command line and its guide (`relay/HELP.md`, `relay help`). |
+| `relay/settings.py`, `relay/service.py`, `relay/cli.py` | Relay's settings file (`relay set`, `relay strategy`), which a running Relay follows; Relay as a service of the user's (`relay setup`, `relay start`); the command line and its guide (`relay/HELP.md`, `relay help`). |
 | `relay/install.py` | `relay install` / `uninstall`: reversible edits of JSON, TOML, YAML and `.env` config files, and the endpoint mounts Relay forwards. |
 | `relay/strategies/` | Strategies. `compaction.py` ports Codex's local compaction; `clm.py` lets the model edit its own context (Context Language Models); `folding.py` folds the branches an agent returns from (Context Folding); `prolong.py` keeps a session log the agent searches (PRO-LONG). |
 | `relay/core/engine.py` | Per-request orchestration: restore the stored context, estimate tokens, ask the strategy, place the harness's own items, check the result, remember. It records each request's cache decision (matched depth) and warns when a request no longer reaches its conversation's last stored context, with the item where it diverged. Strategy failures never reach the harness; the request is forwarded with the last good context. |
