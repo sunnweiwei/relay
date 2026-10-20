@@ -31,7 +31,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from check import CODES, NATIVE_COMPACT, REPO, SPECS, STATE_FILES, container, self_compactions  # noqa: E402
+from check import CODES, NATIVE_COMPACT, REPO, SPECS, STATE_FILES, compact_turn, container, self_compactions  # noqa: E402
 
 sys.path.insert(0, str(REPO))
 from relay.core.engine import Engine  # noqa: E402
@@ -144,7 +144,7 @@ def run(name: str, native: bool = False) -> Path:
         "sed -i s/ALPHA/BETA/ " + " ".join(STATE_FILES) + " && echo 'file 1 was edited: VIOLET' >> /project/file_1.txt",
         turn(2, TURNS[1]),
         turn(5, GROW) if native else "",
-        turn(3, compact) if compact and harness not in AUTO and not (native and harness in NATIVE_AUTO) else "",
+        compact_turn(harness, spec, "~/turn3.out") if compact and harness not in AUTO and not (native and harness in NATIVE_AUTO) else "",
         turn(4, TURNS[2]),
     ])
     env = {"compact_growth": str(10**9), "compact_min_gain": "0"}  # Relay records; it never compacts

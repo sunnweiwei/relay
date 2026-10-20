@@ -71,12 +71,24 @@ values are recorded in `~/.config/relay/installed.json` for `relay uninstall`.
 `relay run <harness> -- <args>` runs Codex or Claude Code through a private, temporary
 Relay instead. `relay install` also turns the harness's own auto-compaction off, so Relay's
 strategy is the one that runs (see [Harness auto-compaction](#harness-auto-compaction));
-`relay uninstall` restores it. Relay never shortens the harness's own history, so a conversation
-that grew past the model's window through Relay is sent whole once it goes direct again. Checked
-with each harness against an upstream that rejects it as too long: Claude Code 2.1.294 compacts
-itself and goes on; Codex 0.163.0 has every retry rejected, its own compaction included (its
-compaction request does not fit either), and the conversation cannot go on directly. `relay
-uninstall` says so.
+`relay uninstall` restores it.
+
+Relay never shortens the harness's own history, so a conversation that grew past the model's
+window through Relay is sent whole once it goes direct again. Against an upstream that rejects it
+as too long, Claude Code 2.1.294 compacts itself and goes on; Codex 0.163.0 has every retry
+rejected, its own compaction included (that request does not fit either). The way back for such a
+conversation is the harness's own compaction while it still goes through Relay: its compaction
+request gets Relay's compacted context, so it fits, and the harness keeps the summary as its own
+history. `tests/docker/switch_back.py` plays it (two turns through Relay compacting every 3k
+tokens, the harness's own compaction, then Relay only recording, as going direct would send):
+
+| History the harness sends afterwards | Harnesses (share of its history before) |
+| --- | --- |
+| shortened: it goes on direct | Goose 0.20, nanobot 0.23, WorkBuddy 0.49, Codex 0.60 (app server; `/compact` in its TUI), Kilo 0.65 (`run --command compact`), Claude Code 0.67, pi 0.79 (RPC `compact`; it keeps ~20k recent tokens) |
+| not checked: compaction from the TUI only (headless, the command goes to the model as a prompt) | OpenCode 1.19 (`run --command compact` fails), Crush, Hermes Agent, Kimi Code, DeepSeek Harness, OpenClaw; Gemini CLI (`/compress`) |
+| no compaction of its own | mini-swe-agent |
+
+`relay uninstall` says so.
 
 ## Architecture
 

@@ -146,10 +146,16 @@ the log (`~/.config/relay/relay.log`), or `relay uninstall` the harness.
 
 Going back to the harness on its own: `relay uninstall <harness>` (there is no stopping Relay by
 hand: a harness still pointed at it would fail), not changing its endpoint by hand (its own
-auto-compaction would stay off). Relay never shortened the
-harness's own history: a conversation that grew past the model's window through Relay is sent
-whole once it goes direct. Claude Code then compacts itself; Codex has the request rejected and
-cannot recover the conversation. Start a new conversation, or go on with that one through Relay.
+auto-compaction would stay off).
+
+Relay never shortened the harness's own history: a long conversation is sent whole once it goes
+direct, and Codex has it rejected. To keep one, compact it with the harness's own command while it
+still goes through Relay (an open one does, even after uninstalling; for a closed one, set Relay up
+again first): the harness's compaction gets Relay's context, and the harness keeps the summary as
+its own history. Then it goes on direct. Checked for Claude Code, Codex (`/compact` in its TUI or
+app), Goose, nanobot, WorkBuddy, Kilo and pi. OpenCode, Crush, Hermes (`/compress`), Kimi Code,
+DeepSeek Harness and OpenClaw compact from their TUI only, which the checks cannot drive; Gemini
+CLI's is `/compress` in its TUI; mini-swe-agent has none (start a new conversation).
 
 ## Other commands
 

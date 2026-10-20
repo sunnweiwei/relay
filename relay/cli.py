@@ -242,10 +242,10 @@ def _uninstall(harness: Harness) -> int:
         print(f"relay uninstall: {error}", file=sys.stderr)
         return 1
     print(f"uninstalled {harness.name}: " + ", ".join(sorted({str(path) for path in paths})))
-    print("  note: the harness's own history was never shortened. A conversation that grew past the model's "
-          "window through Relay is sent whole once it goes direct: Codex has it rejected and cannot compact it "
-          "(Claude Code compacts itself); start a new conversation, or go on with that one through Relay "
-          f"(`relay setup {harness.name}`).")
+    print("  note: Relay never shortened the harness's own history, so a long conversation from before is sent "
+          "whole once it goes direct (Codex has it rejected). To keep one, compact it with the harness's own "
+          "command (`/compact`) while it still goes through Relay: one open now still does; for one closed, "
+          f"`relay setup {harness.name}` again first. The harness then keeps Relay's context as its own.")
     if not install.installed() and service.release() in ("systemd", "launchd"):
         print("  no harness goes through Relay now: it is no longer started at login, and the one running goes on "
               "for the conversations still open")

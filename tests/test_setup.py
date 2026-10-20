@@ -111,7 +111,7 @@ class SetupTests(unittest.TestCase):
                             cli.HARNESSES["claude_code"].starter(service.start_command()))  # (as `relay setup` sets it)
             code, out = self.run_cli("uninstall", "codex")
             self.assertEqual((code, released), (0, []))  # (Claude Code still goes through Relay)
-            self.assertIn("go on with that one through Relay (`relay setup codex`)", out)
+            self.assertIn("compact it with the harness's own command", out)
             code, out = self.run_cli("uninstall", "--all")
         self.assertEqual((code, install.installed(), released), (0, [], [1]))
         self.assertIn("no longer started at login", out)

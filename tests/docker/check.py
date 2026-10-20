@@ -165,12 +165,28 @@ COMPACT_ASK = re.compile(r"structured summary|<conversation>|summary of our conv
                          r"summarize the conversation|\\[User\\]:", re.I)
 
 # `--native-compact`: the harness compacts its own history between the turns, as a user would,
-# with this command sent through its own continue/resume.
-# (Not Gemini CLI: since 0.63 its headless mode hands `/compress` to the model as a question.)
-NATIVE_COMPACT = {"claude_code": "/compact", "codex": "/compact", "pi": "/compact",
-                  "opencode": "/compact", "kilo": "/compact", "crush": "/compact", "openclaw": "/compact",
-                  "goose": "/compact", "kimi_code": "/compact", "hermes": "/compress", "nanobot": "/compact",
-                  "deepseek_harness": "/compact", "workbuddy": "/compact"}
+# with this command sent through its own continue/resume (or, for some, another headless entry:
+# `compact_turn`). Only commands that compact headless (checked by tests/docker/switch_back.py):
+# OpenCode 1.19, Crush, OpenClaw, Kimi Code, Hermes and DeepSeek Harness compact from their TUI
+# only, and headless they send the command to the model as a prompt (OpenCode's `run --command
+# compact` fails); Gemini CLI's headless mode does the same with `/compress` since 0.63.
+NATIVE_COMPACT = {"claude_code": "/compact", "codex": "/compact", "pi": "/compact", "kilo": "/compact",
+                  "goose": "/compact", "nanobot": "/compact", "workbuddy": "/compact"}
+
+
+def compact_turn(harness: str, spec: Spec, out: str = "~/compact.out") -> str:
+    """Shell that has the harness compact its session with its own command (`NATIVE_COMPACT`). Codex's
+    `/compact` is a TUI command (`codex exec` sends it to the model as a prompt): its app server
+    compacts instead (tests/docker/codex_compact.py)."""
+
+    if harness == "codex":
+        return f"cd /project && timeout 900 python3 /relay/tests/docker/codex_compact.py > {out} 2>&1 < /dev/null"
+    if harness == "kilo":  # (`run` sends `/compact` to the model; `--command` runs it)
+        return f'cd /project && timeout 300 {spec.resume.replace(chr(34) + "$PROMPT" + chr(34), "--command compact")} > {out} 2>&1 < /dev/null'
+    if harness == "pi":  # (`-p` sends `/compact` to the model; its RPC mode compacts)
+        rpc = spec.resume.replace(" -p ", " --mode rpc ").replace(' "$PROMPT"', "")
+        return f"""cd /project && (printf '{{"type": "compact"}}\\n'; sleep 240) | timeout 300 {rpc} > {out} 2>&1"""
+    return f'export PROMPT="{NATIVE_COMPACT[harness]}" && cd /project && timeout 300 {spec.resume} > {out} 2>&1 < /dev/null'
 
 # `--probe`: what a harness keeps as state. Instruction files hold a codename that changes
 # between the turns; turn 2 asks for a sub-agent. Relay only records (no compaction).
@@ -518,7 +534,7 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
     setup = f"(cd /relay && python3 -m relay.cli setup {harness} --via {via} >> ~/relay-setup.log 2>&1)\n{stop}"
     container(name, root, env, f"""
         cd /project && timeout {turn} {spec.command} > ~/harness.out 2> ~/harness.err < /dev/null
-        {f'export PROMPT="{NATIVE_COMPACT[harness]}" && cd /project && timeout 300 {spec.resume} > ~/compact.out 2>&1 < /dev/null' if native else ""}
+        {compact_turn(harness, spec) if native else ""}
         export PROMPT="$PROMPT2"
         sed -i s/ALPHA/BETA/ {" ".join(STATE_FILES)}
         {stop}
