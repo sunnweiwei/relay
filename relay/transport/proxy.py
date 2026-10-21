@@ -27,7 +27,9 @@ from starlette.routing import Route
 
 from ..core.engine import Engine, Exchange
 from ..core.store import PrefixStore
+from .. import leaving
 from ..harnesses import Harness, detect
+from ..providers import context_window
 from ..protocols import Codec, codec_for
 from ..providers import Upstream, route, upstreams_from_settings
 from ..strategies import STRATEGIES
@@ -112,11 +114,13 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
         await app.state.client.aclose()
         app.state.summary_client.close()
         engine.store.flush()  # a store kept on disk: what changed since it was last written
+        leaving.flush()
 
     async def status(request: Request) -> Response:
         """What Relay runs now (`relay status`, and `relay setup` waiting for it)."""
 
         follow()
+        leaving.flush()  # (`relay status`, `relay uninstall` read what it noted)
         return JSONResponse({"relay": "ok", "strategy": engine.strategy.name, "window": engine.window,
                              "following": following, "pid": os.getpid(),
                              "harnesses": {name: {"release": version, "checked": detect({}, name).verified}
@@ -156,6 +160,9 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
 
         harness = detect(request.headers, config.harness, request.url.path)
         release(harness, request.headers)
+        # The model's own window (not Relay's threshold): what fits once the harness goes direct.
+        window = harness.window(body.get("model")) or context_window(body.get("model")) or engine.window
+        departing = harness.name in leaving.leaving() and window  # (`relay uninstall`: see relay/leaving.py)
 
         def prepare(force: bool = False) -> Exchange:
             return engine.prepare(
@@ -165,7 +172,13 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
                 tenant=next((request.headers[h] for h in TENANT_HEADERS if h in request.headers), ""),
                 post=post,
                 force=force,
+                direct_within=int(leaving.FITS * window) if departing and not force else None,
             )
+
+        def noted(exchange: Exchange) -> None:
+            leaving.seen(harness.name, exchange.conversation, exchange.title, exchange.whole, window, exchange.compacting)
+            if departing and (restored := leaving.settle()):
+                log.info("no conversation of %s needs Relay any more: its configuration is restored", ", ".join(restored))
 
         try:
             exchange = await run_in_threadpool(prepare)
@@ -173,9 +186,13 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
             log.exception("could not prepare the request; forwarding it unchanged")
             return await _passthrough(client, "POST", url, headers, content)
 
+        try:
+            await run_in_threadpool(noted, exchange)
+        except Exception:
+            log.exception("could not note the conversation")
         items = harness.codec(codec).items  # as the engine counts them
         trace(path=request.url.path, user_agent=request.headers.get("user-agent"),
-              items=len(items(body)), sent=len(items(exchange.body)),
+              items=len(items(body)), sent=len(items(exchange.body)), direct=exchange.direct,
               rewritten=exchange.body is not body, compacted=exchange.compacted, body=body,
               forwarded=exchange.body if exchange.body is not body else None,
               cache={"depth": exchange.depth, "covered": exchange.state.get("covered", 0), "diverged": exchange.diverged})

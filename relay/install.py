@@ -65,6 +65,12 @@ def installed() -> list[str]:
     return sorted(_load())
 
 
+def written(name: str) -> set[tuple[str, tuple[Any, ...]]]:
+    """The (file, key) pairs `relay install` set for a harness."""
+
+    return {(record["path"], tuple(record["key"])) for record in _load().get(name, [])}
+
+
 def uninstall(name: str) -> list[Path]:
     state = _load()
     records = state.pop(name, None)

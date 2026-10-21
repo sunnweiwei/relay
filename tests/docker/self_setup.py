@@ -66,7 +66,7 @@ def run(name: str, ref: str | None = None) -> dict:
         session(4, TASK.format(tag="clm")),
         f"{RELAY} strategy folding >> ~/status.out 2>&1",
         session(5, TASK.format(tag="folding")),
-        f"{RELAY} status >> ~/status.out 2>&1; {RELAY} stop >> ~/status.out 2>&1",
+        f"{RELAY} status >> ~/status.out 2>&1",
     ])
     container(name, root, {}, turns, timeout=5400, install=False, serve=False, importable=False)
     home = root / "home"

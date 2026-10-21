@@ -58,7 +58,8 @@ Hermes's shell hooks need consent too, so its hook is a plugin.
 
 `relay setup <harness> --autostart` registers Relay with the system's service manager instead:
 a systemd user unit on Linux, a launchd agent on macOS. That starts Relay at login and again if
-it exits, for any harness. `relay stop` removes it.
+it exits, for any harness. Once no harness goes through Relay (`relay uninstall` of the last one),
+it is no longer started at login; the one running goes on for conversations still open.
 
 ## Changing the strategy
 
@@ -76,7 +77,7 @@ history as the harness has it. Switching back finds the earlier strategy's conte
 | --- | --- |
 | Relay already set up, strategy changed | Every conversation, from its next request |
 | First `relay setup` | New conversations. Codex, Claude Code and the other harnesses read their config as a conversation starts: one already open goes on as it was, without Relay, until a new one is started. `codex exec resume` starts again on every turn, so it changes from its next turn. |
-| `relay uninstall <harness>` | New conversations go to the provider directly again. One already open keeps going through Relay, which keeps running until `relay stop`. |
+| `relay uninstall <harness>` | New conversations go to the provider directly again: at once, or, while conversations that grew past the window through Relay still need it, as if direct through Relay until those are compacted (see "Checking and undoing"). One already open keeps going through Relay, which keeps running for it (until the machine restarts). |
 
 ## For a coding agent asked to set Relay up
 
@@ -137,12 +138,33 @@ for them:
 
     relay status                   # running?, its strategy, what keeps it running, the harnesses set up
     relay start                    # make sure Relay runs (what the harnesses' hooks run)
-    relay uninstall codex          # put the harness's config back as it was
-    relay stop                     # stop Relay (and remove its service)
+    relay uninstall codex          # put the harness's config back as it was (--all: every harness)
 
 While a harness points at Relay, it reaches its model only through Relay. If a model request
 fails because nothing answers at Relay's address, run `relay start`. If that does not help, read
 the log (`~/.config/relay/relay.log`), or `relay uninstall` the harness.
+
+Going back to the harness on its own: `relay uninstall <harness>` (there is no stopping Relay by
+hand: a harness still pointed at it would fail), not changing its endpoint by hand (its own
+auto-compaction would stay off).
+
+Relay never shortened the harness's own history, so a conversation that grew past the model's window
+through Relay would fail direct. `relay uninstall` therefore restores the harness at once only when
+none did; otherwise the harness leaves in two steps, and nothing needs answering:
+
+1. It stays pointed at Relay, which forwards each conversation as the harness sends it (as if
+   direct) except those that would not fit, which it keeps managing. `relay uninstall` names them.
+2. To keep one, run the harness's own `/compact` in it (Hermes: `/compress`): its compaction goes
+   through Relay, gets Relay's context, and the harness keeps the summary as its own history, so
+   the conversation fits from then on.
+
+Once no conversation needs Relay (or a week after the last use of each), the harness's
+configuration is restored by itself; `relay status` shows what is left, then that it was restored.
+`relay uninstall <harness> --now` restores it at once (those conversations then fail direct);
+`relay setup <harness>` keeps it on Relay. The handing back was checked for Claude Code, Codex
+(`/compact` in its TUI or app), Goose, nanobot, WorkBuddy, Kilo and pi; OpenCode, Crush, Hermes,
+Kimi Code, DeepSeek Harness, OpenClaw and Gemini CLI compact from their TUI only, which the checks
+cannot drive; mini-swe-agent has no compaction of its own (start a new conversation).
 
 ## Other commands
 

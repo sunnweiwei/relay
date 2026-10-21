@@ -7,6 +7,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -14,7 +15,7 @@ from unittest import mock
 
 from starlette.testclient import TestClient
 
-from relay import cli, install, service, settings
+from relay import cli, install, leaving, service, settings
 from relay.transport import create_app
 from tests.fakes import FakeUpstream, local_upstreams, relay_settings, serve
 
@@ -100,6 +101,59 @@ class SetupTests(unittest.TestCase):
         self.assertIn("127.0.0.1:8787/up/codex-0", (self.codex / "config.toml").read_text())
         self.assertEqual((settings.value("strategy"), settings.value("clm_budget")), ("clm", "40000"))
         self.assertIn("one already open goes on as it was", out)
+
+    def test_uninstalling_every_harness_leaves_relay_running_but_not_started_at_login(self) -> None:
+        claude = self.root / "claude"
+        released = []
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(claude)}), \
+                mock.patch.object(service, "release", side_effect=lambda: released.append(1) or "systemd"):
+            install.install("codex", "http://127.0.0.1:8787", [])
+            install.install("claude_code", "http://127.0.0.1:8787",
+                            cli.HARNESSES["claude_code"].starter(service.start_command()))  # (as `relay setup` sets it)
+            code, out = self.run_cli("uninstall", "codex")
+            self.assertEqual((code, released), (0, []))  # (Claude Code still goes through Relay)
+            code, out = self.run_cli("uninstall", "--all")
+        self.assertEqual((code, install.installed(), released), (0, [], [1]))
+        self.assertIn("no longer started at login", out)
+        self.assertNotIn("relay start", json.dumps(json.loads((claude / "settings.json").read_text())))  # (its hook went)
+        with self.assertRaises(SystemExit):
+            self.run_cli("stop")  # (there is no stopping Relay: uninstalling is going back)
+
+    def test_a_harness_with_long_conversations_leaves_once_they_no_longer_need_relay(self) -> None:
+        install.install("codex", "http://127.0.0.1:8787", [])
+        leaving.seen("codex", "c1", "fix the flaky test", 300_000, 128_000, False)  # grew past the window
+        leaving.seen("codex", "c2", "a short one", 20_000, 128_000, False)
+        with mock.patch.object(service, "status", return_value=None), mock.patch.object(service, "release") as release:
+            code, out = self.run_cli("uninstall", "codex")
+            self.assertEqual((code, install.installed(), list(leaving.leaving())), (0, ["codex"], ["codex"]))
+            self.assertIn('"fix the flaky test" — ~300k tokens for a 128k window', out)
+            self.assertNotIn("a short one", out)
+            self.assertIn("`relay uninstall codex --now`", out)
+            code, out = self.run_cli("status")
+            self.assertIn("leaving Relay: codex, restored by itself once", out)
+            self.assertIn("harnesses set up: none", out)
+            leaving.seen("codex", "c1", "fix the flaky test", 300_000, 128_000, True)  # its own /compact, through Relay
+            code, out = self.run_cli("status")
+            self.assertIn("codex: no conversation needs Relay any more; its configuration is restored", out)
+            self.assertEqual((install.installed(), leaving.leaving()), ([], {}))
+            release.assert_called_once()
+
+    def test_leaving_ends_a_week_after_last_use_or_now_or_when_set_up_again(self) -> None:
+        install.install("codex", "http://127.0.0.1:8787", [])
+        leaving.seen("codex", "c1", "old work", 300_000, 128_000, False, now=time.time() - 8 * 86400)
+        with mock.patch.object(service, "status", return_value=None), mock.patch.object(service, "release"):
+            code, out = self.run_cli("uninstall", "codex")  # (used more than a week ago: nothing holds it)
+            self.assertIn("uninstalled codex", out)
+            install.install("codex", "http://127.0.0.1:8787", [])
+            leaving.seen("codex", "c2", "new work", 300_000, 128_000, False)
+            self.run_cli("uninstall", "codex")
+            self.assertEqual(list(leaving.leaving()), ["codex"])
+            leaving.stay("codex")  # (`relay setup codex` again)
+            self.assertEqual(leaving.leaving(), {})
+            code, out = self.run_cli("uninstall", "codex", "--now")
+            self.assertIn("uninstalled codex", out)
+            self.assertIn("fails direct", out)
+            self.assertEqual(install.installed(), [])
 
     def test_a_port_something_else_holds_is_given_up_for_a_free_one(self) -> None:
         with mock.patch.object(service, "status", return_value=None), mock.patch.object(service, "taken", return_value=True), \

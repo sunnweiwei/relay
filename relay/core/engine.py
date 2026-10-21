@@ -58,6 +58,11 @@ class Exchange:
     estimate: int = 0  # Relay's own estimate of the forwarded prompt, if usage is never reported
     depth: int = 0  # leading items that matched a stored prefix
     diverged: int | None = None  # where a request that found no stored context left its conversation's last one
+    conversation: str = ""  # the conversation's name, as strategies see it
+    title: str = ""  # what its user first typed
+    whole: int = 0  # the harness's own history as it sent it, estimated (tokens)
+    compacting: bool = False  # the harness compacting its own history
+    direct: bool = False  # forwarded as the harness sent it, as going direct would (`direct_within`)
 
 
 class Engine:
@@ -89,7 +94,12 @@ class Engine:
         tenant: str,
         post: Post,
         force: bool = False,
+        direct_within: int | None = None,
     ) -> Exchange:
+        """`direct_within`: a harness leaving Relay. A request whose own history (as the harness sent
+        it) is estimated within this many tokens goes as it came, without the stored context or the
+        strategy: what going direct would send, and it fits."""
+
         codec = harness.codec(codec)
         raw = codec.items(body)
         # Trailing items the harness regenerates on every request (live status, say) are
@@ -121,6 +131,13 @@ class Engine:
             return approx_tokens(codec.preamble(body), per_token) + sum(item_tokens(i, per_token) for i in items)
 
         volatile_items = [codec.classify(item) for item in volatile]
+        name = hashlib.sha256(thread).hexdigest()[:16]
+        title = next((typed.text[:80] for item in originals if item.kind is Kind.USER
+                      and (typed := harness.typed(item)) is not None and typed.text.strip()), "")
+        whole = math.ceil(size([*originals, *volatile_items]) * state.get("rate", 1.0))
+        if direct_within is not None and not compacting and whole <= direct_within:
+            return Exchange(body, partition, [], state, estimate=whole, conversation=name, title=title, whole=whole,
+                            direct=True)
         if isinstance(state.get("tokens"), int):  # the upstream's count for the stored prefix, then new items,
             # estimated at the rate the upstream's count of this conversation has shown (the text's own
             # density: code, another language, numbers)
@@ -168,7 +185,7 @@ class Engine:
             force,
             state.get("base"),
             state.get("strategy"),
-            hashlib.sha256(thread).hexdigest()[:16],
+            name,
             codec.offers_tools(body),
             sendable,
         )
@@ -235,7 +252,8 @@ class Engine:
         if instructions:
             forwarded = codec.with_instructions(forwarded, "\n\n".join(instructions))
         estimate = size([*items, *volatile_items]) + approx_tokens(" ".join([*notes, *instructions]), per_token)
-        return Exchange(forwarded, partition, [] if compacting else keys, state, changed, estimate, depth, diverged)
+        return Exchange(forwarded, partition, [] if compacting else keys, state, changed, estimate, depth, diverged,
+                        name, title, whole, compacting)
 
     def answer(self, request: Request, summarizer: Summarizer) -> Context | None:
         """The strategy's answer on a conversation a harness hook hands over before a request; the

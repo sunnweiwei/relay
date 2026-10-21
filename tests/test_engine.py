@@ -145,6 +145,15 @@ class EngineTests(unittest.TestCase):
         # both kept whole (the reminder took none of the budget), the reminder as the harness's state
         self.assertEqual(users[:3], ["first task", reminder, "second task"])
 
+    def test_a_leaving_harness_s_history_that_fits_goes_as_it_was_sent(self) -> None:
+        history = [msg("user", "fix it"), *step(1), *step(2)]
+        upstream = Upstream()
+        fits = self.prepare(body(*history), upstream, direct_within=100_000)
+        self.assertTrue(fits.direct)
+        self.assertEqual((fits.body["input"], fits.title, fits.conversation != ""), (history, "fix it", True))
+        self.assertEqual(upstream.requests, [])  # (no strategy, no summary)
+        self.assertTrue(self.prepare(body(*history), upstream, direct_within=100).compacted)  # too long: managed
+
     def test_reported_usage_anchors_the_next_estimate(self) -> None:
         upstream = Upstream()
         history = [msg("user", "task"), *step(1, size=10)]
