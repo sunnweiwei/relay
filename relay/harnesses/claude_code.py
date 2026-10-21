@@ -35,6 +35,8 @@ def settings_file() -> Path:
 
 class ClaudeCode(Harness):
     name = "claude_code"
+    verified = "2.1.294"
+    agent = re.compile(r"\bclaude-cli/(\d[\w.-]*)")
     injected = (REMINDER, COMMAND)
     summaries = (SUMMARY_PREFIX,)
     compaction_prompts = (COMPACT_PROMPT,)  # `/compact` and auto-compact append it to the last user message

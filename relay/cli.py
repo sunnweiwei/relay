@@ -216,6 +216,10 @@ def _status() -> int:
     _settle()
     departing = leaving.leaving()
     print(f"harnesses set up: {', '.join(n for n in install.installed() if n not in departing) or 'none'}")
+    for name, seen in ((now or {}).get("harnesses") or {}).items():  # (as their requests said it)
+        newer = HARNESSES[name].newer(seen["release"])
+        print(f"  {name} {seen['release']}: profile checked against {seen['checked'] or 'no release'}"
+              + (" (newer: served as the newest of those)" if newer else ""))
     for name in departing:
         waiting = leaving.needing(name)
         print(f"leaving Relay: {name}, restored by itself once {'this conversation does' if len(waiting) == 1 else 'these do'}"

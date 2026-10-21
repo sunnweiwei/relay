@@ -43,6 +43,10 @@ class Harness:
     injected: tuple[re.Pattern[str], ...] = (REMINDER,)  # blocks the harness writes into user messages
     summaries: tuple[str, ...] = ()  # how the summaries of its own compaction start (Codex's: every harness)
     compaction_prompts: tuple[str, ...] = ()  # what its own compaction asks of the model, in its last message
+    # The releases of the harness this profile was checked against (oldest–newest), and its release
+    # in the User-Agent it sends, where it sends one. A newer release is served as the newest one.
+    verified: str = ""
+    agent: re.Pattern[str] | None = None
 
     def matches(self, headers: Mapping[str, str]) -> bool:
         return False
@@ -52,6 +56,17 @@ class Harness:
         harness uses the protocol in a way that needs one."""
 
         return codec
+
+    def version(self, headers: Mapping[str, str]) -> str | None:
+        """The harness's release, as its request says it."""
+
+        match = self.agent.search(headers.get("user-agent", "")) if self.agent else None
+        return match.group(1) if match else None
+
+    def newer(self, version: str) -> bool:
+        """Whether `version` is newer than every release this profile was checked against."""
+
+        return bool(self.verified) and _release(version) > _release(self.verified.split("–")[-1])
 
     def refine(self, item: Item) -> Item:
         """Reclassify user-role items the harness wrote itself (context, summaries)."""
@@ -197,3 +212,7 @@ def plugin_file(path: Path, source: str, command: str) -> Setting:
     its plugins, with `command` in it; uninstalling removes it."""
 
     return Setting(path, (), (PLUGINS / source).read_text(encoding="utf-8").replace("__COMMAND__", json.dumps(command)))
+
+
+def _release(version: str) -> tuple[int, ...]:
+    return tuple(int(n) for n in re.findall(r"\d+", version))

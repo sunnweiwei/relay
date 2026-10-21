@@ -20,6 +20,8 @@ DEFAULTS = {
 
 class Crush(Harness):
     name = "crush"
+    verified = "0.98.1"
+    agent = re.compile(r"\bCharm-Crush/v?(\d[\w.-]*)")
     # Its reminders of the todo list, as messages of their own.
     injected = (REMINDER, re.compile(r"<system_reminder>.*?</system_reminder>", re.S))
     summaries = ("## Current State",)  # (its summary prompt's first required section)

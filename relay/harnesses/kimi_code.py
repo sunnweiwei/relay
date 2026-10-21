@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from pathlib import Path
 
@@ -22,6 +23,8 @@ DEFAULTS = {  # by provider type, for providers without an explicit base_url
 
 class KimiCode(Harness):
     name = "kimi_code"
+    verified = "2.1.1"
+    agent = re.compile(r"\bkimi-code-cli/(\d[\w.-]*)")
     # Its own compaction's summary, a user message (its notes around it are system reminders).
     summaries = ("The conversation so far has been compacted to free up context.",)
     compaction_prompts = ("You are about to run out of context. Create a handoff summary for the",)
