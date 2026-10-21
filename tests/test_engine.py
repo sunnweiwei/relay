@@ -153,6 +153,18 @@ class EngineTests(unittest.TestCase):
         self.engine.record(exchange, 299)  # the upstream counted far more than the text
         self.assertTrue(self.prepare(body(*history, *step(2, size=10)), upstream).compacted)
 
+    def test_new_items_are_estimated_at_the_rate_the_upstream_counted(self) -> None:
+        self.engine = Engine(Compaction(threshold=600, min_gain=0))
+        upstream, history = Upstream(), [msg("user", "task"), *step(1, size=400)]
+        exchange = self.prepare(body(*history), upstream)
+        self.engine.record(exchange, 3 * exchange.estimate)  # the text is three times denser than Relay guessed
+        grown = [*history, *step(2, size=400)]  # new items Relay alone puts at ~120 tokens
+        self.assertTrue(self.prepare(body(*grown), upstream).compacted)  # at the upstream's rate, past 600
+        self.engine = Engine(Compaction(threshold=600, min_gain=0))
+        exchange = self.prepare(body(*history), upstream)
+        self.engine.record(exchange, exchange.estimate)
+        self.assertFalse(self.prepare(body(*grown), upstream).compacted)
+
     def test_failures_forward_unchanged_and_back_off(self) -> None:
         upstream = Upstream((400, {"error": {"message": "invalid request"}}))
         request = body(msg("user", "task"), *step(1), *step(2))
@@ -199,7 +211,7 @@ class EngineTests(unittest.TestCase):
         engine = Engine(Compaction(threshold=600, min_gain=0), window=1_000)  # 950 per summary request
         self.assertTrue(engine.prepare(CODEC, HARNESS, body(*history), tenant="t", post=unmeasured).compacted)
         self.assertGreater(len(unmeasured.requests), 1)  # by the estimate alone, it does not fit
-        engine = Engine(Compaction(threshold=600, min_gain=0), window=1_000)
+        engine = Engine(Compaction(threshold=400, min_gain=0), window=1_000)  # (the new items too counted lower)
         first = engine.prepare(CODEC, HARNESS, body(*history[:3]), tenant="t", post=measured)
         engine.record(first, 100)  # the upstream counts fewer tokens than four bytes each
         self.assertTrue(engine.prepare(CODEC, HARNESS, body(*history), tenant="t", post=measured).compacted)

@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
@@ -37,6 +38,7 @@ from .store import PrefixStore
 from .tokens import approx_tokens, bytes_per_token, item_tokens
 
 log = logging.getLogger("relay")
+RATE = (0.5, 4.0)  # how far the upstream's count may scale Relay's estimate of new items
 
 Post = Callable[[Body], tuple[int, Any]]  # send a body upstream -> (status, JSON payload)
 TRANSIENT = {429, 500, 502, 503, 504}  # summary request errors worth retrying
@@ -119,8 +121,11 @@ class Engine:
             return approx_tokens(codec.preamble(body), per_token) + sum(item_tokens(i, per_token) for i in items)
 
         volatile_items = [codec.classify(item) for item in volatile]
-        if isinstance(state.get("tokens"), int):  # the upstream's count for the stored prefix, then new items
-            tokens = state["tokens"] + sum(item_tokens(originals[i], per_token) for i in range(depth, len(raw)))
+        if isinstance(state.get("tokens"), int):  # the upstream's count for the stored prefix, then new items,
+            # estimated at the rate the upstream's count of this conversation has shown (the text's own
+            # density: code, another language, numbers)
+            new = sum(item_tokens(originals[i], per_token) for i in range(depth, len(raw)))
+            tokens = state["tokens"] + math.ceil(new * state.get("rate", 1.0))
         else:
             tokens = size([*items, *volatile_items])
         # The strategy sees the conversation; what the harness wrote itself is its profile's.
@@ -258,6 +263,8 @@ class Engine:
             state["base"], state["estimated"] = input_tokens or exchange.estimate, not input_tokens
         if input_tokens:
             state["tokens"] = input_tokens
+            if exchange.estimate:  # (bounded: a count is the upstream's, the estimate stays a guess)
+                state["rate"] = min(max(input_tokens / exchange.estimate, RATE[0]), RATE[1])
         self.store.put(exchange.partition, exchange.keys, state)
 
     def _remember(self, thread: bytes, covered: int, keys: list[bytes]) -> None:
