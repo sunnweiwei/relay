@@ -140,6 +140,20 @@ class ProxyTests(unittest.TestCase):
             record = json.loads(trace.read_text().splitlines()[0])
         self.assertEqual((record["items"], record["sent"]), (4, 4))  # its tool results and its snapshot apart
 
+    def test_a_leaving_harness_goes_as_it_sends_until_a_conversation_needs_relay(self) -> None:
+        from relay import install, leaving
+        install.install("generic", "http://127.0.0.1:8787", [])
+        leaving.leave("generic")
+        fake = FakeUpstream()
+        with serve(fake.app) as upstream:
+            config = ProxyConfig(upstreams=local_upstreams(upstream), harness="generic")
+            engine = Engine(Compaction(threshold=1_000), PrefixStore(), window=100_000)
+            with serve(create_app(engine, config)) as url:
+                httpx.post(f"{url}/v1/responses", json=responses_body(3), headers=HEADERS)
+                self.assertEqual(fake.bodies("/v1/responses"), [responses_body(3)])  # fits: as it was sent
+                self.assertEqual(list(leaving.leaving()), [])  # (and no conversation holds it on Relay)
+                self.assertEqual(install.installed(), [])
+
     def test_configured_api_keys_replace_client_credentials(self) -> None:
         fake = FakeUpstream()
         with relay(fake, api_key="secret") as (url, _):

@@ -28,7 +28,7 @@ from pathlib import Path
 
 import uvicorn
 
-from . import install, integrations, service, settings
+from . import install, integrations, leaving, service, settings
 from .harnesses import HARNESSES, Harness
 from .strategies import STRATEGIES
 from .transport import ProxyConfig, create_app
@@ -74,6 +74,8 @@ def main(argv: list[str] | None = None) -> int:
     install_.add_argument("harness", choices=harnesses)
     uninstall_.add_argument("harness", choices=harnesses, nargs="?")
     uninstall_.add_argument("--all", action="store_true", help="every harness set up")
+    uninstall_.add_argument("--now", action="store_true",
+                            help="restore it now, even if conversations that grew through Relay would then fail")
     install_.add_argument("--url", help="Relay's address (default: the host and port settings)")
     install_.add_argument("--via", choices=["auto", "proxy", "hook"], default="auto",
                           help="integration path (default: the harness's preferred one)")
@@ -101,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         if options.command == "status":
             return _status()
         if options.command == "start":
+            _settle()
             now = service.ensure()
             print(f"Relay runs {now['strategy']} at {service.address()}" if now else
                   f"Relay did not start: see {service.log_file()}", file=sys.stdout if now else sys.stderr)
@@ -115,8 +118,8 @@ def main(argv: list[str] | None = None) -> int:
         if options.all == bool(harness):
             print("relay uninstall: name a harness, or --all", file=sys.stderr)
             return 1
-        return max([_uninstall(HARNESSES[name]) for name in install.installed()] if options.all else [_uninstall(harness)],
-                   default=0)
+        names = install.installed() if options.all else [harness.name]
+        return max([_uninstall(HARNESSES[name], options.now) for name in names], default=0)
     if options.command == "run":
         return _run(config, ALIASES.get(options.harness, options.harness), options.args)
     host = getattr(options, "host", None) or config.host
@@ -161,6 +164,7 @@ def _setup(harness: Harness, strategy: str | None, assignments: list[str], via: 
         return 1
     print(f"Relay runs {wanted} at {service.address()}")
     starter = harness.starter(service.start_command())
+    leaving.stay(harness.name)  # (set up again while leaving: it stays)
     if moved and harness.name in install.installed():
         install.uninstall(harness.name)  # (pointed at the old port)
     if harness.name not in install.installed() and _install(harness, via, service.address(), starter):
@@ -209,7 +213,19 @@ def _status() -> int:
     kept = {"process": f"a process of its own (pid {entry.get('pid')})", "systemd": "a systemd user service",
             "launchd": "a launchd agent"}
     print(f"kept running by: {kept.get(entry.get('manager'), 'nothing (started by hand?)')}")
-    print(f"harnesses set up: {', '.join(install.installed()) or 'none'}")
+    _settle()
+    departing = leaving.leaving()
+    print(f"harnesses set up: {', '.join(n for n in install.installed() if n not in departing) or 'none'}")
+    for name in departing:
+        waiting = leaving.needing(name)
+        print(f"leaving Relay: {name}, restored by itself once {'this conversation does' if len(waiting) == 1 else 'these do'}"
+              f" not need Relay any more (its own `/compact` in it, or a week after its last use):")
+        for entry in waiting:
+            print(f"  · {_described(entry)}")
+    for name, when in leaving.restored().items():
+        if name not in departing and name not in install.installed():
+            print(f"left Relay: {name}, restored by itself {_ago(when)} (no conversation needed Relay any more); "
+                  "it talks to its provider directly")
     print(f"settings: {settings.path()}")
     return 0 if now else 1
 
@@ -235,21 +251,55 @@ def _install(harness: Harness, via: str, url: str, extra: list | None = None) ->
     return 0
 
 
-def _uninstall(harness: Harness) -> int:
-    try:
-        paths = install.uninstall(harness.name)
-    except ValueError as error:
-        print(f"relay uninstall: {error}", file=sys.stderr)
+def _uninstall(harness: Harness, now: bool = False) -> int:
+    """The harness's configuration restored, unless conversations that grew past the model's window
+    through Relay would fail direct: it then leaves in two steps (relay/leaving.py)."""
+
+    name = harness.name
+    if name not in install.installed():
+        print(f"relay uninstall: {name} is not installed", file=sys.stderr)
         return 1
-    print(f"uninstalled {harness.name}: " + ", ".join(sorted({str(path) for path in paths})))
-    print("  note: Relay never shortened the harness's own history, so a long conversation from before is sent "
-          "whole once it goes direct (Codex has it rejected). To keep one, compact it with the harness's own "
-          "command (`/compact`) while it still goes through Relay: one open now still does; for one closed, "
-          f"`relay setup {harness.name}` again first. The harness then keeps Relay's context as its own.")
+    service.status()  # (a running Relay writes down the conversations it served)
+    waiting = leaving.needing(name)
+    if waiting and not now:
+        leaving.leave(name)
+        one = len(waiting) == 1
+        print(f"{name} is leaving Relay. Its conversations now go as {name} sends them, as if direct, except "
+              f"{'this one' if one else 'these'}: grown past the model's window through Relay, "
+              f"{'it' if one else 'they'} would fail direct, so Relay keeps managing {'it' if one else 'them'}:")
+        for entry in waiting:
+            print(f"  · {_described(entry)}")
+        print(f"To keep {'it' if one else 'one'}, run {name}'s own `/compact` in it: then it fits, and goes direct too.")
+        print(f"Once no conversation needs Relay (or a week after the last use of each), {name}'s configuration is "
+              f"restored by itself. `relay status` shows what is left; `relay uninstall {name} --now` restores it now.")
+        return 0
+    leaving.stay(name)
+    paths = install.uninstall(name)
+    print(f"uninstalled {name}: " + ", ".join(sorted({str(path) for path in paths})))
+    for entry in waiting:  # (--now)
+        print(f"  note: this one grew past the model's window through Relay and fails direct: {_described(entry)}")
     if not install.installed() and service.release() in ("systemd", "launchd"):
         print("  no harness goes through Relay now: it is no longer started at login, and the one running goes on "
               "for the conversations still open")
     return 0
+
+
+def _ago(when: float) -> str:
+    ago = max(0, time.time() - when)
+    return ("just now" if ago < 60 else f"{ago / 60:.0f} minutes ago" if ago < 3600
+            else f"{ago / 3600:.0f} hours ago" if ago < 86400 else f"{ago / 86400:.0f} days ago")
+
+
+def _described(entry: dict) -> str:
+    return (f"\"{entry.get('title') or '(no text)'}\" — ~{entry['whole'] / 1000:.0f}k tokens for a "
+            f"{entry['window'] / 1000:.0f}k window, last used {_ago(entry['last'])}")
+
+
+def _settle() -> None:
+    """Restore the leaving harnesses none of whose conversations needs Relay any more."""
+
+    for name in leaving.settle():
+        print(f"{name}: no conversation needs Relay any more; its configuration is restored")
 
 
 def _run(config: ProxyConfig, harness: str, args: list[str]) -> int:

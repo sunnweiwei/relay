@@ -109,6 +109,9 @@ class FakeUpstream:
             return JSONResponse({"error": {"code": "context_length_exceeded",
                                            "message": "Your input exceeds the context window."}}, 400)
         turns = [_responses_turn(item) for item in items]
+        if items and items[-1].get("type") == "compaction_trigger":  # Codex compacting on the server
+            return self._reply(body, [{"type": "compaction", "id": f"cmp_{len(self.requests)}",
+                                       "encrypted_content": "RkFLRSBDT01QQUNUSU9O"}])
         action, text, steps = self._decide(turns)
         if action == "error":
             return JSONResponse({"error": {"message": "summary failed"}}, 400)
@@ -127,6 +130,9 @@ class FakeUpstream:
         else:
             output = [{"type": "message", "id": "msg_fake", "role": "assistant", "status": "completed",
                        "content": [{"type": "output_text", "text": text, "annotations": []}]}]
+        return self._reply(body, output)
+
+    def _reply(self, body: dict[str, Any], output: list[dict[str, Any]]) -> Response:
         tokens = _prompt_tokens(body)
         response = {"id": f"resp_{len(self.requests)}", "object": "response", "status": "completed",
                     "model": body.get("model"), "output": output,

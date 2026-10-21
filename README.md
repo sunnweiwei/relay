@@ -88,7 +88,16 @@ tokens, the harness's own compaction, then Relay only recording, as going direct
 | not checked: compaction from the TUI only (headless, the command goes to the model as a prompt) | OpenCode 1.19 (`run --command compact` fails), Crush, Hermes Agent, Kimi Code, DeepSeek Harness, OpenClaw; Gemini CLI (`/compress`) |
 | no compaction of its own | mini-swe-agent |
 
-`relay uninstall` says so.
+So `relay uninstall` restores a harness at once only when none of its recent conversations grew
+past the window through Relay. Otherwise it leaves in two steps (`relay/leaving.py`): it stays
+pointed at Relay, which forwards each request whose history fits the window as the harness sent
+it (`Engine.prepare(direct_within=...)`, as going direct would) and keeps managing the others;
+`relay uninstall` names those and says to run the harness's own `/compact` in them. A compaction
+of the harness's own hands its conversation back. Once no conversation needs Relay, or each was
+last used a week ago, the harness's configuration is restored: by the Relay serving it, or by the
+next `relay status` or `relay start`. Relay remembers the conversations it served for that week
+(`conversations.json` in its directory, owner-only: what each one's user first typed, its size,
+the window, when it was last used). `tests/test_leaving_e2e.py` plays it with the real Codex.
 
 ## Architecture
 
