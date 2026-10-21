@@ -105,6 +105,8 @@ AGENT_TOOLS = ("spawn_agent", "close_agent", "resume_agent")
 
 class Codex(Harness):
     name = "codex"
+    verified = "0.162.0–0.163.0"
+    agent = re.compile(r"\bcodex_\w+/(\d[\w.-]*)")
 
     def matches(self, headers: Mapping[str, str]) -> bool:
         # App-server clients name themselves in `originator`; every Codex request carries its turn metadata.

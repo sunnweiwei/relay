@@ -67,6 +67,31 @@ values are recorded in `~/.config/relay/installed.json` for `relay uninstall`.
 | WorkBuddy / CodeBuddy Code | `url` of each custom model in `~/.workbuddy/models.json` / `~/.codebuddy/models.json` |
 | mini-swe-agent | `OPENAI_BASE_URL` / `GEMINI_API_BASE` / `ANTHROPIC_BASE_URL` in its global `.env` (read by litellm) |
 
+Each profile records the releases of its harness it was checked against (`Harness.verified`; Relay
+follows each harness's current release, without a profile per release). Where the harness names
+its release in its User-Agent, Relay notes the release it sees (`relay status`) and logs once when
+it is newer than those: the profile serves it as the newest of them, and its checks are what to
+re-run (`tests/docker/features.py`, `check.py`). A final release after a checked pre-release
+(0.2.0 after 0.2.0-rc.2) is not taken for a newer one.
+
+| Harness | Profile | Checked against | Release in its requests |
+| --- | --- | --- | --- |
+| Codex | `codex` | 0.162.0–0.163.0 | yes |
+| Claude Code | `claude_code` | 2.1.294 | yes |
+| Gemini CLI | `gemini_cli` | 0.63.0 | yes |
+| pi | `pi` | 1.1.0 | no |
+| OpenCode | `opencode` | 1.19.0 | yes |
+| Kilo | `kilo` | 7.8.8 | yes |
+| Crush | `crush` | 0.98.1 | yes |
+| OpenClaw | `openclaw` | 2026.10.1 | no |
+| Kimi Code | `kimi_code` | 2.1.1 | yes |
+| Goose | `goose` | 1.54.0 | no |
+| Hermes Agent | `hermes` | 0.19.0 | no |
+| nanobot | `nanobot` | 0.3.5 | no |
+| DeepSeek Harness | `deepseek_harness` | 0.2.0-rc.2 | yes |
+| WorkBuddy / CodeBuddy Code | `workbuddy` | 2.164.0 | yes (CodeBuddy's) |
+| mini-swe-agent | `mini_swe` | 2.4.6 | no |
+
 `relay run <harness> -- <args>` runs Codex or Claude Code through a private, temporary
 Relay instead. `relay install` also turns the harness's own auto-compaction off, so Relay's
 strategy is the one that runs (see [Harness auto-compaction](#harness-auto-compaction));

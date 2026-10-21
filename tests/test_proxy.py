@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
@@ -139,6 +140,17 @@ class ProxyTests(unittest.TestCase):
                 httpx.post(f"{url}/v1/messages", json=body, headers={"x-api-key": "tenant"})
             record = json.loads(trace.read_text().splitlines()[0])
         self.assertEqual((record["items"], record["sent"]), (4, 4))  # its tool results and its snapshot apart
+
+    def test_a_harness_newer_than_its_profile_was_checked_against_is_served_and_noted(self) -> None:
+        fake = FakeUpstream()
+        with relay(fake) as (url, _):
+            for agent in ("codex_exec/0.163.0 (Debian 12.0.0; x86_64)", "codex_exec/9.0.0 (Debian 12.0.0; x86_64)"):
+                with self.assertLogs("relay", "WARNING") if agent.startswith("codex_exec/9") else contextlib.nullcontext():
+                    response = httpx.post(f"{url}/v1/responses", json=responses_body(0),
+                                          headers={**HEADERS, "user-agent": agent, "originator": "codex_exec"})
+                self.assertEqual(response.status_code, 200)
+            status = httpx.get(f"{url}/relay/v1/status").json()
+        self.assertEqual(status["harnesses"]["codex"], {"release": "9.0.0", "checked": "0.162.0–0.163.0"})
 
     def test_configured_api_keys_replace_client_credentials(self) -> None:
         fake = FakeUpstream()

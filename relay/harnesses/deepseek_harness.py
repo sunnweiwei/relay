@@ -52,6 +52,8 @@ PARTS = MessageParts(together=(("<compacted-summary>", "</compacted-summary>"),)
 
 class DeepSeekHarness(Harness):
     name = "deepseek_harness"
+    verified = "0.2.0-rc.2"
+    agent = re.compile(r"\bdeepseek-harness/(\d[\w.-]*)")
     summaries = (CHECKPOINT,)
     compaction_prompts = ("You are now acting as a compaction engine for this AI coding assistant.",)
 

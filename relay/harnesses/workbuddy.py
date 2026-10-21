@@ -19,6 +19,8 @@ from .base import REMINDER, Harness, command_hook
 
 class WorkBuddy(Harness):
     name = "workbuddy"
+    verified = "2.164.0"
+    agent = re.compile(r"\bCodeBuddy/(\d[\w.-]*)")
     # Memory and rules files, re-rendered in the first user message around its <user_query>.
     injected = (REMINDER, re.compile(r"<always_applied_workspace_rules>.*?</always_applied_workspace_rules>", re.S))
     config_env, config_dir = "WORKBUDDY_CONFIG_DIR", "~/.workbuddy"
@@ -54,4 +56,5 @@ class WorkBuddy(Harness):
 
 class CodeBuddy(WorkBuddy):
     name = "codebuddy"
+    verified = "2.164.0"
     config_env, config_dir = "CODEBUDDY_CONFIG_DIR", "~/.codebuddy"

@@ -17,6 +17,7 @@ DEFAULTS = {
 
 class Goose(Harness):
     name = "goose"
+    verified = "1.54.0"
     summaries = ("# Conversation Summary",)  # (the user's message after it compacted)
 
     def settings(self) -> list[Setting]:

@@ -18,6 +18,7 @@ DEFAULTS = {  # litellm's own defaults for these variables
 
 class MiniSwe(Harness):
     name = "mini_swe"
+    verified = "2.4.6"
 
     def settings(self) -> list[Setting]:
         env = _config_dir() / ".env"

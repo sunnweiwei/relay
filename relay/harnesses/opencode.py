@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -18,6 +19,8 @@ NUDGE = "Continue if you have next steps, or stop and ask for clarification if y
 
 class OpenCode(Harness):
     name = "opencode"
+    verified = "1.19.0"
+    agent = re.compile(r"\bopencode/(\d[\w.-]*)")
     config_file = "opencode/opencode.json"
     summaries = (QUESTION,)
 
@@ -49,4 +52,6 @@ class Kilo(OpenCode):
     """Kilo CLI, an OpenCode fork with the same configuration schema."""
 
     name = "kilo"
+    verified = "7.8.8"
+    agent = re.compile(r"\b(?:Kilo-Code|opencode)/(\d[\w.-]*)")  # (some of its requests still say opencode)
     config_file = "kilo/config.json"

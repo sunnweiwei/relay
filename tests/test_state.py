@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
+from pathlib import Path
 from typing import Any
 
 from relay.core.engine import Engine
 from relay.core.ir import Item, Kind
-from relay.harnesses import (ClaudeCode, Crush, DeepSeekHarness, GeminiCli, Goose, Harness, Hermes, KimiCode, OpenClaw,
+from relay.harnesses import (HARNESSES, ClaudeCode, Crush, DeepSeekHarness, GeminiCli, Goose, Harness, Hermes, KimiCode, OpenClaw,
                              OpenCode, Pi, WorkBuddy)
 from relay.protocols import AnthropicMessages, Gemini, OpenAIResponses
 from relay.strategies import Compaction
@@ -144,6 +146,12 @@ class StateTests(unittest.TestCase):
                  *step(2), reminder(f"{rebased} No workspace instructions are currently active."), *step(3)]
         state = DeepSeekHarness().state(CODEC, items)
         self.assertEqual([i.ref for i in state.items], [0, 2, 8])
+
+    def test_the_releases_each_profile_was_checked_against_are_the_readme_s(self) -> None:
+        readme = (Path(__file__).parents[1] / "README.md").read_text()
+        for name, harness in HARNESSES.items():
+            if name != "generic" and harness.name == name and name != "codebuddy":
+                self.assertRegex(readme, rf"\| `{name}` \| {re.escape(harness.verified)} \|", name)
 
     def test_each_harness_knows_its_own_compaction_request(self) -> None:
         prompts = {

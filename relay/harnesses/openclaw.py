@@ -27,6 +27,7 @@ NOTICES = ("This run’s latest successfully saved plan", "Runtime notice: The t
 
 class OpenClaw(Harness):
     name = "openclaw"
+    verified = "2026.10.1"
     summaries = SUMMARIES
 
     def refine(self, item: Item) -> Item:
