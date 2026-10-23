@@ -62,9 +62,14 @@ DROPPED = 5_000  # messages remembered as dropped, per session and agent
 class ClaudeCodeHook:
     name = "hook"
     carries = frozenset({"instructions", "rewrites", "history"})
-    checked = {"compaction": "2.1.294", "folding": "2.1.294", "autocompact": "2.1.294", "prolong": "2.1.294"}
-    # Not yet before the proxy: Remote Control through it, sub-agents and Claude Code's own features
-    # against the proxy's are still to be checked.
+    checked = {"compaction": "2.1.294–2.1.309", "folding": "2.1.294–2.1.309", "autocompact": "2.1.294–2.1.309",
+               "prolong": "2.1.294–2.1.309",
+               "selfcompact": "2.1.309"}  # (at a 200k window: at 40k it compacts every second response)
+    # Not before the proxy (checked against it, `check.py --subagent`): a sub-agent's requests are
+    # estimated from its transcript alone (`$.session.usage` is the session's), so its context is
+    # not compacted where the proxy's would be; and Claude Code counts each compaction through the
+    # hook against its thrashing breaker, which ends a turn the proxy would go on with. What the
+    # hook does better: Remote Control, and what Claude Code keeps on Anthropic's own endpoint.
     preferred = False
 
     def installation(self, relay_url: str) -> Installation:

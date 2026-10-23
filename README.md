@@ -213,9 +213,14 @@ requests between them (its thrashing breaker, which no plugin reaches), so a str
 the context on every request (MEM1) is the proxy's too; Self-Compact through the hook needs the
 window well above Claude Code's own context, or it probes, and compacts, every second response.
 `clm`, `acm`, `ace`, `mem1` and the RLMs run through the proxy, where Remote Control is off.
-A hook comes before the proxy only once what it does better was checked (`preferred`: Remote
-Control, sub-agents, Claude Code's own features, each against the proxy); Claude Code's is not yet,
-so the proxy stays its default and the hook is taken when named. Even then `--via auto` takes the
+A hook comes before the proxy only once it was checked better than the proxy (`preferred`: Remote
+Control, sub-agents, the harness's own features, each against the proxy). Claude Code's is not: it
+keeps Remote Control and what Claude Code does only on Anthropic's own endpoint (below), but a
+sub-agent's requests are estimated from its transcript alone (`$.session.usage` is the session's),
+so its context is not compacted where the proxy's is (`check.py --subagent`: none through the hook,
+one through the proxy), and Claude Code counts each compaction through the hook against its
+thrashing breaker, which ended a turn at a low threshold that the proxy went on with. So the proxy
+stays Claude Code's default, and the hook is taken when named. Even then `--via auto` takes the
 hook only for a strategy checked through it with real models (the table below); another the hook
 can carry is taken when named (`--via hook`, which says so). The history the strategy sees is the transcript after as many
 placeholders as compactions through Relay took out of it, so it grows as a harness's own history
@@ -249,10 +254,11 @@ has none of them; on the hook it keeps them, where it reaches Anthropic directly
 
 | Harness | Path | Strategy | Checked on (Claude Code releases; `check.py --via hook --strategy S claude_code:gpt`, `:claude`) |
 | --- | --- | --- | --- |
-| `claude_code` | hook | `compaction` | 2.1.294 |
-| `claude_code` | hook | `folding` | 2.1.294 |
-| `claude_code` | hook | `autocompact` | 2.1.294 |
-| `claude_code` | hook | `prolong` | 2.1.294 |
+| `claude_code` | hook | `compaction` | 2.1.294–2.1.309 |
+| `claude_code` | hook | `folding` | 2.1.294–2.1.309 |
+| `claude_code` | hook | `autocompact` | 2.1.294–2.1.309 |
+| `claude_code` | hook | `prolong` | 2.1.294–2.1.309 |
+| `claude_code` | hook | `selfcompact` | 2.1.309 |
 
 Checked in Docker (`check.py --via hook claude_code:gpt`, Relay off the model path and a second,
 non-compacting Relay recording it): Claude Code asked before every request and the strategy

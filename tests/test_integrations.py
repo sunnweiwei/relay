@@ -50,8 +50,9 @@ class PathTests(unittest.TestCase):
             self.assertEqual(integrations.choose(claude, "auto", "folding").name, "hook")
             self.assertEqual(integrations.choose(claude, "auto", "clm").name, "proxy")  # (notes for one request)
             self.assertEqual(integrations.choose(claude, "auto", "ace").name, "proxy")  # (a playbook that grows)
-            self.assertEqual(integrations.choose(claude, "auto", "selfcompact").name, "proxy")  # (not checked on it)
-            self.assertEqual(integrations.choose(claude, "hook", "selfcompact").name, "hook")  # (named: taken)
+            with patch.object(type(hook), "checked", {"compaction": "2.1.294"}):
+                self.assertEqual(integrations.choose(claude, "auto", "folding").name, "proxy")  # (not checked on it)
+                self.assertEqual(integrations.choose(claude, "hook", "folding").name, "hook")  # (named: taken)
         with patch(RELEASE, return_value="2.1.309"):
             self.assertEqual(integrations.choose(claude).name, "proxy")  # (not preferred yet)
             self.assertEqual(integrations.choose(claude, "hook").name, "hook")
