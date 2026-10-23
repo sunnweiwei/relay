@@ -112,6 +112,7 @@ To change the strategy later, run `relay strategy <name>`. It needs no restart.
 | `selfcompact` | Self-Compact: a rubric decides when the model summarizes its own trajectory | |
 | `autocompact` | AutoCompact: the model decides when to compact | the `compaction` settings, as its fallback |
 | `acm` | ACM: the model compresses its context when it decides to, and recalls what it compressed | `acm_dir` (/tmp/.acm) |
+| `ace` | ACE: a playbook of lessons from the tasks the agent ended, kept across conversations, with compaction for the window | `ace_playbook` (`ace_playbook.md` in Relay's directory), the `compaction` settings |
 | `mem1` | MEM1: the model carries its memory in a state it rewrites every turn | |
 | `rlm`, `rlm_persistent` | RLM: the conversation becomes a variable in a Python REPL the model works over (runs model-written code) | `rlm_environment` (local), `rlm_max_depth` (1), `rlm_max_iterations` (30) |
 

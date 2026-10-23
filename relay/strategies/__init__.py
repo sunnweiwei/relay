@@ -1,3 +1,4 @@
+from .ace import ACE
 from .acm import ACM
 from .autocompact import AutoCompact
 from .base import Strategy, Summarizer
@@ -10,8 +11,8 @@ from .rlm import RLM, PersistentRLM
 from .selfcompact import SelfCompact
 
 STRATEGIES = {"compaction": Compaction, "clm": ContextLanguageModel, "folding": ContextFolding, "prolong": ProLong,
-              "selfcompact": SelfCompact, "autocompact": AutoCompact, "acm": ACM, "mem1": MEM1, "rlm": RLM,
+              "selfcompact": SelfCompact, "autocompact": AutoCompact, "acm": ACM, "ace": ACE, "mem1": MEM1, "rlm": RLM,
               "rlm_persistent": PersistentRLM}  # the `strategy` setting
 
-__all__ = ["ACM", "MEM1", "RLM", "STRATEGIES", "AutoCompact", "Compaction", "ContextFolding", "ContextLanguageModel",
+__all__ = ["ACE", "ACM", "MEM1", "RLM", "STRATEGIES", "AutoCompact", "Compaction", "ContextFolding", "ContextLanguageModel",
            "PersistentRLM", "ProLong", "SelfCompact", "Strategy", "Summarizer"]

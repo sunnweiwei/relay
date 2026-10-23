@@ -453,6 +453,33 @@ question named the line (`file N animal: …`; every line of the files mentions 
 Kimi Code had answered one of them). Hermes first searches its own session history, then the log,
 and never reopens file_2 (the check had taken that search's query for a read).
 
+## ACE
+
+[Agentic Context Engineering](https://arxiv.org/abs/2510.04618) (`relay/strategies/ace.py`) keeps a
+playbook of strategies and lessons across conversations. It follows ACE's agent setup as its code
+runs it ([ace-agent/ace-appworld](https://github.com/ace-agent/ace-appworld), online adaptation
+without ground truth, `ACE_online_no_GT`):
+
+- the playbook is in every request, in the words of ACE's generator prompt (`### PLAYBOOK BEGIN`);
+- a task ends when the agent ends it (AppWorld's `complete_task()`; here, a turn the agent closes
+  with a reply and no tool call). Then ACE's reflector diagnoses the task's whole trajectory, and
+  ACE's curator turns the reflection into `ADD` operations, the only ones ACE's agent setup takes;
+- additions are merged by ACE's rules (`playbook.py`): a fresh id (`[vc-00012]`), at the end of
+  its section (ACE's eight), else of OTHERS; operations outside ACE's sections are skipped, and an
+  answer that is not ACE's JSON, or holds an operation other than `ADD`, adds nothing. The file
+  (`ace_playbook`) is shared by every conversation, locked while it is written;
+- the prompts are ACE's (Apache-2.0), the reflector's naming a coding agent where it named an
+  AppWorld one; the playbook starts with ACE's sections and none of AppWorld's bullets. ACE's
+  reflector, without ground truth, sees no test report either (`[not applicable]` in its prompt).
+
+Two things differ because of where Relay sits. Relay sees a turn end only when the conversation's
+next request comes: the task is reflected on then (that request waits for the two requests), and a
+conversation's last turn never is. And ACE leaves a task's context to the agent (AppWorld's agent
+trims old outputs itself): past the compaction threshold the conversation is compacted as
+`compaction` compacts it, which leaves the playbook as it is. Checked with Codex and Claude Code
+(`tests/docker/check.py --strategy ace`): after turn 1 the reflector and the curator ran, the
+playbook gained bullets, and every request of turn 2 carried them.
+
 ## The CLM paper's baselines
 
 The CLM paper compares against methods that manage context through predefined actions or a
@@ -534,10 +561,11 @@ starts, and `relay set` restarts the service for them.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `strategy` | `compaction` | The strategy: `compaction` (Codex's), `clm` (the model edits its own context), `folding` (the agent branches and returns), `prolong` (compaction, and a log the agent searches), or one of the CLM paper's baselines: `selfcompact`, `autocompact`, `acm`, `mem1`, `rlm`, `rlm_persistent`. |
+| `strategy` | `compaction` | The strategy: `compaction` (Codex's), `clm` (the model edits its own context), `folding` (the agent branches and returns), `prolong` (compaction, and a log the agent searches), or one of the CLM paper's baselines: `selfcompact`, `autocompact`, `acm`, `ace` (a playbook of lessons across conversations), `mem1`, `rlm`, `rlm_persistent`. |
 | `rlm_max_iterations`, `rlm_max_depth` | `30`, `1` | RLM: root turns per step, and recursion depth (1: sub-calls are plain model calls), the authors' defaults. |
 | `rlm_environment` | `local` | RLM: where the model's code runs; `local` is Relay's own process. |
 | `acm_dir` | `/tmp/.acm` | ACM: where the compressed messages are saved, a folder per conversation (Relay reads them back for `query_memory`). |
+| `ace_playbook` | `ace_playbook.md` in Relay's directory | ACE: the playbook's file, shared by every conversation. |
 | `prolong_log` | `/tmp/.prolong/log.jsonl` | PRO-LONG: the session log; the harness's tools must be able to read it (Relay writes a `.gitignore` next to it). |
 | `compact_threshold` | `compact_ratio` × context window | Prompt tokens that trigger compaction. |
 | `compact_ratio` | `0.9` | Share of the model's context window used when no threshold is set. |
