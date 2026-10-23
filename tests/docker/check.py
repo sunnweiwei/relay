@@ -515,6 +515,8 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
         trigger = {"strategy": "folding"}
     if strategy == "prolong":  # compaction inside, as usual, and the log where the harness's tools reach it
         trigger |= {"strategy": "prolong", "prolong_log": "/project/.prolong/log.jsonl"}
+    if strategy == "ace":  # compaction for the window, as usual; the playbook in HOME
+        trigger |= {"strategy": "ace", "ace_playbook": "/home/agent/ace_playbook.md"}
     if strategy in ("selfcompact", "autocompact", "acm", "mem1", "rlm", "rlm_persistent"):  # (AutoCompact's fallback: 90% of the window)
         trigger = {"strategy": strategy, "acm_dir": "/project/.acm"}
         trigger |= {"context_window": str(window or BASELINE_WINDOW)} if strategy == "selfcompact" else {}
@@ -554,6 +556,8 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
         return evaluate_folding(name, home)
     if strategy == "prolong":
         return evaluate_prolong(name, home)
+    if strategy == "ace":
+        return evaluate_ace(name, home)
     if strategy in BASELINES:
         return BASELINES[strategy](name, home)
     # Relay's own trigger compacts less often; after the harness compacted itself, turn 2 starts small.
@@ -1438,6 +1442,31 @@ def evaluate_rlm(name: str, home: Path, persistent: bool = False) -> dict:
             "answers": [a[-100:] for a in answers], "problems": problems, "home": str(home)}
 
 
+def evaluate_ace(name: str, home: Path) -> dict:
+    """Check a `--strategy ace` run: compaction as for `compaction` (the window); and once the agent
+    ended turn 1, ACE's reflector and curator ran on it (two requests of Relay's own), the playbook
+    gained bullets, and every request of turn 2 carried them."""
+
+    result = evaluate(name, home)
+    trace = [json.loads(line) for line in (home / "trace.jsonl").read_text().splitlines()]
+    own = [json.dumps(r["summary_request"]) for r in trace if "summary_request" in r]
+    playbook = (home / "ace_playbook.md").read_text() if (home / "ace_playbook.md").exists() else ""
+    ids = re.findall(r"^\[([a-z]+-\d{5})\] ", playbook, re.M)
+    turn2 = [json.dumps(r.get("forwarded") or r["body"]) for r in trace
+             if "body" in r and "file_5.txt" in json.dumps(r["body"])]
+    problems = list(result["problems"])
+    if not any("expert coding agent and educator" in r for r in own):
+        problems.append("the reflector never ran")
+    if not any("master curator of knowledge" in r for r in own):
+        problems.append("the curator never ran")
+    if not ids:
+        problems.append("the playbook gained no bullet")
+    elif not turn2 or not all(f"[{ids[0]}]" in r for r in turn2):
+        problems.append("turn 2's requests did not carry the playbook's bullets")
+    return {**result, "name": f"{name} (ace)", "passed": not problems, "problems": problems, "bullets": len(ids),
+            "playbook": playbook[:1500]}
+
+
 BASELINES = {"selfcompact": evaluate_selfcompact, "autocompact": evaluate_autocompact, "acm": evaluate_acm,
              "mem1": evaluate_mem1, "rlm": evaluate_rlm,
              "rlm_persistent": lambda name, home: evaluate_rlm(name, home, persistent=True)}
@@ -1530,8 +1559,8 @@ def main() -> int:
     parser.add_argument("--native-compact", action="store_true", help="the harness compacts itself between the turns")
     parser.add_argument("--file-lines", type=int, default=120, help="lines per file (each ~18 tokens)")
     parser.add_argument("--strategy", default="compaction",
-                        choices=["compaction", "clm", "folding", "prolong", "selfcompact", "autocompact", "acm", "mem1",
-                                 "rlm", "rlm_persistent"],
+                        choices=["compaction", "clm", "folding", "prolong", "selfcompact", "autocompact", "acm", "ace",
+                                 "mem1", "rlm", "rlm_persistent"],
                         help="Relay's strategy (clm: the model edits its own context)")
     parser.add_argument("--steering", help="with --strategy clm: a brief from tests/docker/steering (compaction, "
                         "sliding_window, masking, memory, backup), the model told how to manage its context")
