@@ -100,11 +100,15 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
     releases: dict[str, str] = {}  # each harness's release, as its latest request said it
 
     def release(harness: Harness, headers: Mapping[str, str]) -> None:
-        if (version := harness.version(headers)) and releases.get(harness.name) != version:
-            releases[harness.name] = version
-            if harness.newer(version):
+        if version := harness.version(headers):
+            noted(harness.name, version)
+
+    def noted(name: str, version: str) -> None:
+        if releases.get(name) != version:
+            releases[name] = version
+            if (harness := detect({}, name)).newer(version):
                 log.warning("%s %s is newer than the releases its profile was checked against (%s); Relay serves it "
-                            "as the newest of them", harness.name, version, harness.verified)
+                            "as the newest of them", name, version, harness.verified)
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
@@ -223,7 +227,7 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
         return await _relay(response, codec, streaming, on_usage)
 
     return Starlette(
-        routes=[*hook_routes(engine), Route("/relay/v1/status", status, methods=["GET"]),
+        routes=[*hook_routes(engine, follow, noted), Route("/relay/v1/status", status, methods=["GET"]),
                 Route("/{path:path}", handle, methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"])],
         lifespan=lifespan,
     )

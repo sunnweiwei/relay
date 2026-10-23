@@ -23,8 +23,12 @@ class Integration(Protocol):
     every request, makes its rewrite take effect, and makes the summaries it asks for."""
 
     name: str  # "proxy", or "hook" for a harness's native hook
+    carries: frozenset[str]  # what of a strategy's contexts it carries beyond the messages (`integrations.NEEDS`)
 
     def installation(self, relay_url: str) -> Installation: ...
+
+    def unavailable(self) -> str | None:
+        """Why this path cannot run here (the harness's release, say), or None."""
 
 
 @dataclass(frozen=True)
@@ -33,9 +37,14 @@ class Proxy:
 
     harness: Harness
     name = "proxy"
+    carries = frozenset({"instructions", "changing instructions", "notes", "rewrites", "every request", "completions",
+                         "history"})
 
     def installation(self, relay_url: str) -> Installation:
         return Installation(self.harness.settings())
+
+    def unavailable(self) -> str | None:
+        return None
 
 
 class SummaryNeeded(Exception):

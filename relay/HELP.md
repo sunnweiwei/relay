@@ -35,6 +35,15 @@ and from its own table otherwise; `context_window` overrides both. The harness n
 `claude`, `gemini_cli`, `pi`, `opencode`, `kilo`, `crush`, `openclaw`, `goose`, `kimi_code`,
 `hermes`, `nanobot`, `dsh`, `workbuddy` and `mini`.
 
+### Claude Code: its own hook, or the proxy
+
+Claude Code (2.1.294 or newer) runs most strategies through its own plugin hook: its endpoint and
+login stay as they are, so Remote Control keeps working. A strategy the hook cannot carry (`clm`,
+`acm`, `ace`, `mem1`, the RLMs) runs through the proxy, where Remote Control is off. `relay setup` takes
+the path the strategy runs on, and `relay strategy` moves Claude Code between them, for the
+conversations started from then on; `relay status` shows the path. `--via proxy` or `--via hook`
+keeps it on one.
+
 ### Keeping Relay running
 
 A harness pointed at Relay reaches its model only through Relay. Where the harness can run a
@@ -75,7 +84,7 @@ history as the harness has it. Switching back finds the earlier strategy's conte
 
 | When | What changes |
 | --- | --- |
-| Relay already set up, strategy changed | Every conversation, from its next request |
+| Relay already set up, strategy changed | Every conversation, from its next request (one that moves Claude Code to the other path: new conversations) |
 | First `relay setup` | New conversations. Codex, Claude Code and the other harnesses read their config as a conversation starts: one already open goes on as it was, without Relay, until a new one is started. `codex exec resume` starts again on every turn, so it changes from its next turn. |
 | `relay uninstall <harness>` | New conversations go to the provider directly again: at once, or, while conversations that grew past the window through Relay still need it, as if direct through Relay until those are compacted (see "Checking and undoing"). One already open keeps going through Relay, which keeps running for it (until the machine restarts). |
 
@@ -170,5 +179,5 @@ cannot drive; mini-swe-agent has no compaction of its own (start a new conversat
 ## Other commands
 
     relay serve                    # run Relay in the foreground (what its daemon runs)
-    relay install <harness>        # only point a harness at Relay (`--via hook`: Claude Code's hook)
+    relay install <harness>        # only point a harness at Relay (`--via proxy|hook`: that path)
     relay run codex -- <args>      # one run through a private, temporary Relay

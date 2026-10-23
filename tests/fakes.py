@@ -154,12 +154,13 @@ class FakeUpstream:
         if self.max_prompt_tokens and _prompt_tokens(body) > self.max_prompt_tokens:
             return JSONResponse({"type": "error", "error": {"type": "invalid_request_error",
                                                             "message": "prompt is too long"}}, 400)
-        action, text, _ = self._decide([_anthropic_turn(message) for message in messages])
+        turns = [_anthropic_turn(message) for message in messages]
+        action, text, steps = self._decide(turns)
         if action == "error":
             return JSONResponse({"type": "error", "error": {"type": "invalid_request_error", "message": "failed"}}, 400)
         if action == "tool" and body.get("tools"):
-            content = [{"type": "tool_use", "id": f"toolu_{len(messages)}", "name": "Bash",
-                        "input": {"command": self.command, "description": "Run"}}]
+            call = self._scripted(steps, turns) or {"name": "Bash", "input": {"command": self.command, "description": "Run"}}
+            content = [{"type": "tool_use", "id": f"toolu_{len(messages)}", "name": call["name"], "input": call["input"]}]
         else:
             content = [{"type": "text", "text": text or FINAL_TEXT}]
         stop = "tool_use" if content[0]["type"] == "tool_use" else "end_turn"
