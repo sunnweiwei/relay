@@ -208,6 +208,32 @@ class SetupTests(unittest.TestCase):
             code, out = self.run_cli("uninstall", "claude")
             self.assertEqual(config().get("env", {}), {})
 
+    def test_claude_code_with_remote_control_on_takes_its_hook_and_keeps_it(self) -> None:
+        claude = self.root / "claude"
+        claude.mkdir()
+        (claude / "settings.json").write_text(json.dumps({"remoteControlAtStartup": True}))
+
+        def config() -> dict:
+            return json.loads((claude / "settings.json").read_text())
+
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(claude)}), \
+                mock.patch("relay.integrations.claude_code.installed_release", return_value="2.1.309"), \
+                mock.patch.object(service, "status", return_value={"strategy": "compaction"}), \
+                mock.patch.object(service, "wait", side_effect=lambda name, **_: {"strategy": name}):
+            code, out = self.run_cli("setup", "claude", "--strategy", "clm")  # (the proxy's: it would turn RC off)
+            self.assertEqual(code, 1, out)
+            self.assertIn("starts Remote Control with every session", out)
+            self.assertIn("--via proxy", out)
+            self.assertNotIn("enabledPlugins", config())
+            code, out = self.run_cli("setup", "claude", "--strategy", "compaction")
+            self.assertEqual(code, 0, out)
+            self.assertIn("installed claude_code (hook)", out)
+            self.assertNotIn("ANTHROPIC_BASE_URL", config().get("env", {}))
+            code, out = self.run_cli("strategy", "clm")
+            self.assertIn("claude_code stays on its hook", out)
+            self.assertIn("compacts on its own", out)
+            self.assertNotIn("ANTHROPIC_BASE_URL", config()["env"])  # (Remote Control still works)
+
     def test_settings_read_at_start_restart_the_service(self) -> None:
         with mock.patch.object(service, "status", return_value={"strategy": "compaction"}), \
                 mock.patch.object(service, "record", return_value={"manager": "systemd"}), \

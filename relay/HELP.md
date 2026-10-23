@@ -37,9 +37,13 @@ and from its own table otherwise; `context_window` overrides both. The harness n
 
 ### Claude Code: its own hook, or the proxy
 
-Claude Code goes through the proxy by default. `relay setup claude --via hook` (Claude Code 2.1.294
-or newer) runs the strategy through its own plugin hook instead: its endpoint and login stay as
-they are, so Remote Control keeps working. A strategy the hook cannot carry (`clm`, `acm`, `ace`,
+Claude Code goes through the proxy by default, unless it starts Remote Control with every session
+(its `remoteControlAtStartup` setting): then setup takes its own plugin hook. `relay setup claude
+--via hook` (Claude Code 2.1.294 or newer) takes the hook in any case: its endpoint and login stay
+as they are, so Remote Control keeps working, as do the features Claude Code keeps for Anthropic's
+own endpoint; the proxy compacts sub-agents better. With Remote Control on for every session,
+setup refuses a strategy only the proxy runs rather than turn Remote Control off (`--via proxy`
+gives it up). A strategy the hook cannot carry (`clm`, `acm`, `ace`,
 `mem1`, the RLMs) runs through the proxy, where Remote Control is off: `relay strategy` moves Claude
 Code to the proxy for it, and back to the hook for one it can carry, for the conversations started
 from then on. `relay status` shows the path.
@@ -92,7 +96,11 @@ history as the harness has it. Switching back finds the earlier strategy's conte
 
 1. Install it with the line under "Installing" (or `sh install.sh <checkout>`). This needs
    network access. Use `~/.local/bin/relay` if that folder is not on PATH.
-2. Run `relay setup <your harness> --strategy <name>` outside your sandbox: it writes the
+2. If you are Claude Code, ask the user whether they use Remote Control (the claude.ai or mobile
+   app driving this session, `/remote-control`, `claude remote-control`) unless they said so; if
+   they do, add `--via hook`, which keeps it working (setup tells you if the strategy cannot run
+   there). Relay sees only the setting that starts it with every session.
+   Run `relay setup <your harness> --strategy <name>` outside your sandbox: it writes the
    harness's config in the home directory and starts Relay. Ask the user to approve it
    (in Codex, a command that runs with escalated permissions). Run it even when the harness's
    configuration looks empty or unusual. Relay knows where each harness keeps its settings,

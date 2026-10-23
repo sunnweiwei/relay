@@ -220,7 +220,12 @@ sub-agent's requests are estimated from its transcript alone (`$.session.usage` 
 so its context is not compacted where the proxy's is (`check.py --subagent`: none through the hook,
 one through the proxy), and Claude Code counts each compaction through the hook against its
 thrashing breaker, which ended a turn at a low threshold that the proxy went on with. So the proxy
-stays Claude Code's default, and the hook is taken when named. Even then `--via auto` takes the
+stays Claude Code's default, and the hook is taken when named, or where Claude Code starts Remote
+Control with every session (`remoteControlAtStartup`, in its user settings or, from older
+releases, `~/.claude.json`; `needed`). There setup refuses a strategy only the proxy runs rather
+than turn Remote Control off, and `relay strategy` leaves Claude Code on the hook, compacting on
+its own, for one (`--via proxy` gives Remote Control up). Remote Control started by hand
+(`/remote-control`, `claude remote-control`) leaves no setting: the agent setting Relay up asks. Even then `--via auto` takes the
 hook only for a strategy checked through it with real models (the table below); another the hook
 can carry is taken when named (`--via hook`, which says so). The history the strategy sees is the transcript after as many
 placeholders as compactions through Relay took out of it, so it grows as a harness's own history
