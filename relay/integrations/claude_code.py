@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -81,12 +80,6 @@ class ClaudeCodeHook:
             Setting(path, ("extraKnownMarketplaces", "relay"), {"source": {"source": "directory", "path": str(PLUGIN)}}),
             Setting(path, ("enabledPlugins", "relay@relay"), True),
         ])
-
-    def needed(self) -> str | None:
-        if remote_control_at_startup():
-            return ("Claude Code starts Remote Control with every session (`remoteControlAtStartup`), and the proxy "
-                    "turns Remote Control off")
-        return None
 
     def unavailable(self) -> str | None:
         release = installed_release()
@@ -193,20 +186,6 @@ class ClaudeCodeHook:
                      "tokens_before": tokens, "messages_before": len(messages), "messages_after": len(entries),
                      "summary_requests": len(summaries.summaries)}, {"head": head})
         return {"messages": entries}
-
-
-def remote_control_at_startup() -> bool:
-    """Whether Claude Code is set to start Remote Control with every session: its user settings, or
-    the global config where older releases kept it (project settings cannot turn it on)."""
-
-    legacy = settings_file().parent / ".claude.json" if os.getenv("CLAUDE_CONFIG_DIR") else Path("~/.claude.json").expanduser()
-    for path in (settings_file(), legacy):
-        try:
-            if json.loads(path.read_text()).get("remoteControlAtStartup") is True:
-                return True
-        except (OSError, ValueError, AttributeError):
-            continue
-    return False
 
 
 def installed_release() -> str | None:

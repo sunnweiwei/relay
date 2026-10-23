@@ -20,9 +20,8 @@ from ..settings import home
 from .base import Installation, Integration, Proxy, Supplied, SummaryNeeded
 from .claude_code import ClaudeCodeHook
 
-# A harness's hook comes before its proxy once what it does better (Remote Control, sub-agents, the
-# harness's own features) was checked (`Integration.preferred`), or where the harness is set up to
-# use what only the hook keeps (`Integration.needed`: Claude Code's Remote Control); else when named.
+# A harness's hook comes before its proxy only once what it does better (Remote Control, sub-agents,
+# the harness's own features) was checked (`Integration.preferred`); till then it is taken when named.
 HOOKS: dict[str, Integration] = {"claude_code": ClaudeCodeHook()}
 
 # What each strategy's contexts hold besides the conversation's own messages, which its path must
@@ -44,8 +43,7 @@ def paths(harness: Harness) -> list[Integration]:
     """The harness's integration paths, the preferred first."""
 
     hook = [HOOKS[harness.name]] if harness.name in HOOKS else []
-    first = hook and (hook[0].preferred or hook[0].needed())
-    return [*hook, Proxy(harness)] if first else [Proxy(harness), *hook]
+    return [*hook, Proxy(harness)] if hook and hook[0].preferred else [Proxy(harness), *hook]
 
 
 def uncarried(path: Integration, strategy: str) -> str | None:

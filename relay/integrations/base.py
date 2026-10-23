@@ -34,10 +34,6 @@ class Integration(Protocol):
     def unavailable(self) -> str | None:
         """Why this path cannot run here (the harness's release, say), or None."""
 
-    def needed(self) -> str | None:
-        """Why the harness, as it is set up, needs this path whatever the strategy (something it
-        uses that only this path keeps), or None."""
-
 
 @dataclass(frozen=True)
 class Proxy:
@@ -54,9 +50,6 @@ class Proxy:
         return Installation(self.harness.settings())
 
     def unavailable(self) -> str | None:
-        return None
-
-    def needed(self) -> str | None:
         return None
 
 

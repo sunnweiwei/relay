@@ -227,14 +227,6 @@ def _move(strategy: str) -> None:
             why = None
         if target.name == now:
             continue
-        hook = integrations.HOOKS.get(name)
-        if now == "hook" and wanted == "auto" and hook and (need := hook.needed()):
-            if why := integrations.unfit(hook, strategy):
-                print(f"  {name} stays on its hook: {need}. {why}, so {name} compacts on its own until the strategy "
-                      f"is one the hook runs (or set it up with --via proxy)")
-            else:
-                print(f"  {name} stays on its hook: {need}. {integrations.unchecked(hook, strategy)}: it runs there unchecked")
-            continue
         preferred = integrations.paths(harness)
         why = why or next((integrations.unfit(path, strategy) or integrations.unchecked(path, strategy)
                            for path in preferred[:preferred.index(target)]), None)
@@ -287,12 +279,6 @@ def _install(harness: Harness, via: str, url: str, extra: list | None = None, qu
     strategy = settings.value("strategy", "compaction")
     try:
         path = integrations.choose(harness, via, strategy)
-        hook = integrations.HOOKS.get(harness.name)
-        if via == "auto" and path.name == "proxy" and hook and (need := hook.needed()):
-            why = integrations.unfit(hook, strategy) or integrations.unchecked(hook, strategy)
-            runs = ", ".join(s for s in hook.checked if integrations.uncarried(hook, s) is None)
-            raise ValueError(f"{need}; {why}, so it would run through the proxy. Keep Remote Control with a strategy "
-                             f"the hook runs ({runs}), or give it up for this one with --via proxy")
         setup = path.installation(url)
         install.install(harness.name, url, [*setup.settings, *(extra or [])])
     except ValueError as error:
