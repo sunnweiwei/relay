@@ -29,6 +29,11 @@ Claude Code last sent it, its latest reply included, so a summary of exactly tha
 summary request; the messages after the latest reply (tool results not sent yet, mid-turn)
 follow in the prompt as text. A sub-agent's history, or one a fork cannot see (a resumed
 session before its first request), is summarized from a rendering in a plain completion.
+
+Each request's size is the upstream's count of the agent's previous one (the plugin reads it from
+`turn.step`, a sub-agent's too) plus what came since. Claude Code ends a turn that compacts three
+times in a row, each within three requests of the one before (its thrashing breaker); the plugin
+counts as it does and has Relay hold a compaction that would be the second such (not when forced).
 """
 
 from __future__ import annotations
@@ -158,6 +163,8 @@ class ClaudeCodeHook:
         summaries = Supplied(dict(request.get("summaries") or {}))
         asked, items, (partition, key, kept) = self.asked(engine, request, messages)
         tokens = asked.tokens
+        if request.get("hold") and not asked.force:  # (Claude Code's thrashing breaker: see the plugin)
+            return {"skip": f"{engine.strategy.name}: held, two compactions in a row would end Claude Code's turn"}
         try:
             context = engine.answer(asked, summaries)
         except SummaryNeeded as need:

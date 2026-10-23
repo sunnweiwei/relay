@@ -23,11 +23,31 @@ const TRIES = 5; // asking for the instructions, a second apart
 // it reaches the trigger too; it runs as it is, as Codex's summary request does.
 const summarizing = new Set<string>();
 let placed: string | null = null; // the instructions the system prompt got (null: none asked yet)
+// By agent ('' the session's own loop): the prompt tokens of its latest request, as the upstream
+// counted them (a sub-agent's are not in $.session.usage); requests since its latest compaction, and
+// compactions in a row each within RAPID requests of the one before. Claude Code ends a turn with a
+// third such compaction (its thrashing breaker); these are counted as it counts them, by turn.
+const RAPID = 3;
+const sizes = new Map<string, number>();
+const since = new Map<string, number>();
+const rapid = new Map<string, number>();
 
 export const register = (on: any) => {
   on('session.start', async ($: any, e: any, next: any) => {
     if (!(await proxied($))) await $.env.set('CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', TRIGGER);
     return next(e);
+  });
+  on('turn.start', async ($: any, e: any, next: any) => {
+    since.delete(e.agentId ?? '');
+    rapid.delete(e.agentId ?? '');
+    return next(e);
+  });
+  on('turn.step', async function* ($: any, e: any, next: any) {
+    const step = yield* next(e);
+    const u = step?.usage;
+    if (u && typeof u.input_tokens === 'number')
+      sizes.set(e.agentId ?? '', u.input_tokens + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0));
+    return step;
   });
   on('prompt.section', { name: SECTION }, async ($: any, e: any, next: any) => {
     const section = await next(e);
@@ -75,8 +95,15 @@ export const register = (on: any) => {
     if (await proxied($)) return next(e);
     if (e.agentId && summarizing.has(e.messages.at(-1)?.text)) return { skip: 'Relay is summarizing' };
     const { context } = await $.session.usage();
+    const agent = e.agentId ?? '';
+    since.set(agent, (since.get(agent) ?? Infinity) + 1);
     try {
-      return await decide($, e, context);
+      const done = await decide($, e, context);
+      if (done.messages) {
+        rapid.set(agent, (since.get(agent) ?? Infinity) <= RAPID ? (rapid.get(agent) ?? 0) + 1 : 0);
+        since.set(agent, 0);
+      }
+      return done;
     } catch (error) {
       $.ui.log(`relay: ${error instanceof Error ? error.message : String(error)}`);
       return (context.tokens ?? 0) >= context.window - MARGIN ? next(e) : { skip: 'Relay did not answer' };
@@ -117,8 +144,11 @@ async function decide($: any, e: any, context: { tokens?: number; window: number
     agent: e.agentId ?? null,
     trigger: e.trigger,
     model: await $.session.model(),
-    // the upstream's count of the last request: the session's, never a sub-agent's (Relay estimates that)
-    tokens: e.agentId ? null : context.tokens ?? null,
+    // the upstream's count of the agent's latest request
+    tokens: e.agentId ? sizes.get(e.agentId) ?? null : context.tokens ?? null,
+    // another compaction now would be the second in a row within RAPID requests: Relay holds it
+    // (unless forced), so the next request does not trip Claude Code's breaker
+    hold: (since.get(e.agentId ?? '') ?? Infinity) <= RAPID && (rapid.get(e.agentId ?? '') ?? 0) >= 1,
     window: context.window,
     instructions: placed ?? '',
     messages: e.messages, // (each with its handle: its row, which a resumed session brings back)

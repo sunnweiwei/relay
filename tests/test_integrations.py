@@ -301,6 +301,13 @@ class ClaudeCodeCompactTests(unittest.TestCase):
         self.assertEqual(hook.compact(engine, {"messages": [resumed[n] for n in (0, 3, 4, 5, 6)], "session": "s"}),
                          {"skip": "answers: not now"})
 
+    def test_a_compaction_the_breaker_would_end_the_turn_for_is_held_unless_forced(self) -> None:
+        engine = Engine(Compaction(threshold=30_000, min_gain=0))
+        request = {"messages": [user("read the files"), call(1), result(1)], "model": "m", "window": 200_000, "hold": True}
+        self.assertEqual(ClaudeCodeHook().compact(engine, {**request, "tokens": 40_000}),
+                         {"skip": "compaction: held, two compactions in a row would end Claude Code's turn"})
+        self.assertIn("summarize", ClaudeCodeHook().compact(engine, {**request, "tokens": 168_000}))  # (forced)
+
     def test_the_instructions_are_the_strategys_own(self) -> None:
         self.assertIn("internal state", ClaudeCodeHook().instructions(Engine(MEM1())))
         self.assertIn("branch", ClaudeCodeHook().instructions(Engine(ContextFolding())).lower())
