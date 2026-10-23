@@ -11,7 +11,8 @@ Each run gets a throwaway HOME: the harness's own config is written there (the "
 existing setup"), `relay install <harness>` edits it, Relay runs in the background, and
 the harness is used as a user would. Host configs are never mounted. Codex and
 `claude_code:login` use a copy of the host's login that cannot refresh (see `copy_login`);
-everything else uses API keys from the file named by RELAY_TEST_KEYS. Requires the image
+everything else uses API keys from the file named by RELAY_TEST_KEYS (RELAY_TEST_CLAUDE: the
+`claude` binary to mount, else the one on PATH). Requires the image
 built from tests/docker/Dockerfile.
 
 The task takes two turns of one session. Turn 1 reads file_1..4 one tool call at a time
@@ -208,7 +209,8 @@ GROWTH = 5_000  # each file adds about 2k tokens
 # `--via hook`: the harness asks Relay before every request, and Relay's strategy compacts at this
 # size. Relay is off the model path, so a second Relay that never compacts records it, in front of
 # whatever endpoint the user's configuration names.
-# Claude Code's own request is about 31.5k tokens on Claude, 17k on GPT (2.1.294), turn 2's note 6k
+# Claude Code's own request is about 31.5k tokens on Claude, 17k on GPT (2.1.294; 2.1.309: 16.5k and 9.6k, so
+# `--hook-threshold` lower there), turn 2's note 6k
 # more: above them, room for about four files after a compaction (Claude Code gives up on one that
 # refills its context within three turns).
 HOOK_THRESHOLDS = {"claude": 50_000, "login": 50_000, "gpt": 34_000}
@@ -672,7 +674,8 @@ def container(name: str, root: Path, env: dict[str, str], turns: str, timeout: i
         mounts.append(f"{Path(shutil.which('codex')).resolve().parents[1]}:/opt/codex:ro")
         env["PATH"] = "/opt/codex/bin:/opt/codex/codex-path:/usr/local/bin:/usr/bin:/bin"
     if harness == "claude_code":
-        mounts.append(f"{Path(shutil.which('claude')).resolve()}:/usr/local/bin/claude:ro")
+        claude = os.environ.get("RELAY_TEST_CLAUDE") or shutil.which("claude")  # (another release: its binary)
+        mounts.append(f"{Path(claude).resolve()}:/usr/local/bin/claude:ro")
     # Relay's settings (lowercase names) go in its settings file, as `relay set` writes them.
     (home / ".config/relay").mkdir(parents=True, exist_ok=True)
     (home / ".config/relay/settings.json").write_text(json.dumps({k: v for k, v in env.items() if k.islower()}))
@@ -1630,6 +1633,9 @@ def main() -> int:
                         "sliding_window, masking, memory, backup), the model told how to manage its context")
     parser.add_argument("--clm-edit", action="store_true", help="with --strategy clm: the model edits its context as "
                         "told (delete, rewrite, add) and answers from what it then sees")
+    parser.add_argument("--hook-threshold", type=int,
+                        help="with --via hook: the strategy's threshold (default by model: "
+                             f"{HOOK_THRESHOLDS}; a release whose own request is smaller needs less)")
     parser.add_argument("--via", choices=["proxy", "hook"], default="proxy",
                         help="install through this path (hook: the harness compacts through Relay's hook)")
     parser.add_argument("--harness-compaction", action="store_true",
@@ -1642,6 +1648,8 @@ def main() -> int:
         parser.error(f"--native-compact: no headless compaction of their own: {', '.join(unsupported)}")
     results = []
     for name in names:
+        if options.hook_threshold:  # (read by the run and its check)
+            HOOK_THRESHOLDS.update(dict.fromkeys(HOOK_THRESHOLDS, options.hook_threshold))
         results.append(run(name, options.growth, probe=options.probe, subagent=options.subagent, window=options.window,
                            native=options.native_compact, selfcompact=options.harness_compaction, via=options.via,
                            lines=options.file_lines, strategy=options.strategy, steering=options.steering,

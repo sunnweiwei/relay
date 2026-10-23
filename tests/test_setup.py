@@ -178,7 +178,7 @@ class SetupTests(unittest.TestCase):
         wait.assert_called_once_with("folding", seconds=15)
         self.assertIn("every conversation", out)
 
-    def test_claude_code_set_up_auto_goes_through_the_path_its_strategy_runs_on(self) -> None:
+    def test_claude_code_set_up_on_its_hook_goes_through_the_path_its_strategy_runs_on(self) -> None:
         claude = self.root / "claude"
         claude.mkdir()
 
@@ -189,14 +189,14 @@ class SetupTests(unittest.TestCase):
                 mock.patch("relay.integrations.claude_code.installed_release", return_value="2.1.309"), \
                 mock.patch.object(service, "status", return_value={"strategy": "compaction"}), \
                 mock.patch.object(service, "wait", side_effect=lambda name, **_: {"strategy": name}):
-            code, out = self.run_cli("setup", "claude", "--strategy", "compaction")
+            code, out = self.run_cli("setup", "claude", "--strategy", "compaction", "--via", "hook")
             self.assertEqual(code, 0, out)
             self.assertIn("installed claude_code (hook)", out)
             self.assertEqual(config()["enabledPlugins"], {"relay@relay": True})
             self.assertNotIn("ANTHROPIC_BASE_URL", config()["env"])  # (Remote Control stays on)
             code, out = self.run_cli("strategy", "clm")  # (notes for one request: the proxy's)
             self.assertEqual(code, 0, out)
-            self.assertIn("claude_code now goes through the proxy (clm needs notes, which the hook cannot carry)", out)
+            self.assertIn("claude_code now goes through the proxy (clm needs notes, which the hook cannot carry)", out)  # (named, it cannot)
             self.assertIn("Remote Control is off", out)
             self.assertIn("/up/claude_code-", config()["env"]["ANTHROPIC_BASE_URL"])
             self.assertNotIn("enabledPlugins", config())

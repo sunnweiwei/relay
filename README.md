@@ -190,7 +190,7 @@ carries. Each harness lists its paths in order of preference; `relay install --v
 runs on (one installed `--via auto`, the preferred one; one on a named path, that one unless it
 cannot), for the conversations started from then on; `relay status` shows each harness's path.
 
-**Claude Code's compaction hook** (Claude Code 2.1.294+, its preferred path): the install enables
+**Claude Code's compaction hook** (Claude Code 2.1.294+, `relay setup claude --via hook`): the install enables
 a function-hook plugin (Claude Code's plugin API, early access, switched on by
 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`) and leaves `ANTHROPIC_BASE_URL` alone, so Remote Control
 (which refuses any other endpoint) and every login keep working. As a session starts, the plugin
@@ -211,9 +211,13 @@ change within one (ACE's playbook) are the proxy's, as are notes for one request
 completion of the strategy's own (ACE, RLM). Claude Code stops a session that compacts three times with fewer than three
 requests between them (its thrashing breaker, which no plugin reaches), so a strategy that changes
 the context on every request (MEM1) is the proxy's too; Self-Compact through the hook needs the
-window well above Claude Code's own context, or it probes, and compacts, every second response. Through the hook run `compaction`, `selfcompact`, `prolong`,
-`autocompact` and `folding`; `clm`, `acm`, `ace`, `mem1` and the RLMs run through the proxy, where
-Remote Control is off. The history the strategy sees is the transcript after as many
+window well above Claude Code's own context, or it probes, and compacts, every second response.
+`clm`, `acm`, `ace`, `mem1` and the RLMs run through the proxy, where Remote Control is off.
+A hook comes before the proxy only once what it does better was checked (`preferred`: Remote
+Control, sub-agents, Claude Code's own features, each against the proxy); Claude Code's is not yet,
+so the proxy stays its default and the hook is taken when named. Even then `--via auto` takes the
+hook only for a strategy checked through it with real models (the table below); another the hook
+can carry is taken when named (`--via hook`, which says so). The history the strategy sees is the transcript after as many
 placeholders as compactions through Relay took out of it, so it grows as a harness's own history
 would (PRO-LONG logs each item once); the context window begins at the first request after a
 compaction, where Codex's growth budget counts from. Resuming a session, Claude Code follows a kept tool result to the call it
@@ -234,6 +238,21 @@ Relay does not answer, nothing happens, unless Claude Code is near its own limit
 compaction runs; a session whose `ANTHROPIC_BASE_URL` points at Relay (set up through the proxy
 before) is left to the proxy. Whether Claude Code's interactive UI shows a low-context warning with
 the trigger at the bottom is not verified.
+
+What Claude Code does only on Anthropic's own endpoint (2.1.309, `claude -p` against a recorder,
+with and without `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`, which makes it take the recorder for
+Anthropic's): Remote Control; the betas `prompt-caching-scope` (its system prompt cached across
+sessions), `thinking-binding-controls` and `cache-diagnosis`; the server-side `advisor` tool;
+WebSearch's extended mode; the model catalog it is served (`servedCatalog off (not_first_party)`);
+and remote managed settings and policy limits (an organization's). Through the proxy a session
+has none of them; on the hook it keeps them, where it reaches Anthropic directly.
+
+| Harness | Path | Strategy | Checked on (Claude Code releases; `check.py --via hook --strategy S claude_code:gpt`, `:claude`) |
+| --- | --- | --- | --- |
+| `claude_code` | hook | `compaction` | 2.1.294 |
+| `claude_code` | hook | `folding` | 2.1.294 |
+| `claude_code` | hook | `autocompact` | 2.1.294 |
+| `claude_code` | hook | `prolong` | 2.1.294 |
 
 Checked in Docker (`check.py --via hook claude_code:gpt`, Relay off the model path and a second,
 non-compacting Relay recording it): Claude Code asked before every request and the strategy

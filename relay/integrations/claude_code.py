@@ -62,6 +62,10 @@ DROPPED = 5_000  # messages remembered as dropped, per session and agent
 class ClaudeCodeHook:
     name = "hook"
     carries = frozenset({"instructions", "rewrites", "history"})
+    checked = {"compaction": "2.1.294", "folding": "2.1.294", "autocompact": "2.1.294", "prolong": "2.1.294"}
+    # Not yet before the proxy: Remote Control through it, sub-agents and Claude Code's own features
+    # against the proxy's are still to be checked.
+    preferred = False
 
     def installation(self, relay_url: str) -> Installation:
         path = settings_file()

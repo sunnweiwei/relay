@@ -228,7 +228,8 @@ def _move(strategy: str) -> None:
         if target.name == now:
             continue
         preferred = integrations.paths(harness)
-        why = why or next((integrations.unfit(path, strategy) for path in preferred[:preferred.index(target)]), None)
+        why = why or next((integrations.unfit(path, strategy) or integrations.unchecked(path, strategy)
+                           for path in preferred[:preferred.index(target)]), None)
         install.uninstall(name)
         if _install(harness, target.name, service.address(), harness.starter(service.start_command()), quiet=True):
             continue
@@ -287,10 +288,12 @@ def _install(harness: Harness, via: str, url: str, extra: list | None = None, qu
     if quiet:
         return 0
     passed = [f"{other.name}: {why}" for other in integrations.paths(harness)[:integrations.paths(harness).index(path)]
-              if via == "auto" and (why := integrations.unfit(other, strategy))]
+              if via == "auto" and (why := integrations.unfit(other, strategy) or integrations.unchecked(other, strategy))]
     print(f"installed {harness.name} ({path.name}): " + ", ".join(sorted({str(s.path) for s in setup.settings})))
     for why in passed:
         print(f"  not the {why}")
+    if unchecked := integrations.unchecked(path, strategy):
+        print(f"  note: {unchecked} (named with --via {path.name})")
     for note in setup.notes:
         print(f"  note: {note}")
     return 0

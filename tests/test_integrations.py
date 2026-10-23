@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 import unittest
 from dataclasses import dataclass, replace
@@ -43,15 +44,21 @@ RELEASE = "relay.integrations.claude_code.installed_release"
 class PathTests(unittest.TestCase):
     def test_auto_takes_the_preferred_path_that_runs_the_strategy(self) -> None:
         claude, pi = HARNESSES["claude_code"], HARNESSES["pi"]
-        with patch(RELEASE, return_value="2.1.309"):
-            self.assertEqual(integrations.choose(claude).name, "hook")  # (it keeps Remote Control)
+        hook = integrations.HOOKS["claude_code"]
+        with patch(RELEASE, return_value="2.1.309"), patch.object(type(hook), "preferred", True):
+            self.assertEqual(integrations.choose(claude).name, "hook")  # (once preferred: before the proxy)
             self.assertEqual(integrations.choose(claude, "auto", "folding").name, "hook")
             self.assertEqual(integrations.choose(claude, "auto", "clm").name, "proxy")  # (notes for one request)
             self.assertEqual(integrations.choose(claude, "auto", "ace").name, "proxy")  # (a playbook that grows)
+            self.assertEqual(integrations.choose(claude, "auto", "selfcompact").name, "proxy")  # (not checked on it)
+            self.assertEqual(integrations.choose(claude, "hook", "selfcompact").name, "hook")  # (named: taken)
+        with patch(RELEASE, return_value="2.1.309"):
+            self.assertEqual(integrations.choose(claude).name, "proxy")  # (not preferred yet)
+            self.assertEqual(integrations.choose(claude, "hook").name, "hook")
             self.assertEqual(integrations.choose(claude, "proxy").name, "proxy")
             with self.assertRaisesRegex(ValueError, "clm needs notes, which the hook cannot carry"):
                 integrations.choose(claude, "hook", "clm")
-        with patch(RELEASE, return_value="2.1.250"):
+        with patch(RELEASE, return_value="2.1.250"), patch.object(type(hook), "preferred", True):
             self.assertEqual(integrations.choose(claude).name, "proxy")
             with self.assertRaisesRegex(ValueError, "older than 2.1.294"):
                 integrations.choose(claude, "hook")
@@ -63,6 +70,13 @@ class PathTests(unittest.TestCase):
     def test_every_strategy_says_what_it_needs(self) -> None:
         from relay.strategies import STRATEGIES
         self.assertEqual(set(integrations.NEEDS), set(STRATEGIES))
+
+    def test_a_hook_is_checked_only_with_what_it_carries_and_the_readme_says_so(self) -> None:
+        readme = (Path(__file__).parents[1] / "README.md").read_text()
+        for name, hook in integrations.HOOKS.items():
+            for strategy, releases in hook.checked.items():
+                self.assertIsNone(integrations.uncarried(hook, strategy), strategy)
+                self.assertRegex(readme, rf"\| `{name}` \| {hook.name} \| `{strategy}` \| {re.escape(releases)} \|")
 
 
 class ClaudeCodeInstallTests(unittest.TestCase):

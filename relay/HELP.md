@@ -37,12 +37,12 @@ and from its own table otherwise; `context_window` overrides both. The harness n
 
 ### Claude Code: its own hook, or the proxy
 
-Claude Code (2.1.294 or newer) runs most strategies through its own plugin hook: its endpoint and
-login stay as they are, so Remote Control keeps working. A strategy the hook cannot carry (`clm`,
-`acm`, `ace`, `mem1`, the RLMs) runs through the proxy, where Remote Control is off. `relay setup` takes
-the path the strategy runs on, and `relay strategy` moves Claude Code between them, for the
-conversations started from then on; `relay status` shows the path. `--via proxy` or `--via hook`
-keeps it on one.
+Claude Code goes through the proxy by default. `relay setup claude --via hook` (Claude Code 2.1.294
+or newer) runs the strategy through its own plugin hook instead: its endpoint and login stay as
+they are, so Remote Control keeps working. A strategy the hook cannot carry (`clm`, `acm`, `ace`,
+`mem1`, the RLMs) runs through the proxy, where Remote Control is off: `relay strategy` moves Claude
+Code to the proxy for it, and back to the hook for one it can carry, for the conversations started
+from then on. `relay status` shows the path.
 
 ### Keeping Relay running
 

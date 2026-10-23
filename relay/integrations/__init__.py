@@ -20,8 +20,8 @@ from ..settings import home
 from .base import Installation, Integration, Proxy, Supplied, SummaryNeeded
 from .claude_code import ClaudeCodeHook
 
-# Claude Code: the hook first, as it keeps Claude Code's endpoint, so Remote Control and every
-# login are untouched; the proxy for a strategy the hook cannot carry.
+# A harness's hook comes before its proxy only once what it does better (Remote Control, sub-agents,
+# the harness's own features) was checked (`Integration.preferred`); till then it is taken when named.
 HOOKS: dict[str, Integration] = {"claude_code": ClaudeCodeHook()}
 
 # What each strategy's contexts hold besides the conversation's own messages, which its path must
@@ -42,7 +42,8 @@ NEEDS: dict[str, frozenset[str]] = {
 def paths(harness: Harness) -> list[Integration]:
     """The harness's integration paths, the preferred first."""
 
-    return [*([HOOKS[harness.name]] if harness.name in HOOKS else []), Proxy(harness)]
+    hook = [HOOKS[harness.name]] if harness.name in HOOKS else []
+    return [*hook, Proxy(harness)] if hook and hook[0].preferred else [Proxy(harness), *hook]
 
 
 def uncarried(path: Integration, strategy: str) -> str | None:
@@ -59,8 +60,17 @@ def unfit(path: Integration, strategy: str) -> str | None:
     return uncarried(path, strategy) or path.unavailable()
 
 
+def unchecked(path: Integration, strategy: str) -> str | None:
+    """Why `path` is not taken for `strategy` unless named: it was not checked with real models."""
+
+    if path.checked is not None and strategy not in path.checked:
+        return f"{strategy} was not checked through the {path.name} with real models"
+    return None
+
+
 def choose(harness: Harness, via: str = "auto", strategy: str = "compaction") -> Integration:
-    """The path `relay install --via` names, or (`auto`) the preferred one that runs `strategy`."""
+    """The path `relay install --via` names (one that can run `strategy`), or (`auto`) the
+    preferred one that runs it and was checked running it."""
 
     offered = [path for path in paths(harness) if via in ("auto", path.name)]
     if not offered:
@@ -68,7 +78,8 @@ def choose(harness: Harness, via: str = "auto", strategy: str = "compaction") ->
         raise ValueError(f"{harness.name} has no {via} path (it has: {names})")
     if via != "auto" and (why := unfit(offered[0], strategy)):
         raise ValueError(f"{why}; `--via auto` chooses the path that can")
-    return next(path for path in offered if via != "auto" or unfit(path, strategy) is None)
+    return next(path for path in offered
+                if via != "auto" or (unfit(path, strategy) or unchecked(path, strategy)) is None)
 
 
 def remember(name: str, via: str, path: str) -> None:
@@ -100,4 +111,4 @@ def _save(known: dict[str, Any]) -> None:
 
 
 __all__ = ["HOOKS", "NEEDS", "ClaudeCodeHook", "Installation", "Integration", "Proxy", "Supplied", "SummaryNeeded",
-           "choose", "forget", "paths", "recorded", "remember", "uncarried", "unfit"]
+           "choose", "forget", "paths", "recorded", "remember", "uncarried", "unchecked", "unfit"]
