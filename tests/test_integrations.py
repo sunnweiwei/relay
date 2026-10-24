@@ -54,7 +54,9 @@ class PathTests(unittest.TestCase):
                 self.assertEqual(integrations.choose(claude, "auto", "folding").name, "proxy")  # (not checked on it)
                 self.assertEqual(integrations.choose(claude, "hook", "folding").name, "hook")  # (named: taken)
         with patch(RELEASE, return_value="2.1.309"):
-            self.assertEqual(integrations.choose(claude).name, "proxy")  # (not preferred yet)
+            self.assertEqual(integrations.choose(claude).name, "hook")  # (Claude Code's is preferred)
+        with patch(RELEASE, return_value="2.1.309"), patch.object(type(hook), "preferred", False):
+            self.assertEqual(integrations.choose(claude).name, "proxy")  # (a hook not preferred: when named)
             self.assertEqual(integrations.choose(claude, "hook").name, "hook")
             self.assertEqual(integrations.choose(claude, "proxy").name, "proxy")
             with self.assertRaisesRegex(ValueError, "clm needs notes, which the hook cannot carry"):

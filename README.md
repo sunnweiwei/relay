@@ -214,15 +214,15 @@ the context on every request (MEM1) is the proxy's too; Self-Compact through the
 window well above Claude Code's own context, or it probes, and compacts, every second response.
 `clm`, `acm`, `ace`, `mem1` and the RLMs run through the proxy, where Remote Control is off.
 A hook comes before the proxy only once it was checked better than the proxy (`preferred`: Remote
-Control, sub-agents, the harness's own features, each against the proxy). Claude Code's is not: it
-keeps Remote Control and what Claude Code does only on Anthropic's own endpoint (below), but a
-sub-agent's requests are estimated from its transcript alone (`$.session.usage` is the session's),
-so its context is not compacted where the proxy's is (`check.py --subagent`: none through the hook,
-one through the proxy), and Claude Code counts each compaction through the hook against its
-thrashing breaker, which ended a turn at a low threshold that the proxy went on with. So the proxy
-stays Claude Code's default, and the hook is taken when named: `relay help` tells whoever sets
-Relay up (a person, or the agent, which asks) to name it where Remote Control is used. Relay does
-not try to tell whether it is (it can be started by hand at any time). Even then `--via auto` takes the
+Control, sub-agents, the harness's own features, each against the proxy). Claude Code's is: it
+keeps Remote Control and what Claude Code does only on Anthropic's own endpoint (below); it
+compacts a sub-agent at its real size, which the plugin reads from `turn.step` (`$.session.usage`
+is the session's alone); and it holds a compaction that would trip Claude Code's thrashing breaker
+(`check.py --subagent` at low thresholds: no turn ended, a sub-agent compacted at 34k). Left: a
+sub-agent is summarized from a rendering, where the proxy continues its own conversation; a held
+compaction waits up to three requests; and Remote Control itself was not started in a check (that
+enrolls a session with an account). So `--via auto` takes Claude Code's hook for the strategies
+checked through it (the table below) and the proxy for the others. Even then `--via auto` takes the
 hook only for a strategy checked through it with real models (the table below); another the hook
 can carry is taken when named (`--via hook`, which says so). The history the strategy sees is the transcript after as many
 placeholders as compactions through Relay took out of it, so it grows as a harness's own history

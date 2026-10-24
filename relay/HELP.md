@@ -37,15 +37,14 @@ and from its own table otherwise; `context_window` overrides both. The harness n
 
 ### Claude Code: its own hook, or the proxy
 
-Claude Code goes through the proxy by default. If you use Claude Code's Remote Control (from the
-claude.ai or mobile app, `/remote-control`, `claude remote-control`), set it up with `--via hook`:
-`relay setup claude --via hook` (Claude Code 2.1.294 or newer) runs the strategy through its own
-plugin hook, so its endpoint and login stay as they are and Remote Control keeps working, as do the
-features Claude Code keeps for Anthropic's own endpoint. Through the proxy, Remote Control does not
-start. The proxy compacts sub-agents better, which is why it is the default. A strategy the hook cannot carry (`clm`, `acm`, `ace`,
-`mem1`, the RLMs) runs through the proxy, where Remote Control is off: `relay strategy` moves Claude
-Code to the proxy for it, and back to the hook for one it can carry, for the conversations started
-from then on. `relay status` shows the path.
+Claude Code (2.1.294 or newer) runs the strategy through its own plugin hook by default: its
+endpoint and login stay as they are, so Remote Control (from the claude.ai or mobile app,
+`/remote-control`, `claude remote-control`) keeps working, as do the features Claude Code keeps for
+Anthropic's own endpoint. A strategy the hook cannot carry or was not checked on (`clm`, `acm`,
+`ace`, `mem1`, the RLMs) runs through the proxy, where Remote Control does not start: `relay
+strategy` moves Claude Code to the proxy for it, and back to the hook for one the hook runs, for
+the conversations started from then on. `relay status` shows the path; `--via proxy` keeps Claude
+Code on the proxy.
 
 ### Keeping Relay running
 
@@ -95,8 +94,8 @@ history as the harness has it. Switching back finds the earlier strategy's conte
 
 1. Install it with the line under "Installing" (or `sh install.sh <checkout>`). This needs
    network access. Use `~/.local/bin/relay` if that folder is not on PATH.
-2. If you are Claude Code, ask the user whether they use Remote Control, unless they said so; if
-   they do, add `--via hook` (see "Claude Code: its own hook, or the proxy").
+2. If you are Claude Code and the user uses Remote Control, tell them which strategies keep it
+   (see "Claude Code: its own hook, or the proxy") before choosing one that runs through the proxy.
    Run `relay setup <your harness> --strategy <name>` outside your sandbox: it writes the
    harness's config in the home directory and starts Relay. Ask the user to approve it
    (in Codex, a command that runs with escalated permissions). Run it even when the harness's
