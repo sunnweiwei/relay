@@ -28,17 +28,18 @@ from pathlib import Path
 
 import uvicorn
 
-from . import install, integrations, leaving, service, settings
+from . import install, integrations, intercept, leaving, service, settings
 from .harnesses import HARNESSES, Harness
 from .strategies import STRATEGIES
 from .transport import ProxyConfig, create_app
 
+PATHS = {"proxy": "the proxy", "hook": "its hook", "https": "Relay as its HTTPS proxy"}  # (as messages name them)
 ALIASES = {"claude": "claude_code", "dsh": "deepseek_harness", "mini": "mini_swe"}
 GUIDE = Path(__file__).with_name("HELP.md")
 
 
 # Settings read only as Relay starts: `relay set` restarts the service for them.
-AT_START = {"host", "port", "harness", "trace", "event_log", "log_level", "openai_base_url", "chatgpt_base_url",
+AT_START = {"host", "port", "intercept_port", "harness", "trace", "event_log", "log_level", "openai_base_url", "chatgpt_base_url",
             "anthropic_base_url", "gemini_base_url", "openai_api_key", "anthropic_api_key", "cache_path",
             "cache_secret", "cache_ttl_seconds", "cache_max_entries", "cache_max_bytes", "cache_max_nodes"}
 
@@ -54,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     for command in (setup, strategy):
         command.add_argument("--set", action="append", default=[], metavar="NAME=VALUE", help="a setting (repeatable)")
     setup.add_argument("--strategy", choices=sorted(STRATEGIES))
-    setup.add_argument("--via", choices=["auto", "proxy", "hook"], default="auto",
+    setup.add_argument("--via", choices=["auto", "proxy", "hook", "https"], default="auto",
                        help="integration path (default: the harness's preferred one)")
     setup.add_argument("--autostart", action="store_true",
                        help="register Relay with the system's service manager (start at login, restart if it exits)")
@@ -77,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     uninstall_.add_argument("--now", action="store_true",
                             help="restore it now, even if conversations that grew through Relay would then fail")
     install_.add_argument("--url", help="Relay's address (default: the host and port settings)")
-    install_.add_argument("--via", choices=["auto", "proxy", "hook"], default="auto",
+    install_.add_argument("--via", choices=["auto", "proxy", "hook", "https"], default="auto",
                           help="integration path (default: the harness's preferred one)")
     run = commands.add_parser("run", help="run a harness through a private proxy")
     run.add_argument("harness", choices=harnesses)
@@ -124,6 +125,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run(config, ALIASES.get(options.harness, options.harness), options.args)
     host = getattr(options, "host", None) or config.host
     port = getattr(options, "port", None) or config.port
+    if config.intercept_port:  # (started by a harness that goes through it, Relay inherits its proxy)
+        intercept.forget_own(config.intercept_port)
     uvicorn.run(create_app(config=config), host=host, port=port, ws="none")
     return 0
 
@@ -234,7 +237,8 @@ def _move(strategy: str) -> None:
         if _install(harness, target.name, service.address(), harness.starter(service.start_command()), quiet=True):
             continue
         integrations.remember(name, wanted, target.name)
-        print(f"  {name} now goes through the {target.name} ({why or f'it runs {strategy}'}): conversations started "
+        print(f"  {name} now goes through {PATHS.get(target.name, target.name)} ({why or f'it runs {strategy}'}): "
+              "conversations started "
               "from now on; one already open goes on as it was")
         if name == "claude_code" and target.name == "proxy":
             print("  note: through the proxy, Claude Code's Remote Control is off (it needs Anthropic's own endpoint)")
@@ -279,6 +283,8 @@ def _install(harness: Harness, via: str, url: str, extra: list | None = None, qu
     strategy = settings.value("strategy", "compaction")
     try:
         path = integrations.choose(harness, via, strategy)
+        if path.name == "https":
+            _intercepting()
         setup = path.installation(url)
         install.install(harness.name, url, [*setup.settings, *(extra or [])])
     except ValueError as error:
@@ -333,12 +339,24 @@ def _uninstall(harness: Harness, now: bool = False) -> int:
     return 0
 
 
+def _intercepting() -> None:
+    """Relay's HTTPS proxy given a port, and the running Relay serving it."""
+
+    if settings.value("intercept_port"):
+        return
+    settings.save({"intercept_port": service.free_port()})
+    if service.status() is not None and service.record():
+        service.restart()
+        service.wait(settings.value("strategy", "compaction"), seconds=15)
+
+
 def _path(name: str) -> str:
     """The path the harness was installed on (before Relay recorded it: its hook's setting, or the proxy)."""
 
     if known := (integrations.recorded(name) or {}).get("path"):
         return known
-    return "hook" if ("env", "RELAY_HOOK_URL") in {key for _, key in install.written(name)} else "proxy"
+    keys = {key for _, key in install.written(name)}
+    return "hook" if ("env", "RELAY_HOOK_URL") in keys else "https" if ("env", "HTTPS_PROXY") in keys else "proxy"
 
 
 def _ago(when: float) -> str:
