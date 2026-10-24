@@ -190,7 +190,7 @@ carries. Each harness lists its paths in order of preference; `relay install --v
 runs on (one installed `--via auto`, the preferred one; one on a named path, that one unless it
 cannot), for the conversations started from then on; `relay status` shows each harness's path.
 
-**Claude Code through Relay as its HTTPS proxy** (`relay setup claude --via https`, `relay/intercept.py`):
+**Claude Code through Relay as its HTTPS proxy** (its default path, Claude Code 2.1.294+; `relay/intercept.py`):
 Claude Code's base URL stays api.anthropic.com and its own settings get `HTTPS_PROXY` (Relay's
 proxy, its `intercept_port`) and `NODE_EXTRA_CA_CERTS` (Relay's CA), the way an organization's
 proxy is set. Relay opens the connections to api.anthropic.com with a certificate of its CA and

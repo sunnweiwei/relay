@@ -160,12 +160,15 @@ class ClaudeCodeHttpsTests(unittest.TestCase):
         self.assertIn("CORP", bundle.read_text())
         self.assertIn(intercept.ca_file().read_text().strip(), bundle.read_text())
 
-    def test_a_proxy_claude_code_already_goes_through_is_not_replaced(self) -> None:
+    @patch("relay.integrations.claude_code.installed_release", return_value="2.1.309")
+    def test_a_proxy_claude_code_already_goes_through_is_not_replaced(self, _) -> None:
         self.assertIsNone(ClaudeCodeHttps().unavailable())
         with patch.dict(os.environ, {"HTTPS_PROXY": "http://corp:3128"}):
             self.assertIn("already goes through a proxy (http://corp:3128", ClaudeCodeHttps().unavailable())
         with patch.dict(os.environ, {"HTTPS_PROXY": "http://127.0.0.1:9100"}):
             self.assertIsNone(ClaudeCodeHttps().unavailable())  # (Relay's own)
+        with patch("relay.integrations.claude_code.installed_release", return_value="2.1.250"):
+            self.assertIn("older than 2.1.294", ClaudeCodeHttps().unavailable())
 
 
 if __name__ == "__main__":

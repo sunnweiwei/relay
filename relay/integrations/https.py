@@ -18,7 +18,10 @@ from pathlib import Path
 from .. import intercept, settings
 from ..harnesses.claude_code import settings_file
 from ..install import Setting
+from . import claude_code
 from .base import Installation, Proxy
+
+SINCE = "2.1.294"  # the oldest release of Claude Code the HTTPS proxy was checked with
 
 
 class ClaudeCodeHttps:
@@ -29,7 +32,10 @@ class ClaudeCodeHttps:
     # the proxy too.
     checked: dict[str, str] | None = {s: "2.1.294–2.1.309" for s in ("compaction", "folding", "clm", "autocompact", "prolong",
                                                             "selfcompact")}
-    preferred = False
+    # Before the hook and the proxy: Claude Code keeps its endpoint (Remote Control) and its own
+    # transcript, every strategy runs as through the proxy (sub-agents included), and nothing of
+    # Claude Code's compaction (its once-a-session system prompt, its thrashing breaker) is in the way.
+    preferred = True
 
     def installation(self, relay_url: str) -> Installation:
         path, port = settings_file(), settings.value("intercept_port")
@@ -51,6 +57,10 @@ class ClaudeCodeHttps:
             import cryptography  # noqa: F401
         except ImportError:
             return "Relay's HTTPS proxy needs the cryptography package"
+        if (release := claude_code.installed_release()) is None:
+            return "Claude Code was not found here (the HTTPS proxy needs its release)"
+        if claude_code._release(release) < claude_code._release(SINCE):
+            return f"Claude Code {release} is older than {SINCE}, the oldest release the HTTPS proxy was checked with"
         own = settings.value("intercept_port")
         for source, env in (("the environment", os.environ), ("Claude Code's settings", _env(settings_file()))):
             value = next((env[v] for v in intercept.PROXY_VARS if env.get(v)), "")

@@ -24,7 +24,8 @@ from .https import ClaudeCodeHttps
 # A harness's hook comes before its proxy only once what it does better (Remote Control, sub-agents,
 # the harness's own features) was checked (`Integration.preferred`); till then it is taken when named.
 HOOKS: dict[str, Integration] = {"claude_code": ClaudeCodeHook()}
-# Relay as the harness's HTTPS proxy, where its provider's own host must stay its endpoint.
+# Relay as the harness's HTTPS proxy, where its provider's own host must stay its endpoint; before
+# the hook where both are preferred (`paths`).
 HTTPS: dict[str, Integration] = {"claude_code": ClaudeCodeHttps()}
 
 # What each strategy's contexts hold besides the conversation's own messages, which its path must

@@ -37,21 +37,17 @@ and from its own table otherwise; `context_window` overrides both. The harness n
 
 ### Claude Code: its own hook, or the proxy
 
-Claude Code (2.1.294 or newer) runs the strategy through its own plugin hook by default: its
-endpoint and login stay as they are, so Remote Control (from the claude.ai or mobile app,
-`/remote-control`, `claude remote-control`) keeps working, as do the features Claude Code keeps for
-Anthropic's own endpoint. A strategy the hook cannot carry or was not checked on (`clm`, `acm`,
-`ace`, `mem1`, the RLMs) runs through the proxy, where Remote Control does not start: `relay
-strategy` moves Claude Code to the proxy for it, and back to the hook for one the hook runs, for
-the conversations started from then on. `relay status` shows the path; `--via proxy` keeps Claude
-Code on the proxy.
-
-`relay setup claude --via https` is a third way: Relay becomes Claude Code's HTTPS proxy (the way an
-organization's proxy is set), so Claude Code keeps talking to api.anthropic.com, Remote Control
-included, while Relay manages each request as through the proxy, for every strategy, and Claude
-Code's own history stays untouched. Relay makes a certificate authority of its own for it, which
+Claude Code (2.1.294 or newer) goes through Relay as its HTTPS proxy by default (the way an
+organization's proxy is set): it keeps talking to api.anthropic.com, so Remote Control (from the
+claude.ai or mobile app, `/remote-control`, `claude remote-control`) keeps working, as do the
+features Claude Code keeps for Anthropic's own endpoint, and Relay manages each request as through
+the proxy, its own history untouched. Relay makes a certificate authority of its own for it, which
 only Claude Code trusts and which can vouch for api.anthropic.com alone. The commands Claude Code
-runs go through the same proxy (tunnelled as they are).
+runs go through the same proxy (tunnelled as they are). Where Claude Code already goes through a
+proxy, setup takes its plugin hook instead (Remote Control kept, fewer strategies); a strategy
+checked on neither (`acm`, `ace`, `mem1`, the RLMs) runs through the plain proxy, where Remote
+Control does not start. `relay strategy` moves Claude Code between them, for the conversations
+started from then on; `relay status` shows the path; `--via https|hook|proxy` names one.
 
 ### Keeping Relay running
 

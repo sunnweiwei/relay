@@ -33,6 +33,7 @@ from .harnesses import HARNESSES, Harness
 from .strategies import STRATEGIES
 from .transport import ProxyConfig, create_app
 
+PATHS = {"proxy": "the proxy", "hook": "its hook", "https": "Relay as its HTTPS proxy"}  # (as messages name them)
 ALIASES = {"claude": "claude_code", "dsh": "deepseek_harness", "mini": "mini_swe"}
 GUIDE = Path(__file__).with_name("HELP.md")
 
@@ -236,7 +237,8 @@ def _move(strategy: str) -> None:
         if _install(harness, target.name, service.address(), harness.starter(service.start_command()), quiet=True):
             continue
         integrations.remember(name, wanted, target.name)
-        print(f"  {name} now goes through the {target.name} ({why or f'it runs {strategy}'}): conversations started "
+        print(f"  {name} now goes through {PATHS.get(target.name, target.name)} ({why or f'it runs {strategy}'}): "
+              "conversations started "
               "from now on; one already open goes on as it was")
         if name == "claude_code" and target.name == "proxy":
             print("  note: through the proxy, Claude Code's Remote Control is off (it needs Anthropic's own endpoint)")

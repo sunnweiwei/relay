@@ -44,8 +44,14 @@ RELEASE = "relay.integrations.claude_code.installed_release"
 class PathTests(unittest.TestCase):
     def test_auto_takes_the_preferred_path_that_runs_the_strategy(self) -> None:
         claude, pi = HARNESSES["claude_code"], HARNESSES["pi"]
-        hook = integrations.HOOKS["claude_code"]
-        with patch(RELEASE, return_value="2.1.309"), patch.object(type(hook), "preferred", True):
+        hook, https = integrations.HOOKS["claude_code"], integrations.HTTPS["claude_code"]
+        with patch(RELEASE, return_value="2.1.309"):
+            self.assertEqual(integrations.choose(claude).name, "https")  # (Claude Code's default)
+            self.assertEqual(integrations.choose(claude, "auto", "clm").name, "https")
+            self.assertEqual(integrations.choose(claude, "auto", "mem1").name, "proxy")  # (checked on neither)
+        with patch(RELEASE, return_value="2.1.309"), patch.object(type(https), "unavailable", lambda self: "a proxy"):
+            self.assertEqual(integrations.choose(claude).name, "hook")  # (the HTTPS proxy unavailable: the hook)
+        with patch(RELEASE, return_value="2.1.309"), patch.object(type(https), "preferred", False):
             self.assertEqual(integrations.choose(claude).name, "hook")  # (once preferred: before the proxy)
             self.assertEqual(integrations.choose(claude, "auto", "folding").name, "hook")
             self.assertEqual(integrations.choose(claude, "auto", "clm").name, "proxy")  # (notes for one request)
@@ -53,15 +59,14 @@ class PathTests(unittest.TestCase):
             with patch.object(type(hook), "checked", {"compaction": "2.1.294"}):
                 self.assertEqual(integrations.choose(claude, "auto", "folding").name, "proxy")  # (not checked on it)
                 self.assertEqual(integrations.choose(claude, "hook", "folding").name, "hook")  # (named: taken)
-        with patch(RELEASE, return_value="2.1.309"):
-            self.assertEqual(integrations.choose(claude).name, "hook")  # (Claude Code's is preferred)
-        with patch(RELEASE, return_value="2.1.309"), patch.object(type(hook), "preferred", False):
+        with patch(RELEASE, return_value="2.1.309"), patch.object(type(https), "preferred", False), \
+                patch.object(type(hook), "preferred", False):
             self.assertEqual(integrations.choose(claude).name, "proxy")  # (a hook not preferred: when named)
             self.assertEqual(integrations.choose(claude, "hook").name, "hook")
             self.assertEqual(integrations.choose(claude, "proxy").name, "proxy")
             with self.assertRaisesRegex(ValueError, "clm needs notes, which the hook cannot carry"):
                 integrations.choose(claude, "hook", "clm")
-        with patch(RELEASE, return_value="2.1.250"), patch.object(type(hook), "preferred", True):
+        with patch(RELEASE, return_value="2.1.250"), patch.object(type(https), "preferred", False):
             self.assertEqual(integrations.choose(claude).name, "proxy")
             with self.assertRaisesRegex(ValueError, "older than 2.1.294"):
                 integrations.choose(claude, "hook")
