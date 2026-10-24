@@ -24,7 +24,11 @@ from .base import Installation, Proxy
 class ClaudeCodeHttps:
     name = "https"
     carries = Proxy.carries  # (the requests are managed as through the proxy)
-    checked: dict[str, str] | None = {}  # none yet: taken when named
+    # Checked with Claude (`check.py --via https --strategy S claude_code:claude`); `acm` and `mem1` met
+    # Anthropic's refusals (reasoning_extraction) on its own endpoint, `ace` fails on Claude through
+    # the proxy too.
+    checked: dict[str, str] | None = {s: "2.1.294–2.1.309" for s in ("compaction", "folding", "clm", "autocompact", "prolong",
+                                                            "selfcompact")}
     preferred = False
 
     def installation(self, relay_url: str) -> Installation:

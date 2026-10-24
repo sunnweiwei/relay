@@ -76,7 +76,7 @@ class PathTests(unittest.TestCase):
 
     def test_a_hook_is_checked_only_with_what_it_carries_and_the_readme_says_so(self) -> None:
         readme = (Path(__file__).parents[1] / "README.md").read_text()
-        for name, hook in integrations.HOOKS.items():
+        for name, hook in [*integrations.HOOKS.items(), *integrations.HTTPS.items()]:
             for strategy, releases in hook.checked.items():
                 self.assertIsNone(integrations.uncarried(hook, strategy), strategy)
                 self.assertRegex(readme, rf"\| `{name}` \| {hook.name} \| `{strategy}` \| {re.escape(releases)} \|")
