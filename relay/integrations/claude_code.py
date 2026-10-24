@@ -168,18 +168,19 @@ class ClaudeCodeHook:
             context = engine.answer(asked, summaries)
         except SummaryNeeded as need:
             return {"summarize": ask(need, items, messages, request.get("agent"))}
+        notice = {}
         if context is None:
             answer = asked.current
         else:
             if context.notes:
                 raise ValueError("the hook cannot show notes for one request; run this strategy through the proxy")
             placed = "\n\n".join(item.text for item in context.items if item.kind is Kind.SYSTEM)
-            if placed != (request.get("instructions") or ""):
-                raise ValueError("the strategy's instructions are not the ones Claude Code's system prompt got as the "
-                                 "session started (it gets them once a session); run this strategy through the proxy")
+            if placed != (request.get("instructions") or ""):  # (the strategy changed since the session started)
+                notice = {"notice": f"Relay now runs {engine.strategy.name} in this session; its instructions reach "
+                                    "Claude Code's system prompt in a new session (Claude Code builds it once a session)"}
             answer = tuple(item for item in context.items if item.kind is not Kind.SYSTEM)
         if answer == asked.current and {item.ref for item in items} >= {*range(len(messages))} - context_only(messages):
-            return {"skip": f"{engine.strategy.name}: not now"}  # (and nothing a resumed session brought back)
+            return {"skip": f"{engine.strategy.name}: not now", **notice}  # (and nothing a resumed session brought back)
         entries, head = replacement(answer, items, messages)  # what the hook cannot carry fails
         after, _ = conversation([messages[e["ref"]] if "ref" in e else e for e in entries])
         refs = {e["ref"] for e in entries if "ref" in e}
@@ -191,7 +192,7 @@ class ClaudeCodeHook:
                      "trigger": request.get("trigger"), "agent": request.get("agent"), "forced": asked.force,
                      "tokens_before": tokens, "messages_before": len(messages), "messages_after": len(entries),
                      "summary_requests": len(summaries.summaries)}, {"head": head})
-        return {"messages": entries}
+        return {"messages": entries, **notice}
 
 
 def installed_release() -> str | None:

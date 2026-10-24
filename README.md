@@ -207,7 +207,11 @@ changes (Context Folding's branch) is written as it comes in (`tool.call`, befor
 stores it), so that is no compaction: a branch costs one, at its return. The strategy's instructions join the end of the system
 prompt (its last section, `context_management`, through `prompt.section`) from
 `/relay/v1/instructions`: Claude Code builds its system prompt once a session, so instructions that
-change within one (ACE's playbook) are the proxy's, as are notes for one request (CLM, ACM) and a
+change within one (ACE's playbook) are the proxy's, and a strategy changed while a session is open
+(`relay strategy`) decides that session's compactions from its next request but has its
+instructions there from the next session (the plugin says so, once: a toast, which a headless
+session emits as a `ui_toast` event, and a notification; one the hook cannot carry leaves the open
+session to compact on its own, and says that), as are notes for one request (CLM, ACM) and a
 completion of the strategy's own (ACE, RLM). Claude Code stops a session that compacts three times with fewer than three
 requests between them (its thrashing breaker, which no plugin reaches), so a strategy that changes
 the context on every request (MEM1) is the proxy's too; Self-Compact through the hook needs the

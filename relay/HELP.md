@@ -43,7 +43,10 @@ endpoint and login stay as they are, so Remote Control (from the claude.ai or mo
 Anthropic's own endpoint. A strategy the hook cannot carry or was not checked on (`clm`, `acm`,
 `ace`, `mem1`, the RLMs) runs through the proxy, where Remote Control does not start: `relay
 strategy` moves Claude Code to the proxy for it, and back to the hook for one the hook runs, for
-the conversations started from then on. `relay status` shows the path; `--via proxy` keeps Claude
+the conversations started from then on. In a session already open, a new strategy decides its
+compactions from the next request, but its instructions (folding's, PRO-LONG's) reach the model
+from a new session, and one the hook cannot carry leaves that session to compact on its own;
+Claude Code shows a notice when either happens. `relay status` shows the path; `--via proxy` keeps Claude
 Code on the proxy.
 
 ### Keeping Relay running
