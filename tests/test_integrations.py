@@ -206,7 +206,6 @@ class ClaudeCodeCompactTests(unittest.TestCase):
         messages = [user("read"), call(1), result(1)]
         for answer, refused in [
             (lambda r: Context(r.current, notes=("size",)), "notes"),
-            (lambda r: Context((Item(Kind.SYSTEM, "rules"), *r.current[:2])), "instructions are not the ones"),
             (lambda r: Context((r.current[0], replace(r.current[1], text="Read {}"), r.current[2])), "change a tool call"),
             (lambda r: Context((r.current[0], replace(r.current[1], kind=Kind.ASSISTANT), r.current[2])), "keeps a message"),
         ]:
@@ -315,6 +314,15 @@ class ClaudeCodeCompactTests(unittest.TestCase):
                          {"skip": "compaction: held, two compactions in a row would end Claude Code's turn"})
         self.assertIn("summarize", ClaudeCodeHook().compact(engine, {**request, "tokens": 168_000}))  # (forced)
 
+    def test_a_strategy_changed_mid_session_runs_at_once_and_says_its_instructions_wait(self) -> None:
+        messages = [user("read"), call(1), result(1), call(2), result(2)]
+        engine = Engine(Answers(lambda r: Context((Item(Kind.SYSTEM, "new rules"), r.current[0], *r.current[3:]))))
+        done = ClaudeCodeHook().compact(engine, {"messages": messages, "instructions": "old rules"})
+        self.assertEqual(done["messages"], [{"ref": 0}, {"ref": 3}, {"ref": 4}])  # (the new strategy's context)
+        self.assertIn("its instructions reach Claude Code's system prompt in a new session", done["notice"])
+        same = ClaudeCodeHook().compact(engine, {"messages": messages, "instructions": "new rules"})
+        self.assertNotIn("notice", same)
+
     def test_the_instructions_are_the_strategys_own(self) -> None:
         self.assertIn("internal state", ClaudeCodeHook().instructions(Engine(MEM1())))
         self.assertIn("branch", ClaudeCodeHook().instructions(Engine(ContextFolding())).lower())
@@ -352,6 +360,7 @@ class EndpointTests(unittest.TestCase):
             "/relay/v1/instructions", json={"harness": "claude_code"})
         self.assertEqual(refused.status_code, 409)
         self.assertIn("clm needs notes, which the hook cannot carry", refused.json()["error"]["message"])
+        self.assertIn("this one compacts on its own", refused.json()["notice"])  # (shown once in the session)
 
 
 if __name__ == "__main__":

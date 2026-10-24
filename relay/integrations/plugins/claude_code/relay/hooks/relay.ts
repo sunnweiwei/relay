@@ -29,6 +29,7 @@ let placed: string | null = null; // the instructions the system prompt got (nul
 // third such compaction (its thrashing breaker); these are counted as it counts them, by turn.
 const RAPID = 3;
 const sizes = new Map<string, number>();
+const told = new Set<string>(); // the notices shown in this session (each once)
 const since = new Map<string, number>();
 const rapid = new Map<string, number>();
 
@@ -132,8 +133,28 @@ async function post($: any, endpoint: string, request: any) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(request),
   });
+  let reply: any;
+  try {
+    reply = JSON.parse(response.text);
+  } catch {
+    reply = {};
+  }
+  if (typeof reply?.notice === 'string') await tell($, reply.notice);
   if (!response.ok) throw new Error(`Relay answered ${response.status}: ${response.text.slice(0, 300)}`);
-  return JSON.parse(response.text);
+  return reply;
+}
+
+// What the user needs to know about this session (its strategy changed, say): once, where Claude
+// Code shows a plugin's notices, and in its log.
+async function tell($: any, text: string) {
+  if (told.has(text)) return;
+  told.add(text);
+  $.ui.log(text);
+  for (const show of [() => $.ui.toast(text), () => $.ui.notify(text, { title: 'Relay' })]) {
+    try {
+      await show();
+    } catch {}
+  }
 }
 
 async function decide($: any, e: any, context: { tokens?: number; window: number }) {

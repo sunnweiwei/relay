@@ -48,6 +48,10 @@ proxy, setup takes its plugin hook instead (Remote Control kept, fewer strategie
 checked on neither (`acm`, `ace`, `mem1`, the RLMs) runs through the plain proxy, where Remote
 Control does not start. `relay strategy` moves Claude Code between them, for the conversations
 started from then on; `relay status` shows the path; `--via https|hook|proxy` names one.
+On the hook, a strategy changed while a session is open decides its compactions from the next
+request, but its instructions (folding's, PRO-LONG's) reach the model from a new session, and one
+the hook cannot carry leaves that session to compact on its own; Claude Code shows a notice when
+either happens.
 
 ### Keeping Relay running
 
