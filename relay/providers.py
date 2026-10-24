@@ -80,7 +80,8 @@ def route(path: str, headers: Mapping[str, str], upstreams: Mapping[str, Upstrea
             return Upstream(origin, mount)
     if path.startswith("/backend-api/codex/"):
         return upstreams["chatgpt"]
-    if path.startswith(("/v1/messages", "/api/")) or "anthropic-version" in headers:
+    if path.startswith(("/v1/messages", "/api/")) or "anthropic-version" in headers \
+            or headers.get("host") == "api.anthropic.com":  # (opened by Relay's HTTPS proxy: Anthropic's, any path)
         return upstreams["anthropic"]
     if path.startswith(("/v1beta/", "/v1alpha/")) or "x-goog-api-key" in headers:
         return upstreams["gemini"]

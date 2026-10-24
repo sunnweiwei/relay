@@ -533,6 +533,8 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
             trigger |= {"clm_steering": f"/relay/tests/docker/steering/{steering}.md",
                         "clm_nudges": "on" if POLICIES[steering].nudges else "off"}
     env = {"PROMPT": first, "PROMPT2": second, **trigger, "compact_min_gain": "0"}
+    if via == "https":  # (Relay as Claude Code's HTTPS proxy too; its endpoint stays api.anthropic.com)
+        env["intercept_port"] = "8789"
     turn = 1800 if strategy.startswith("rlm") else 600  # an RLM works out every step before the model takes it
     # `--cold-start`: `relay setup`, then Relay stopped before each turn (a machine restarted): the
     # harness's hook must start it before its first request.
@@ -1636,7 +1638,7 @@ def main() -> int:
     parser.add_argument("--hook-threshold", type=int,
                         help="with --via hook: the strategy's threshold (default by model: "
                              f"{HOOK_THRESHOLDS}; a release whose own request is smaller needs less)")
-    parser.add_argument("--via", choices=["proxy", "hook"], default="proxy",
+    parser.add_argument("--via", choices=["proxy", "hook", "https"], default="proxy",
                         help="install through this path (hook: the harness compacts through Relay's hook)")
     parser.add_argument("--harness-compaction", action="store_true",
                         help="the harness's own auto-compaction set to fire early; it must stay off")

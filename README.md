@@ -190,6 +190,31 @@ carries. Each harness lists its paths in order of preference; `relay install --v
 runs on (one installed `--via auto`, the preferred one; one on a named path, that one unless it
 cannot), for the conversations started from then on; `relay status` shows each harness's path.
 
+**Claude Code through Relay as its HTTPS proxy** (its default path, Claude Code 2.1.294+; `relay/intercept.py`):
+Claude Code's base URL stays api.anthropic.com and its own settings get `HTTPS_PROXY` (Relay's
+proxy, its `intercept_port`) and `NODE_EXTRA_CA_CERTS` (Relay's CA), the way an organization's
+proxy is set. Relay opens the connections to api.anthropic.com with a certificate of its CA and
+manages each request as through the proxy (every path of that host goes to Anthropic, Remote
+Control's included); it tunnels every other connection as it is (Remote Control's bridge, a tool's
+download). So Remote Control and what Claude Code keeps for Anthropic's own endpoint stay on, every
+strategy runs, and Claude Code's transcript is never touched: neither Claude Code nor whoever
+watches it sees the context management, as through the proxy. The CA can vouch for api.anthropic.com
+alone (a critical name constraint, which Claude Code enforces: a certificate of it for another
+host is refused, "permitted subtree violation"), its keys are readable by their owner only, and it
+lives in Relay's directory, nowhere in the system's trust. The commands Claude Code runs inherit
+the proxy, as they would an organization's: Relay tunnels them as they are, and they reach the
+network only while Relay runs. A proxy Claude Code already goes through is not chained to (the path
+is unavailable then), and CAs it already trusts are kept beside Relay's. On Anthropic's own endpoint
+Claude Code (2.1.309) keeps the conversation in a server-side thread and sends only what is new;
+Relay answers a request that asks for one as a server without threads does
+(`thread_unsupported_request`), and Claude Code sends that turn again without, and its whole
+conversation from then on (it keeps the session, on that model, without threads). Checked through it with Claude on the real API
+(the table below; `acm` and `mem1` met Anthropic's refusals on its own endpoint, category
+`reasoning_extraction`, for the prompts ACM recalls with and MEM1's internal state; `ace` failed on
+Claude through the proxy too). Remote Control's own checks were played with a made-up login and no
+network (Claude Code 2.1.309): through the HTTPS proxy it
+passed the endpoint check and stopped at the account, through a base URL it was refused there.
+
 **Claude Code's compaction hook** (Claude Code 2.1.294+, `relay setup claude --via hook`): the install enables
 a function-hook plugin (Claude Code's plugin API, early access, switched on by
 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`) and leaves `ANTHROPIC_BASE_URL` alone, so Remote Control
@@ -265,6 +290,12 @@ has none of them; on the hook it keeps them, where it reaches Anthropic directly
 | `claude_code` | hook | `autocompact` | 2.1.294–2.1.309 |
 | `claude_code` | hook | `prolong` | 2.1.294–2.1.309 |
 | `claude_code` | hook | `selfcompact` | 2.1.309 |
+| `claude_code` | https | `compaction` | 2.1.294–2.1.309 |
+| `claude_code` | https | `folding` | 2.1.294–2.1.309 |
+| `claude_code` | https | `clm` | 2.1.294–2.1.309 |
+| `claude_code` | https | `autocompact` | 2.1.294–2.1.309 |
+| `claude_code` | https | `prolong` | 2.1.294–2.1.309 |
+| `claude_code` | https | `selfcompact` | 2.1.294–2.1.309 |
 
 Checked in Docker (`check.py --via hook claude_code:gpt`, Relay off the model path and a second,
 non-compacting Relay recording it): Claude Code asked before every request and the strategy

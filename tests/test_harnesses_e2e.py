@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from relay import Compaction, Engine, PrefixStore, ProxyConfig, create_app
+from relay import intercept
 from relay.integrations import ClaudeCodeHook
 from relay.prompts import SUMMARY_PREFIX
 from relay.strategies import ContextFolding
@@ -192,6 +193,42 @@ class ClaudeCodeHookSwitchTests(unittest.TestCase):
         self.assertTrue([n for n in compacted if n > second + 1], "turn 2 never compacted")  # (folding's fallback)
         toasts = [json.loads(line) for line in result.stdout.splitlines() if '"ui_toast"' in line]
         self.assertTrue(any("Relay now runs folding" in t.get("text", "") for t in toasts), toasts)
+
+
+class ClaudeCodeHttpsTests(unittest.TestCase):
+    """Claude Code through Relay as its HTTPS proxy: its base URL stays api.anthropic.com, Relay
+    opens those connections and manages each request as through the proxy (here the fake answers
+    for api.anthropic.com); Claude Code's own transcript is never touched."""
+
+    def test_requests_are_compacted_and_claude_codes_transcript_is_its_own(self) -> None:
+        if shutil.which("claude") is None:
+            self.skipTest("claude is not installed")
+        fake = FakeUpstream(tool_calls=6, command="seq 1 300")
+        with serve(fake.app) as upstream, tempfile.TemporaryDirectory() as root:
+            home, work = Path(root, "home"), Path(root, "work")
+            (home / ".claude").mkdir(parents=True), work.mkdir()
+            os.environ["RELAY_HOME"] = str(Path(root, "relay"))  # (the CA, in this test's Relay directory)
+            # (below Claude Code's own request with a few results: on Anthropic's endpoint it is smaller)
+            engine = Engine(Compaction(threshold=12_000), PrefixStore())
+            with serve(create_app(engine, ProxyConfig(upstreams=local_upstreams(upstream)))) as relay:
+                from tests.test_intercept import _listener
+                proxy, _ = _listener(lambda: intercept.serve("127.0.0.1", 0, int(relay.rsplit(":", 1)[1])))
+                (home / ".claude" / "settings.json").write_text(json.dumps({"env": {
+                    "HTTPS_PROXY": f"http://127.0.0.1:{proxy}", "NODE_EXTRA_CA_CERTS": str(intercept.ca_file())}}))
+                env = {**_env(home), "ANTHROPIC_API_KEY": "tenant"}  # (no ANTHROPIC_BASE_URL)
+                for command in _commands("claude", work):
+                    result = subprocess.run(command, cwd=work, env=env, stdin=subprocess.DEVNULL,
+                                            capture_output=True, text=True, timeout=180)
+                    self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+                    self.assertIn(FINAL_TEXT, result.stdout)
+            transcript = "".join(path.read_text() for path in (home / ".claude" / "projects").rglob("*.jsonl"))
+        requests = [r for r in fake.requests if isinstance(r.get("body"), dict) and r["body"].get("tools")]
+        self.assertTrue(requests)
+        self.assertIn("prompt-caching-scope", requests[0]["headers"].get("anthropic-beta", ""))  # (Anthropic's own)
+        self.assertTrue(any(any(SUMMARY_PREFIX in _text(m) for m in r["body"]["messages"]) for r in requests))
+        self.assertFalse([r for r in requests if "thread" in r["body"]])  # (no server-side thread: Relay sees it all)
+        self.assertNotIn("compact_boundary", transcript)  # (Claude Code never compacted: it saw nothing)
+        self.assertNotIn(SUMMARY_PREFIX, transcript)
 
 
 def _size(body: dict[str, Any]) -> int:
