@@ -178,6 +178,36 @@ class SetupTests(unittest.TestCase):
         wait.assert_called_once_with("folding", seconds=15)
         self.assertIn("every conversation", out)
 
+    def test_claude_code_set_up_on_its_hook_goes_through_the_path_its_strategy_runs_on(self) -> None:
+        claude = self.root / "claude"
+        claude.mkdir()
+
+        def config() -> dict:
+            return json.loads((claude / "settings.json").read_text())
+
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(claude)}), \
+                mock.patch("relay.integrations.claude_code.installed_release", return_value="2.1.309"), \
+                mock.patch.object(service, "status", return_value={"strategy": "compaction"}), \
+                mock.patch.object(service, "wait", side_effect=lambda name, **_: {"strategy": name}):
+            code, out = self.run_cli("setup", "claude", "--strategy", "compaction", "--via", "hook")
+            self.assertEqual(code, 0, out)
+            self.assertIn("installed claude_code (hook)", out)
+            self.assertEqual(config()["enabledPlugins"], {"relay@relay": True})
+            self.assertNotIn("ANTHROPIC_BASE_URL", config()["env"])  # (Remote Control stays on)
+            code, out = self.run_cli("strategy", "clm")  # (notes for one request: the proxy's)
+            self.assertEqual(code, 0, out)
+            self.assertIn("claude_code now goes through the proxy (clm needs notes, which the hook cannot carry)", out)  # (named, it cannot)
+            self.assertIn("Remote Control is off", out)
+            self.assertIn("/up/claude_code-", config()["env"]["ANTHROPIC_BASE_URL"])
+            self.assertNotIn("enabledPlugins", config())
+            code, out = self.run_cli("strategy", "folding")
+            self.assertIn("claude_code now goes through the hook (it runs folding)", out)
+            self.assertNotIn("ANTHROPIC_BASE_URL", config()["env"])
+            code, out = self.run_cli("status")
+            self.assertIn("harnesses set up: claude_code (hook)", out)
+            code, out = self.run_cli("uninstall", "claude")
+            self.assertEqual(config().get("env", {}), {})
+
     def test_settings_read_at_start_restart_the_service(self) -> None:
         with mock.patch.object(service, "status", return_value={"strategy": "compaction"}), \
                 mock.patch.object(service, "record", return_value={"manager": "systemd"}), \

@@ -178,37 +178,89 @@ it to each request. A **hook** runs inside the harness and leaves its model endp
 compaction hook writes the context into the harness's own history, which then serves as the store
 (there `history` is the transcript as it stands, so it equals `current`).
 The paths differ in what they can see and write, never in what the strategy decides: a compaction
-hook sees the harness's transcript (not its system prompt, tools or injected context), keeps
-messages whole or writes text messages, and every change is a real compaction to the harness (it
-re-injects its context, shows it, keeps it on resume). What a path cannot carry fails loudly
-instead of being dropped. Each harness lists its paths in order of preference,
-and `relay install --via auto` takes the first; `--via proxy|hook` names one.
+hook sees the harness's transcript (not its system prompt, tools or injected context), and every
+change is a real compaction to the harness (it re-injects its context, shows it, keeps it on
+resume). What a path cannot carry fails loudly instead of being dropped. Each strategy says what
+its contexts need besides the conversation's messages (`relay/integrations` `NEEDS`: instructions,
+instructions that change within a conversation, notes for one request, new text for an item it
+keeps, a completion of its own, the history past what the harness keeps), and each path what it
+carries. Each harness lists its paths in order of preference; `relay install --via auto` (and
+`relay setup`) takes the first that carries the strategy and runs with the harness's release, and
+`--via proxy|hook` names one. `relay strategy` moves each harness to the path its new strategy
+runs on (one installed `--via auto`, the preferred one; one on a named path, that one unless it
+cannot), for the conversations started from then on; `relay status` shows each harness's path.
 
-**Claude Code's compaction hook** (`relay install claude --via hook`, Claude Code 2.1.274+): the
-install enables a function-hook plugin (an early-access feature, switched on by
-`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`), moves Claude Code's auto-compaction trigger to the bottom
-(`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=0.01`, its window left as it is), and leaves `ANTHROPIC_BASE_URL`
-alone, so Remote Control (which refuses any other endpoint) and every login keep working. Claude
-Code then compacts, through the hook, before every request: the plugin posts the transcript and the
+**Claude Code's compaction hook** (Claude Code 2.1.294+, `relay setup claude --via hook`): the install enables
+a function-hook plugin (Claude Code's plugin API, early access, switched on by
+`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`) and leaves `ANTHROPIC_BASE_URL` alone, so Remote Control
+(which refuses any other endpoint) and every login keep working. As a session starts, the plugin
+moves Claude Code's auto-compaction trigger to the bottom (`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=0.01`,
+its window left as it is; a plugin that does not load leaves Claude Code as it is), and Claude
+Code compacts, through the hook, before every request: the plugin posts the transcript and the
 size of Claude Code's last request to Relay, and the strategy decides on it as it would through
 the proxy, on that size plus what was added since. "Not now" skips the compaction (it leaves
 nothing in the transcript or the requests); a new context is kept by Claude Code, which
-re-injects its own context after it. Claude Code would have compacted at the latest 33k tokens below
-its window and blocks a few thousand later, so past that the strategy decides as if forced. The summary
-request is `$.model.fork`: the conversation as Claude Code last sent it (system prompt, tools,
-history, its latest reply) with Codex's prompt after it, which is Codex's own summary request;
-tool results not sent yet (mid-turn) follow in that prompt as text. The fork reaches the trigger
-too and runs uncompacted, as Codex's summary request does. A history a fork cannot see (a
+re-injects its own context after it. The new transcript keeps Claude Code's messages whole, gives
+one new text (a tool's result, as Context Folding, AutoCompact and ACM rewrite them), or writes a
+message of the strategy's own (text only). A shell result whose new text is all the strategy
+changes (Context Folding's branch) is written as it comes in (`tool.call`, before Claude Code
+stores it), so that is no compaction: a branch costs one, at its return. The strategy's instructions join the end of the system
+prompt (its last section, `context_management`, through `prompt.section`) from
+`/relay/v1/instructions`: Claude Code builds its system prompt once a session, so instructions that
+change within one (ACE's playbook) are the proxy's, as are notes for one request (CLM, ACM) and a
+completion of the strategy's own (ACE, RLM). Claude Code stops a session that compacts three times with fewer than three
+requests between them (its thrashing breaker, which no plugin reaches), so a strategy that changes
+the context on every request (MEM1) is the proxy's too; Self-Compact through the hook needs the
+window well above Claude Code's own context, or it probes, and compacts, every second response.
+`clm`, `acm`, `ace`, `mem1` and the RLMs run through the proxy, where Remote Control is off.
+A hook comes before the proxy only once it was checked better than the proxy (`preferred`: Remote
+Control, sub-agents, the harness's own features, each against the proxy). Claude Code's is: it
+keeps Remote Control and what Claude Code does only on Anthropic's own endpoint (below); it
+compacts a sub-agent at its real size, which the plugin reads from `turn.step` (`$.session.usage`
+is the session's alone); and it holds a compaction that would trip Claude Code's thrashing breaker
+(`check.py --subagent` at low thresholds: no turn ended, a sub-agent compacted at 34k). Left: a
+sub-agent is summarized from a rendering, where the proxy continues its own conversation; a held
+compaction waits up to three requests; and Remote Control itself was not started in a check (that
+enrolls a session with an account). So `--via auto` takes Claude Code's hook for the strategies
+checked through it (the table below) and the proxy for the others. Even then `--via auto` takes the
+hook only for a strategy checked through it with real models (the table below); another the hook
+can carry is taken when named (`--via hook`, which says so). The history the strategy sees is the transcript after as many
+placeholders as compactions through Relay took out of it, so it grows as a harness's own history
+would (PRO-LONG logs each item once); the context window begins at the first request after a
+compaction, where Codex's growth budget counts from. Resuming a session, Claude Code follows a kept tool result to the call it
+first answered, before the compaction, so it brings back the history compactions dropped, and
+it gathers every copy compactions kept of an assistant message (by its API message id) with every
+result its calls had. Relay remembers what each compaction dropped (a message by its row in the
+session file, which a resume brings back as it was), and leaves that out, with all but the latest copy and result, and
+writes the transcript clean, so a resumed session (`claude -c`) goes on from the context it had.
+Claude Code would have compacted at the latest 33k
+tokens below its window and blocks a few thousand later, so past that the strategy decides as if
+forced. The summary request is `$.model.fork`: the conversation as Claude Code last sent it (system
+prompt, tools, history, its latest reply) with Codex's prompt after it, which is Codex's own summary
+request; tool results not sent yet (mid-turn) follow in that prompt as text. The fork reaches the
+trigger too and runs uncompacted, as Codex's summary request does. A history a fork cannot see (a
 sub-agent's, or one a resumed process compacts before its first request) is summarized from a
-rendering in a plain completion. When Relay does not answer, nothing happens, unless Claude Code is
-near its own limit, where its own compaction runs. The hook carries the conversation and the
-strategy's state (kept by Relay per session and agent); a strategy's instructions, its notes (see
-CLM) and new content for a message Claude Code keeps make the hook fail, so such a strategy runs
-through the proxy. Claude Code's function hooks could carry instructions too (`prompt.section`
-adds to a system-prompt section); that is not used yet. Proxy stays Claude Code's
-default path: it follows Codex's timing exactly and continues each sub-agent's own conversation
-for its summary. Whether Claude Code's interactive UI shows a low-context warning with the trigger
-at the bottom is not verified.
+rendering in a plain completion (the proxy continues a sub-agent's own conversation instead). When
+Relay does not answer, nothing happens, unless Claude Code is near its own limit, where its own
+compaction runs; a session whose `ANTHROPIC_BASE_URL` points at Relay (set up through the proxy
+before) is left to the proxy. Whether Claude Code's interactive UI shows a low-context warning with
+the trigger at the bottom is not verified.
+
+What Claude Code does only on Anthropic's own endpoint (2.1.309, `claude -p` against a recorder,
+with and without `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`, which makes it take the recorder for
+Anthropic's): Remote Control; the betas `prompt-caching-scope` (its system prompt cached across
+sessions), `thinking-binding-controls` and `cache-diagnosis`; the server-side `advisor` tool;
+WebSearch's extended mode; the model catalog it is served (`servedCatalog off (not_first_party)`);
+and remote managed settings and policy limits (an organization's). Through the proxy a session
+has none of them; on the hook it keeps them, where it reaches Anthropic directly.
+
+| Harness | Path | Strategy | Checked on (Claude Code releases; `check.py --via hook --strategy S claude_code:gpt`, `:claude`) |
+| --- | --- | --- | --- |
+| `claude_code` | hook | `compaction` | 2.1.294–2.1.309 |
+| `claude_code` | hook | `folding` | 2.1.294–2.1.309 |
+| `claude_code` | hook | `autocompact` | 2.1.294–2.1.309 |
+| `claude_code` | hook | `prolong` | 2.1.294–2.1.309 |
+| `claude_code` | hook | `selfcompact` | 2.1.309 |
 
 Checked in Docker (`check.py --via hook claude_code:gpt`, Relay off the model path and a second,
 non-compacting Relay recording it): Claude Code asked before every request and the strategy
@@ -220,7 +272,8 @@ the rendering); every summary kept the codes read, later requests carried only t
 and none of the summarized output, Claude Code never compacted on its own, nothing was read twice,
 and both answers were right.
 
-Other harnesses' native interfaces, for later paths: OpenClaw's `contextEngine` plugin slot
+Other harnesses' native interfaces, for later paths (each a per-request rewrite, which carries every
+strategy as the proxy does): OpenClaw's `contextEngine` plugin slot
 (`assemble` builds each request, `compact` owns compaction), pi's extensions (`context` and
 `before_provider_request` rewrite each request, `session_before_compact`), Hermes Agent's context
 engine and request middleware, OpenCode and Kilo's `experimental.chat.messages.transform`, DeepSeek

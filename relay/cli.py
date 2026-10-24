@@ -169,6 +169,7 @@ def _setup(harness: Harness, strategy: str | None, assignments: list[str], via: 
         install.uninstall(harness.name)  # (pointed at the old port)
     if harness.name not in install.installed() and _install(harness, via, service.address(), starter):
         return 1
+    _move(wanted)
     if not starter and service.record().get("manager") == "process":
         print(f"  note: {harness.name} cannot start Relay itself: after this machine restarts, run `relay start` "
               f"(or set Relay up with --autostart)")
@@ -194,6 +195,8 @@ def _change(changes: dict, removed: tuple[str, ...]) -> int:
         raise ValueError(f"unknown strategy {name!r}: one of {', '.join(sorted(STRATEGIES))}")
     settings.save(changes, removed)
     wanted = settings.value("strategy", "compaction")
+    if "strategy" in changes:
+        _move(wanted)
     if service.status() is None:
         print(f"saved; Relay is not running (`relay setup <harness>` starts it)")
         return 0
@@ -207,6 +210,36 @@ def _change(changes: dict, removed: tuple[str, ...]) -> int:
     return 0
 
 
+def _move(strategy: str) -> None:
+    """Each harness set up on the path that runs `strategy`: the one it was installed with (`auto`,
+    the preferred path that runs it), or else the preferred one that does."""
+
+    for name in install.installed():
+        if name in leaving.leaving():
+            continue
+        harness, known, now = HARNESSES[name], integrations.recorded(name) or {}, _path(name)
+        wanted = known.get("via", now)
+        try:
+            target = integrations.choose(harness, wanted, strategy)
+        except ValueError as error:
+            why, target = str(error).split(";")[0], integrations.choose(harness, "auto", strategy)
+        else:
+            why = None
+        if target.name == now:
+            continue
+        preferred = integrations.paths(harness)
+        why = why or next((integrations.unfit(path, strategy) or integrations.unchecked(path, strategy)
+                           for path in preferred[:preferred.index(target)]), None)
+        install.uninstall(name)
+        if _install(harness, target.name, service.address(), harness.starter(service.start_command()), quiet=True):
+            continue
+        integrations.remember(name, wanted, target.name)
+        print(f"  {name} now goes through the {target.name} ({why or f'it runs {strategy}'}): conversations started "
+              "from now on; one already open goes on as it was")
+        if name == "claude_code" and target.name == "proxy":
+            print("  note: through the proxy, Claude Code's Remote Control is off (it needs Anthropic's own endpoint)")
+
+
 def _status() -> int:
     now, entry = service.status(), service.record()
     print(f"Relay: {'running at ' + service.address() + ', strategy ' + now['strategy'] if now else 'not running'}")
@@ -215,7 +248,8 @@ def _status() -> int:
     print(f"kept running by: {kept.get(entry.get('manager'), 'nothing (started by hand?)')}")
     _settle()
     departing = leaving.leaving()
-    print(f"harnesses set up: {', '.join(n for n in install.installed() if n not in departing) or 'none'}")
+    print("harnesses set up: " + (", ".join(f"{n} ({_path(n)})" for n in install.installed() if n not in departing)
+                                  or "none"))
     for name, seen in ((now or {}).get("harnesses") or {}).items():  # (as their requests said it)
         newer = HARNESSES[name].newer(seen["release"])
         print(f"  {name} {seen['release']}: profile checked against {seen['checked'] or 'no release'}"
@@ -241,15 +275,25 @@ def _tail(path: Path, lines: int = 20) -> str:
         return ""
 
 
-def _install(harness: Harness, via: str, url: str, extra: list | None = None) -> int:
+def _install(harness: Harness, via: str, url: str, extra: list | None = None, quiet: bool = False) -> int:
+    strategy = settings.value("strategy", "compaction")
     try:
-        path = integrations.choose(harness, via)
+        path = integrations.choose(harness, via, strategy)
         setup = path.installation(url)
         install.install(harness.name, url, [*setup.settings, *(extra or [])])
     except ValueError as error:
         print(f"relay install: {error}", file=sys.stderr)
         return 1
+    integrations.remember(harness.name, via, path.name)
+    if quiet:
+        return 0
+    passed = [f"{other.name}: {why}" for other in integrations.paths(harness)[:integrations.paths(harness).index(path)]
+              if via == "auto" and (why := integrations.unfit(other, strategy) or integrations.unchecked(other, strategy))]
     print(f"installed {harness.name} ({path.name}): " + ", ".join(sorted({str(s.path) for s in setup.settings})))
+    for why in passed:
+        print(f"  not the {why}")
+    if unchecked := integrations.unchecked(path, strategy):
+        print(f"  note: {unchecked} (named with --via {path.name})")
     for note in setup.notes:
         print(f"  note: {note}")
     return 0
@@ -279,6 +323,7 @@ def _uninstall(harness: Harness, now: bool = False) -> int:
         return 0
     leaving.stay(name)
     paths = install.uninstall(name)
+    integrations.forget(name)
     print(f"uninstalled {name}: " + ", ".join(sorted({str(path) for path in paths})))
     for entry in waiting:  # (--now)
         print(f"  note: this one grew past the model's window through Relay and fails direct: {_described(entry)}")
@@ -286,6 +331,14 @@ def _uninstall(harness: Harness, now: bool = False) -> int:
         print("  no harness goes through Relay now: it is no longer started at login, and the one running goes on "
               "for the conversations still open")
     return 0
+
+
+def _path(name: str) -> str:
+    """The path the harness was installed on (before Relay recorded it: its hook's setting, or the proxy)."""
+
+    if known := (integrations.recorded(name) or {}).get("path"):
+        return known
+    return "hook" if ("env", "RELAY_HOOK_URL") in {key for _, key in install.written(name)} else "proxy"
 
 
 def _ago(when: float) -> str:

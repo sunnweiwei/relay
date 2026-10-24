@@ -11,7 +11,8 @@ Each run gets a throwaway HOME: the harness's own config is written there (the "
 existing setup"), `relay install <harness>` edits it, Relay runs in the background, and
 the harness is used as a user would. Host configs are never mounted. Codex and
 `claude_code:login` use a copy of the host's login that cannot refresh (see `copy_login`);
-everything else uses API keys from the file named by RELAY_TEST_KEYS. Requires the image
+everything else uses API keys from the file named by RELAY_TEST_KEYS (RELAY_TEST_CLAUDE: the
+`claude` binary to mount, else the one on PATH). Requires the image
 built from tests/docker/Dockerfile.
 
 The task takes two turns of one session. Turn 1 reads file_1..4 one tool call at a time
@@ -29,6 +30,8 @@ order, no compaction failed, and the upstream accepted every model call.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 import argparse
 import json
@@ -206,7 +209,8 @@ GROWTH = 5_000  # each file adds about 2k tokens
 # `--via hook`: the harness asks Relay before every request, and Relay's strategy compacts at this
 # size. Relay is off the model path, so a second Relay that never compacts records it, in front of
 # whatever endpoint the user's configuration names.
-# Claude Code's own request is about 31.5k tokens on Claude, 17k on GPT (2.1.294), turn 2's note 6k
+# Claude Code's own request is about 31.5k tokens on Claude, 17k on GPT (2.1.294; 2.1.309: 16.5k and 9.6k, so
+# `--hook-threshold` lower there), turn 2's note 6k
 # more: above them, room for about four files after a compaction (Claude Code gives up on one that
 # refills its context within three turns).
 HOOK_THRESHOLDS = {"claude": 50_000, "login": 50_000, "gpt": 34_000}
@@ -509,7 +513,7 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
     # 90% of a context window of that many tokens (and 95% always).
     trigger = {"context_window": str(window)} if window else {
         "compact_growth": str(10**9 if probe or selfcompact else growth or GROWTH)}
-    if via == "hook":
+    if via == "hook" and strategy == "compaction":  # (another strategy: its own trigger, as through the proxy)
         trigger = {"compact_threshold": str(HOOK_THRESHOLDS[name.split(":")[1]])}
     if strategy == "folding":
         trigger = {"strategy": "folding"}
@@ -548,8 +552,11 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
               via=via, install=not cold, serve=not cold)
     if probe:
         return {"name": name, "home": str(home)}
-    if via == "hook":
+    if via == "hook" and strategy == "compaction":
         return evaluate_hook(name, home)
+    if via == "hook":  # the strategy's own checks, on what the model received, and the hook's
+        as_sent(home)
+        return hooked(strategy_result(name, home, strategy, clm_edit, steering), home)
     if strategy == "clm":
         return evaluate_clm_edit(name, home) if clm_edit else evaluate_clm(name, home, steering)
     if strategy == "folding":
@@ -574,6 +581,65 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
         return run(name, growth, retried=True, subagent=subagent, window=window, native=native, selfcompact=selfcompact,
                    via=via, lines=lines, strategy=strategy, steering=steering, clm_edit=clm_edit, cold=cold)
     return result
+
+
+def strategy_result(name: str, home: Path, strategy: str, clm_edit: bool, steering: str | None) -> dict:
+    evaluators = {"folding": evaluate_folding, "prolong": evaluate_prolong, "ace": evaluate_ace,
+                  "selfcompact": evaluate_selfcompact, "autocompact": evaluate_autocompact, "acm": evaluate_acm,
+                  "mem1": evaluate_mem1}
+    if strategy == "clm":
+        return evaluate_clm_edit(name, home) if clm_edit else evaluate_clm(name, home, steering)
+    return evaluators[strategy](name, home)
+
+
+def as_sent(home: Path) -> None:
+    """The recorder's trace as a strategy's checks read Relay's: through the hook, what a request
+    forwards is what the harness sent, and it changed the context where its messages do not
+    continue the conversation's previous request (the recorder's own, never compacting, is kept)."""
+
+    path = home / "trace.jsonl"
+    if not path.exists():
+        return
+    records, previous = [json.loads(line) for line in path.read_text().splitlines()], {}
+    (home / "trace-recorded.jsonl").write_text(path.read_text())
+    for record in records:
+        if "body" not in record:
+            continue
+        messages = [_uncached(m) for m in record["body"].get("messages") or [] if m.get("role") != "system"]
+        first = json.dumps(messages[:1])
+        earlier = previous.get(first)
+        record["forwarded"] = record["body"]
+        sent = json.dumps(record["body"])
+        if any(a in sent for a in ASKED):  # a summary's fork, as Relay's own summary requests are traced
+            record["summary_request"], record["compacted"] = record["body"], False
+            continue
+        # (the last message may grow: Claude Code adds to a user message what came in after it)
+        record["compacted"] = earlier is not None and messages[:len(earlier) - 1] != earlier[:-1]
+        if codec_for(record["path"]).offers_tools(record["body"]):
+            previous[first] = messages
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+
+
+def _uncached(value: Any) -> Any:
+    """A message without the prompt-cache marks, which Claude Code moves on every request."""
+
+    if isinstance(value, dict):
+        return {k: _uncached(v) for k, v in value.items() if k != "cache_control"}
+    return [_uncached(v) for v in value] if isinstance(value, list) else value
+
+
+def hooked(result: dict, home: Path) -> dict:
+    """A strategy's result through the hook: also, the hook never failed (it would leave the
+    harness to compact itself), the harness never compacted on its own, and its requests went to
+    its own endpoint (the recorder's trace holds them)."""
+
+    log = (home / "relay.log").read_text(errors="replace") if (home / "relay.log").exists() else ""
+    trace = [json.loads(line) for line in (home / "trace.jsonl").read_text().splitlines()] if (home / "trace.jsonl").exists() else []
+    problems = [*(["a hook call failed (see relay.log)"] if re.search(r"hook \w+ failed", log) else []),
+                *([f"the harness compacted on its own {len(own)}×"] if (own := self_compactions([r for r in trace if "body" in r and not any(a in json.dumps(r["body"]) for a in ASKED)])) else []),
+                *([] if any("body" in r for r in trace) else ["no request reached the harness's own endpoint"])]
+    return {**result, "name": f"{result['name']} (hook)", "problems": [*result["problems"], *problems],
+            "passed": result["passed"] and not problems}
 
 
 def container(name: str, root: Path, env: dict[str, str], turns: str, timeout: int = 1500, install: bool = True,
@@ -608,7 +674,8 @@ def container(name: str, root: Path, env: dict[str, str], turns: str, timeout: i
         mounts.append(f"{Path(shutil.which('codex')).resolve().parents[1]}:/opt/codex:ro")
         env["PATH"] = "/opt/codex/bin:/opt/codex/codex-path:/usr/local/bin:/usr/bin:/bin"
     if harness == "claude_code":
-        mounts.append(f"{Path(shutil.which('claude')).resolve()}:/usr/local/bin/claude:ro")
+        claude = os.environ.get("RELAY_TEST_CLAUDE") or shutil.which("claude")  # (another release: its binary)
+        mounts.append(f"{Path(claude).resolve()}:/usr/local/bin/claude:ro")
     # Relay's settings (lowercase names) go in its settings file, as `relay set` writes them.
     (home / ".config/relay").mkdir(parents=True, exist_ok=True)
     (home / ".config/relay/settings.json").write_text(json.dumps({k: v for k, v in env.items() if k.islower()}))
@@ -1566,6 +1633,9 @@ def main() -> int:
                         "sliding_window, masking, memory, backup), the model told how to manage its context")
     parser.add_argument("--clm-edit", action="store_true", help="with --strategy clm: the model edits its context as "
                         "told (delete, rewrite, add) and answers from what it then sees")
+    parser.add_argument("--hook-threshold", type=int,
+                        help="with --via hook: the strategy's threshold (default by model: "
+                             f"{HOOK_THRESHOLDS}; a release whose own request is smaller needs less)")
     parser.add_argument("--via", choices=["proxy", "hook"], default="proxy",
                         help="install through this path (hook: the harness compacts through Relay's hook)")
     parser.add_argument("--harness-compaction", action="store_true",
@@ -1578,6 +1648,8 @@ def main() -> int:
         parser.error(f"--native-compact: no headless compaction of their own: {', '.join(unsupported)}")
     results = []
     for name in names:
+        if options.hook_threshold:  # (read by the run and its check)
+            HOOK_THRESHOLDS.update(dict.fromkeys(HOOK_THRESHOLDS, options.hook_threshold))
         results.append(run(name, options.growth, probe=options.probe, subagent=options.subagent, window=options.window,
                            native=options.native_compact, selfcompact=options.harness_compaction, via=options.via,
                            lines=options.file_lines, strategy=options.strategy, steering=options.steering,
