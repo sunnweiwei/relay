@@ -35,6 +35,7 @@ from ..providers import Upstream, route, upstreams_from_settings
 from ..strategies import STRATEGIES
 from ..strategies.base import Strategy
 from .hooks import hook_routes
+from .. import intercept
 from .. import settings
 
 log = logging.getLogger("relay")
@@ -50,14 +51,17 @@ class ProxyConfig:
     trace: str | None = None  # append every managed request (as received) to this JSONL file
     host: str = "127.0.0.1"
     port: int = 8787
+    intercept_port: int | None = None  # Relay as an HTTPS proxy too, here (`relay.intercept`)
 
     @classmethod
     def from_settings(cls) -> ProxyConfig:
+        intercept = settings.value("intercept_port")
         return cls(
             harness=settings.value("harness") or None,
             trace=settings.value("trace") or None,
             host=settings.value("host", "127.0.0.1"),
             port=int(settings.value("port", "8787")),
+            intercept_port=int(intercept) if intercept else None,
         )
 
 
@@ -114,7 +118,10 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
         app.state.client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None))
         app.state.summary_client = httpx.Client(timeout=httpx.Timeout(60.0, read=600.0))
+        tunnel = await intercept.serve(config.host, config.intercept_port, config.port) if config.intercept_port else None
         yield
+        if tunnel is not None:
+            tunnel.close()
         await app.state.client.aclose()
         app.state.summary_client.close()
         engine.store.flush()  # a store kept on disk: what changed since it was last written
@@ -140,6 +147,14 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
         headers = upstream.headers(request.headers)
         content = await request.body()
         body = _json(_decompress(content, headers.get("content-encoding", ""))) if codec else None
+        if isinstance(body, dict) and "thread" in body:
+            # A server-side thread (Claude Code on Anthropic's own endpoint, through Relay's HTTPS
+            # proxy) would leave the history with the server and send Relay only what is new. Relay
+            # answers as a server without threads does: Claude Code sends the turn again without one,
+            # and keeps the session (on that model) without them, its whole conversation every time.
+            return JSONResponse({"type": "error", "error": {
+                "type": "invalid_request_error", "message": "relay: server-side threads are not supported through Relay",
+                "details": {"error_code": "thread_unsupported_request"}}}, 400)
         if codec is None or not isinstance(body, dict) or not codec.managed(body):
             return await _passthrough(client, request.method, url, headers, content)
         follow()
@@ -209,6 +224,7 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
             if response.status_code >= 400:
                 error = await response.aread()
                 await response.aclose()
+                log.warning("upstream refused %s (%d): %s", request.url.path, response.status_code, error[:400])
                 if not codec.is_overflow(response.status_code, _json(error)) or exchange.compacted:
                     return Response(error, response.status_code, _response_headers(response.headers))
                 retry = await run_in_threadpool(prepare, True)  # compact now, then try once more
@@ -247,6 +263,11 @@ async def _passthrough(
         response = await client.send(request, stream=True)
     except httpx.HTTPError as exc:
         return _unreachable(exc)
+    if response.status_code >= 400:  # (an error is short: kept in the log, for whoever looks into it)
+        data = await response.aread()
+        await response.aclose()
+        log.warning("upstream refused %s %s (%d): %s", method, url.split("?")[0], response.status_code, data[:400])
+        return Response(data, response.status_code, _response_headers(response.headers))
     return StreamingResponse(
         response.aiter_bytes(),
         response.status_code,
@@ -259,6 +280,12 @@ async def _relay(
     response: httpx.Response, codec: Codec, streaming: bool, on_usage: Callable[[int | None, int | None], None]
 ) -> Response:
     headers = _response_headers(response.headers)
+    if response.status_code >= 400:  # (an error is short: kept in the log, for whoever looks into it)
+        data = await response.aread()
+        await response.aclose()
+        log.warning("upstream refused %s (%d): %s", response.request.url.path, response.status_code, data[:400])
+        on_usage(None, None)
+        return Response(data, response.status_code, headers)
     if not streaming:
         data = await response.aread()
         await response.aclose()

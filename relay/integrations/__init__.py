@@ -19,10 +19,13 @@ from ..harnesses import Harness
 from ..settings import home
 from .base import Installation, Integration, Proxy, Supplied, SummaryNeeded
 from .claude_code import ClaudeCodeHook
+from .https import ClaudeCodeHttps
 
 # A harness's hook comes before its proxy only once what it does better (Remote Control, sub-agents,
 # the harness's own features) was checked (`Integration.preferred`); till then it is taken when named.
 HOOKS: dict[str, Integration] = {"claude_code": ClaudeCodeHook()}
+# Relay as the harness's HTTPS proxy, where its provider's own host must stay its endpoint.
+HTTPS: dict[str, Integration] = {"claude_code": ClaudeCodeHttps()}
 
 # What each strategy's contexts hold besides the conversation's own messages, which its path must
 # carry: instructions (SYSTEM items) the same all through a conversation, or changing within it;
@@ -42,8 +45,8 @@ NEEDS: dict[str, frozenset[str]] = {
 def paths(harness: Harness) -> list[Integration]:
     """The harness's integration paths, the preferred first."""
 
-    hook = [HOOKS[harness.name]] if harness.name in HOOKS else []
-    return [*hook, Proxy(harness)] if hook and hook[0].preferred else [Proxy(harness), *hook]
+    others = [path for path in (HTTPS.get(harness.name), HOOKS.get(harness.name)) if path is not None]
+    return [*(p for p in others if p.preferred), Proxy(harness), *(p for p in others if not p.preferred)]
 
 
 def uncarried(path: Integration, strategy: str) -> str | None:
@@ -110,5 +113,5 @@ def _save(known: dict[str, Any]) -> None:
     (home() / "paths.json").write_text(json.dumps(known, indent=2) + "\n")
 
 
-__all__ = ["HOOKS", "NEEDS", "ClaudeCodeHook", "Installation", "Integration", "Proxy", "Supplied", "SummaryNeeded",
+__all__ = ["HOOKS", "HTTPS", "NEEDS", "ClaudeCodeHook", "ClaudeCodeHttps", "Installation", "Integration", "Proxy", "Supplied", "SummaryNeeded",
            "choose", "forget", "paths", "recorded", "remember", "uncarried", "unchecked", "unfit"]

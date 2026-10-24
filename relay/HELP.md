@@ -46,6 +46,13 @@ strategy` moves Claude Code to the proxy for it, and back to the hook for one th
 the conversations started from then on. `relay status` shows the path; `--via proxy` keeps Claude
 Code on the proxy.
 
+`relay setup claude --via https` is a third way: Relay becomes Claude Code's HTTPS proxy (the way an
+organization's proxy is set), so Claude Code keeps talking to api.anthropic.com, Remote Control
+included, while Relay manages each request as through the proxy, for every strategy, and Claude
+Code's own history stays untouched. Relay makes a certificate authority of its own for it, which
+only Claude Code trusts and which can vouch for api.anthropic.com alone. The commands Claude Code
+runs go through the same proxy (tunnelled as they are).
+
 ### Keeping Relay running
 
 A harness pointed at Relay reaches its model only through Relay. Where the harness can run a

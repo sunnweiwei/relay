@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Transparent context management between agent harnesses and model APIs"
 requires-python = ">=3.11"
 dependencies = [
+  "cryptography>=42",
   "httpx>=0.28.0",
   "starlette>=0.47.0",
   "uvicorn>=0.35.0",
