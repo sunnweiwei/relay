@@ -36,9 +36,11 @@ class Codec(Protocol):
         """The wire item for an item Relay writes: a user message (with its media), or an
         assistant one. ValueError for any other kind."""
 
-    def edit(self, wire: WireItem, text: str, media: tuple[Media, ...]) -> WireItem:
+    def edit(self, wire: WireItem, text: str, media: tuple[Media, ...], parts: tuple[tuple[str, str], ...] = ()) -> WireItem:
         """`wire` with `text` and `media` as its content, its structure (role, the tool call a
-        result answers) kept. ValueError where content cannot change on its own (a tool call)."""
+        result answers) kept. ValueError where content cannot change on its own (a tool call).
+        `parts`: the new text of each call's result where one message answers several (see
+        `Item.parts`), for a protocol that keeps each with its call."""
 
     def orphans(self, items: list[WireItem]) -> set[int]:
         """The items the API would reject where they stand: a tool call without its result, a

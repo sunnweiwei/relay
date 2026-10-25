@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 import unittest
 from pathlib import Path
 
@@ -431,6 +432,28 @@ class StrategyAdditionsTests(unittest.TestCase):
                                                   {"type": "text", "text": "a long answer"}]}
         self.assertEqual(AnthropicMessages().edit(reply, "short", ())["content"],
                          [reply["content"][0], {"type": "text", "text": "short"}])
+
+    def test_parallel_results_kept_whole_keep_their_own_calls(self) -> None:
+        codec = AnthropicMessages()
+
+        def results(*texts: str) -> dict[str, Any]:
+            return {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{n}", "content": text}
+                                                for n, text in enumerate(texts)]}
+
+        three = results("one\nline", "two", "three")
+        self.assertEqual(codec.classify(three).text, "one\nline\ntwo\nthree")
+        middle = codec.edit(three, "one\nline\nTWO\nthree", ())["content"]
+        self.assertEqual([b["content"] for b in middle], ["one\nline", [{"type": "text", "text": "TWO"}], "three"])
+        self.assertEqual([b["tool_use_id"] for b in middle], ["t0", "t1", "t2"])
+        last = codec.edit(three, "one\nline\ntwo\nTHREE and more", ())["content"]
+        self.assertEqual([b["content"] for b in last], ["one\nline", "two", [{"type": "text", "text": "THREE and more"}]])
+        # Rewritten as a whole (a summary), the first carries it, as before.
+        whole = codec.edit(three, "a summary", ())["content"]
+        self.assertEqual([b["content"] for b in whole], [[{"type": "text", "text": "a summary"}], "", ""])
+        self.assertEqual(codec.edit(results("", "two"), "TWO", ())["content"][0]["content"],
+                         [{"type": "text", "text": "TWO"}])
+        self.assertEqual(codec.orphans([codec.user_message("go"), {"role": "assistant", "content": [
+            {"type": "tool_use", "id": f"t{n}", "name": "Read", "input": {}} for n in range(3)]}, {**three, "content": middle}]), set())
 
     def test_notes_join_a_trailing_user_turn_where_roles_must_alternate(self) -> None:
         result = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "ok"}]}

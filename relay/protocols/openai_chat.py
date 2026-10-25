@@ -39,10 +39,11 @@ class OpenAIChat:
         if role in {"tool", "function"}:
             return Item(Kind.TOOL_RESULT, text, media=media)
         if role == "assistant":
-            calls = [c.get("function") or {} for c in item.get("tool_calls") or []]
-            if calls:
-                text = "\n".join([text, *(f"{c.get('name', '')}({c.get('arguments', '')})" for c in calls)])
-                return Item(Kind.TOOL_CALL, text.strip())
+            uses = [(c.get("id") or "", c.get("function") or {}) for c in item.get("tool_calls") or []]
+            if uses:
+                parts = (("", text), *((i, f"{c.get('name', '')}({c.get('arguments', '')})") for i, c in uses))
+                text = "\n".join(t for _, t in parts)
+                return Item(Kind.TOOL_CALL, text.strip(), parts=parts if text.strip() != parts[1][1] else ())
             return Item(Kind.ASSISTANT, text)
         return Item(Kind.USER, text, media=media)
 
@@ -89,7 +90,7 @@ class OpenAIChat:
             return {"role": "user", "content": _content(item.text, item.media)}
         raise ValueError(f"Relay cannot write a {item.kind.value} item")
 
-    def edit(self, wire: WireItem, text: str, media: tuple[Media, ...]) -> WireItem:
+    def edit(self, wire: WireItem, text: str, media: tuple[Media, ...], parts: tuple[tuple[str, str], ...] = ()) -> WireItem:
         if wire.get("tool_calls") or wire.get("function_call") or (media and wire.get("role") == "assistant"):
             raise ValueError("the content of a tool call cannot change on its own")
         return {**wire, "content": _content(text, media)}

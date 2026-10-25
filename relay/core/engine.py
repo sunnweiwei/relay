@@ -33,7 +33,7 @@ from ..protocols.base import Body, Codec, WireItem
 from ..prompts import SUMMARY_PREFIX
 from ..providers import context_window
 from ..strategies.base import Strategy, Summarizer
-from .ir import CONTEXT_KINDS, LABELS, Context, Item, Kind, Media, Request, note
+from .ir import CONTEXT_KINDS, LABELS, Context, Item, Kind, Media, Request, joined, note, placed
 from .store import PrefixStore
 from .tokens import approx_tokens, bytes_per_token, item_tokens
 
@@ -387,8 +387,11 @@ def _entry(item: Item, originals: list[Item]) -> dict[str, Any]:
     media = {"media": [asdict(m) for m in item.media]}
     if item.ref is not None:  # (a block of a user message is context of its own)
         original = originals[item.ref]
-        return {"ref": item.ref} if (item.kind, item.text, item.media) == (original.kind, original.text, original.media) else {
-            "ref": item.ref, "kind": item.kind.value, "text": item.text, **media}
+        if (item.kind, item.text, item.media) == (original.kind, original.text, original.media):
+            return {"ref": item.ref}
+        parts = placed(item, original)  # (stored as its parts, its text theirs)
+        return {"ref": item.ref, "kind": item.kind.value, **({"parts": [list(p) for p in parts]} if parts else {"text": item.text}),
+                **media}
     return {"kind": item.kind.value, "text": item.text, **(media if item.media else {}),
             **({"wire": item.wire} if item.wire else {})}
 
@@ -398,6 +401,9 @@ def _item(entry: dict[str, Any], originals: list[Item]) -> Item:
     if "ref" in entry:
         original = originals[entry["ref"]]
         kind = Kind(entry.get("kind", original.kind.value))
+        if "parts" in entry:
+            parts = tuple((call, text) for call, text in entry["parts"])
+            return replace(original, kind=kind, text=joined(parts), media=media, parts=parts)
         return replace(original, kind=kind, text=entry["text"], media=media) if "text" in entry else original
     return Item(Kind(entry["kind"]), entry["text"], media=media, wire=entry.get("wire"))
 
@@ -406,7 +412,7 @@ def _wire(codec: Codec, raw: list[WireItem], originals: list[Item], item: Item) 
     if item.ref is not None:
         original = originals[item.ref]
         unchanged = (item.text, item.media) == (original.text, original.media)
-        return raw[item.ref] if unchanged else codec.edit(raw[item.ref], item.text, item.media)
+        return raw[item.ref] if unchanged else codec.edit(raw[item.ref], item.text, item.media, placed(item, original))
     return json.loads(item.wire) if item.wire else codec.write(item)
 
 
