@@ -241,3 +241,41 @@ class MEM1Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ParallelSignalTests(unittest.TestCase):
+    """A signal echoed beside other calls (Claude Code answers them in one message): only the echo's
+    result is rewritten; the others stay, each with its call."""
+
+    def send(self, strategy: Any, command: str) -> list[dict[str, Any]]:
+        from relay.harnesses import ClaudeCode
+        from relay.protocols import AnthropicMessages
+
+        def use(i: str, command: str) -> dict[str, Any]:
+            return {"type": "tool_use", "id": i, "name": "Bash", "input": {"command": command}}
+
+        messages = [{"role": "user", "content": "work"},
+                    {"role": "assistant", "content": [use("x", "cat a.py"), use("s", command)]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "A TEXT"},
+                                                 {"type": "tool_result", "tool_use_id": "s", "content": command[6:-1]}]}]
+        self.messages = messages
+        return Engine(strategy).prepare(AnthropicMessages(), ClaudeCode(), {"model": "m", "messages": messages, "tools": [{}]},
+                                        tenant="t", post=lambda r: (200, {"content": [{"type": "text", "text": "SUMMARY"}],
+                                                                          "stop_reason": "end_turn"})).body["messages"]
+
+    def test_autocompact(self) -> None:
+        from relay.strategies import AutoCompact
+        sent = self.send(AutoCompact(), 'echo "[compact]"')
+        results = {b["tool_use_id"]: b["content"] for m in sent if isinstance(m["content"], list) for b in m["content"]
+                   if b.get("type") == "tool_result"}
+        self.assertEqual(results["x"], "A TEXT")
+        self.assertIn("Auto Context Summary", json.dumps(results["s"]))
+
+    def test_acm(self) -> None:
+        from relay.strategies import ACM
+        with tempfile.TemporaryDirectory() as directory:
+            sent = self.send(ACM(directory=directory), 'echo "[manage_context]"')
+        results = {b["tool_use_id"]: b["content"] for m in sent if isinstance(m["content"], list) for b in m["content"]
+                   if b.get("type") == "tool_result"}
+        self.assertEqual(results["x"], "A TEXT")
+        self.assertNotEqual(results["s"], "[manage_context]")

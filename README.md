@@ -513,8 +513,10 @@ returned codes and neither file's text, and the model answered right and no long
 the request after the fold the upstream's cache served 69% to 98% of the prompt where it reports
 cache use (Codex 86%, Claude Code 89%, Gemini CLI on Gemini 72%). Gemini CLI on GPT, which had not
 been told about branches (see the LiteLLM note under CLM), used its own sub-agent tool
-(`invoke_agent`); told, it branches and folds too. Codex at times reaches for its `spawn_agent`. The signal is read from the echo's output in whatever
-form a harness reports it (plain, JSON, `Command: … Output: …`), else from the call.
+(`invoke_agent`); told, it branches and folds too. Codex at times reaches for its `spawn_agent`. A signal is a lone echo of it in a tool's input (one
+argument, nothing after it), read from the echo's output in whatever form a harness reports it
+(plain, JSON, `Command: … Output: …`), else, where the call reports no output, from the command;
+text that only mentions it (the model's, another tool's input, a grep for it) is none.
 
 ## PRO-LONG
 
