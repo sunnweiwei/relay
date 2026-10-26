@@ -155,6 +155,82 @@ class ProxyTests(unittest.TestCase):
                 self.assertEqual(list(leaving.leaving()), [])  # (and no conversation holds it on Relay)
                 self.assertEqual(install.installed(), [])
 
+    def test_a_conversation_compacted_by_the_harness_after_a_strategy_change_hands_it_back(self) -> None:
+        with relay_settings():
+            from relay import install, leaving
+            from relay.harnesses.claude_code import COMPACT_PROMPT
+            install.install("claude_code", "http://127.0.0.1:8787", [])
+            fake = FakeUpstream()
+            long = messages_body(0)
+            for i in range(4):  # ~640k tokens: past what goes direct even at Claude Code's 1M models' allowance
+                long["messages"] += [
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "Bash", "input": {}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{i}", "content": "x " * 200_000}]}]
+            headers = {"x-api-key": "tenant", "x-claude-code-session-id": "s"}
+            with serve(fake.app) as upstream:
+                config = ProxyConfig(upstreams=local_upstreams(upstream), harness="claude_code")
+                engine = Engine(Compaction(threshold=1_000, min_gain=0), PrefixStore())
+                with serve(create_app(engine, config)) as url:
+                    httpx.post(f"{url}/v1/messages", json=long, headers=headers)  # used, compacted, under one strategy
+                    leaving.leave("claude_code")
+                    engine.strategy = Compaction(threshold=2_000, min_gain=0)  # then another (`relay strategy`)
+                    self.assertEqual(len(leaving.needing("claude_code")), 1)
+                    compact = {**long, "messages": [*long["messages"], {"role": "assistant", "content": "done"},
+                                                    {"role": "user", "content": f"{COMPACT_PROMPT} the conversation"}]}
+                    httpx.post(f"{url}/v1/messages", json=compact, headers=headers)  # its own `/compact`
+                    sent = json.dumps(fake.bodies("/v1/messages")[-1])
+                    self.assertLess(len(sent), 100_000)  # the context the model last saw, not the whole history
+                    self.assertEqual(leaving.needing("claude_code"), [])  # handed back: the harness is restored
+                    self.assertEqual(list(leaving.leaving()), [])
+                    self.assertEqual(install.installed(), [])
+
+    def test_a_leaving_claude_code_conversation_within_its_models_window_goes_direct(self) -> None:
+        with relay_settings():
+            from relay import install, leaving
+            install.install("claude_code", "http://127.0.0.1:8787", [])
+            leaving.leave("claude_code")
+            fake = FakeUpstream()
+            body = messages_body(0)
+            body["messages"] += [  # ~216k tokens: past 90% of the catalog's 200k for Claude, within Claude Code's allowance
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "t0", "name": "Bash", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t0", "content": "x " * 270_000}]}]
+            with serve(fake.app) as upstream:
+                config = ProxyConfig(upstreams=local_upstreams(upstream), harness="claude_code")
+                engine = Engine(Compaction(threshold=1_000, min_gain=0), PrefixStore())
+                with serve(create_app(engine, config)) as url:
+                    httpx.post(f"{url}/v1/messages", json={**body, "model": "claude-opus-5-5"},
+                               headers={"x-api-key": "tenant", "x-claude-code-session-id": "s"})
+            self.assertEqual(fake.bodies("/v1/messages")[-1]["messages"], body["messages"])  # as it was sent
+            self.assertEqual(install.installed(), [])
+
+    def test_a_conversation_the_upstream_refuses_direct_stays_on_relay(self) -> None:
+        # Within Claude Code's allowance, but the model's real window is smaller: the refusal, not the
+        # allowance, decides. It is managed from then on, and holds the harness on Relay.
+        with relay_settings():
+            from relay import install, leaving
+            install.install("claude_code", "http://127.0.0.1:8787", [])
+            leaving.leave("claude_code")
+            fake = FakeUpstream(max_prompt_tokens=100_000)
+            body = messages_body(0)
+            for i in range(6):  # ~216k tokens as Relay estimates them (~135k as the upstream counts)
+                body["messages"] += [
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "Bash", "input": {}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{i}", "content": "x " * 45_000}]}]
+            more = [*body["messages"], {"role": "assistant", "content": [{"type": "tool_use", "id": "t9", "name": "Bash", "input": {}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t9", "content": "ok"}]}]
+            headers = {"x-api-key": "tenant", "x-claude-code-session-id": "s"}
+            with serve(fake.app) as upstream:
+                config = ProxyConfig(upstreams=local_upstreams(upstream), harness="claude_code")
+                engine = Engine(Compaction(threshold=1_000, min_gain=0), PrefixStore())
+                with serve(create_app(engine, config)) as url:
+                    first = httpx.post(f"{url}/v1/messages", json={**body, "stream": False}, headers=headers)
+                    second = httpx.post(f"{url}/v1/messages", json={**body, "messages": more, "stream": False}, headers=headers)
+            self.assertEqual((first.status_code, second.status_code), (200, 200))
+            whole = [b for b in fake.bodies("/v1/messages") if len(json.dumps(b)) > 500_000 and "tool_choice" not in b]
+            self.assertEqual(len(whole), 1)  # sent direct once, refused; not again
+            self.assertEqual(len(leaving.needing("claude_code")), 1)
+            self.assertEqual(install.installed(), ["claude_code"])  # (still on Relay)
+
     def test_a_harness_newer_than_its_profile_was_checked_against_is_served_and_noted(self) -> None:
         fake = FakeUpstream()
         with relay(fake) as (url, _):

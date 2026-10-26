@@ -171,7 +171,7 @@ auto-compaction would stay off).
 
 Relay never shortened the harness's own history, so a conversation that grew past the model's window
 through Relay would fail direct. `relay uninstall` therefore restores the harness at once only when
-none did; otherwise the harness leaves in two steps, and nothing needs answering:
+none did; otherwise the harness leaves in two steps:
 
 1. It stays pointed at Relay, which forwards each conversation as the harness sends it (as if
    direct) except those that would not fit, which it keeps managing. `relay uninstall` names them.
@@ -182,7 +182,9 @@ none did; otherwise the harness leaves in two steps, and nothing needs answering
 Once no conversation needs Relay (or a week after the last use of each), the harness's
 configuration is restored by itself; `relay status` shows what is left, then that it was restored.
 `relay uninstall <harness> --now` restores it at once (those conversations then fail direct);
-`relay setup <harness>` keeps it on Relay. The handing back was checked for Claude Code, Codex
+`relay setup <harness>` keeps it on Relay. An agent running `relay uninstall` for its user: when it
+ends with "Not finished", say so, and ask the user which of its choices to take (`/compact` in the
+conversation it names, waiting, or `--now`) rather than stopping there. The handing back was checked for Claude Code, Codex
 (`/compact` in its TUI or app), Goose, nanobot, WorkBuddy, Kilo and pi; OpenCode, Crush, Hermes,
 Kimi Code, DeepSeek Harness, OpenClaw and Gemini CLI compact from their TUI only, which the checks
 cannot drive; mini-swe-agent has no compaction of its own (start a new conversation).

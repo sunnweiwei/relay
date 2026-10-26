@@ -154,6 +154,30 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(upstream.requests, [])  # (no strategy, no summary)
         self.assertTrue(self.prepare(body(*history), upstream, direct_within=100).compacted)  # too long: managed
 
+    def test_a_conversation_keeps_a_lasting_name_across_strategies(self) -> None:
+        history = [msg("user", "fix it"), *step(1), *step(2)]
+        first = self.prepare(body(*history), Upstream())
+        self.engine = Engine(Compaction(threshold=900, min_gain=0), store=self.engine.store)  # another strategy
+        second = self.prepare(body(*history, *step(3, size=10)), Upstream())
+        self.assertNotEqual(first.conversation, second.conversation)  # (as strategies see it: theirs)
+        self.assertEqual(first.lasting, second.lasting)
+        self.assertNotEqual(self.prepare(body(msg("user", "another task"), *step(1)), Upstream()).lasting, first.lasting)
+
+    def test_the_harness_compacting_after_a_strategy_change_gets_the_context_last_seen(self) -> None:
+        class Compacting(Harness):
+            compaction_prompts = ("summarize your history",)
+
+        history = [msg("user", "fix it"), *step(1), *step(2)]
+        compacted = self.engine.prepare(CODEC, Compacting(), body(*history), tenant="t", post=Upstream())
+        self.assertTrue(compacted.compacted)
+        self.engine = Engine(Compaction(threshold=100_000, min_gain=0), store=self.engine.store)  # another strategy
+        upstream = Upstream()
+        own = self.engine.prepare(CODEC, Compacting(), body(*history, msg("user", "summarize your history")),
+                                  tenant="t", post=upstream)
+        self.assertTrue(own.compacting)
+        self.assertEqual(upstream.requests, [])  # (no summary of Relay's own)
+        self.assertEqual(own.body["input"][:-1], compacted.body["input"])  # what the model last saw, then the prompt
+
     def test_reported_usage_anchors_the_next_estimate(self) -> None:
         upstream = Upstream()
         history = [msg("user", "task"), *step(1, size=10)]
