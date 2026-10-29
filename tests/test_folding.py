@@ -87,6 +87,16 @@ class FoldingTests(unittest.TestCase):
         items = self.send(*self.history, *BRANCH, *read(2), *read(3), *ret).body["input"]
         self.assertEqual(self.text(items[-1]), RETURNED.format(message="file_2: c2\nfile_3: c3\nnothing pending"))
 
+    def test_parallel_calls_of_their_own_keep_their_results(self) -> None:
+        # Codex: an item per parallel call, then their outputs; a grep beside the echo finds the signal too.
+        grep = run(9, 'grep -rn "branch" notes.md', "notes.md:3:[branch] Old :: an old note")
+        opened = [BRANCH[0], grep[0], grep[1], BRANCH[1]]
+        self.send(*self.history, *opened)
+        items = self.send(*self.history, *opened, *read(2), *RETURN).body["input"]
+        self.assertEqual(items[-4:-1], [BRANCH[0], grep[0], grep[1]])
+        self.assertEqual(self.text(items[-1]), RETURNED.format(message="file_2: c2, file_3: c3"))
+        self.assertEqual(items[-1]["call_id"], "c10")
+
     def test_a_branch_opened_beside_other_calls_keeps_their_results(self) -> None:
         # Claude Code answers parallel tool uses in one message, in its own order.
         codec = AnthropicMessages()

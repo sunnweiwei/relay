@@ -147,8 +147,8 @@ class MessagePartsTests(unittest.TestCase):
         body = {"model": "m", "messages": [{"role": "user", "content": "task"}, self.call, mixed]}
         items = self.codec.items(body)
         self.assertEqual([i["content"] for i in items[2:]],
-                         [self.results, [self.text("context")], [self.text("look"), self.image]])
-        self.assertEqual([self.codec.classify(i).kind for i in items[2:]], [Kind.TOOL_RESULT, Kind.USER, Kind.USER])
+                         [*([r] for r in self.results), [self.text("context")], [self.text("look"), self.image]])
+        self.assertEqual([self.codec.classify(i).kind for i in items[2:]], [Kind.TOOL_RESULT] * 2 + [Kind.USER] * 2)
         self.assertEqual(self.codec.orphans(items), set())  # the results still answer the message before them
         self.assertEqual(self.codec.with_items(body, items), body)
         whole = {"role": "user", "content": [self.image, self.text("look")]}  # one text block: one part
@@ -285,6 +285,18 @@ class GeminiTests(unittest.TestCase):
         self.assertEqual(self.codec.canonical(result), self.codec.canonical(resumed_result))
         other = {"role": "user", "parts": [{"functionResponse": {"name": "f", "response": {"output": "y"}}}]}
         self.assertNotEqual(self.codec.canonical(result), self.codec.canonical(other))
+
+    def test_parallel_responses_are_an_item_each_with_their_repeats(self) -> None:
+        call = {"role": "model", "parts": [{"functionCall": {"name": "f", "args": {"n": n}}} for n in range(2)]}
+        a, b = ({"functionResponse": {"name": "f", "response": {"output": text}}} for text in ("A", "B"))
+        body = {"contents": [self.codec.user_message("go"), call, {"role": "user", "parts": [a, a, b, b]}]}  # (resumed)
+        items = self.codec.items(body)
+        self.assertEqual([i["parts"] for i in items[2:]], [[a, a], [b, b]])
+        self.assertEqual(self.codec.with_items(body, items), body)
+        self.assertEqual((self.codec.orphans(items), self.codec.boundaries(items)), (set(), {0, 1, 4}))
+        edited = self.codec.with_items(body, [*items[:3], self.codec.edit(items[3], "NEW", ())])["contents"][2]["parts"]
+        self.assertEqual([p["functionResponse"]["response"]["output"] for p in edited], ["A", "A", "NEW", "NEW"])
+        self.assertEqual(self.codec.orphans(items[:3]), {1, 2})
 
     def test_summary_request_streams_and_usage(self) -> None:
         body = {"contents": [], "tools": [{"functionDeclarations": []}],
@@ -433,27 +445,22 @@ class StrategyAdditionsTests(unittest.TestCase):
         self.assertEqual(AnthropicMessages().edit(reply, "short", ())["content"],
                          [reply["content"][0], {"type": "text", "text": "short"}])
 
-    def test_parallel_results_kept_whole_keep_their_own_calls(self) -> None:
+    def test_parallel_results_are_an_item_each(self) -> None:
         codec = AnthropicMessages()
-
-        def results(*texts: str) -> dict[str, Any]:
-            return {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{n}", "content": text}
-                                                for n, text in enumerate(texts)]}
-
-        three = results("one\nline", "two", "three")
-        self.assertEqual(codec.classify(three).text, "one\nline\ntwo\nthree")
-        middle = codec.edit(three, "one\nline\nTWO\nthree", ())["content"]
-        self.assertEqual([b["content"] for b in middle], ["one\nline", [{"type": "text", "text": "TWO"}], "three"])
-        self.assertEqual([b["tool_use_id"] for b in middle], ["t0", "t1", "t2"])
-        last = codec.edit(three, "one\nline\ntwo\nTHREE and more", ())["content"]
-        self.assertEqual([b["content"] for b in last], ["one\nline", "two", [{"type": "text", "text": "THREE and more"}]])
-        # Rewritten as a whole (a summary), the first carries it, as before.
-        whole = codec.edit(three, "a summary", ())["content"]
-        self.assertEqual([b["content"] for b in whole], [[{"type": "text", "text": "a summary"}], "", ""])
-        self.assertEqual(codec.edit(results("", "two"), "TWO", ())["content"][0]["content"],
-                         [{"type": "text", "text": "TWO"}])
-        self.assertEqual(codec.orphans([codec.user_message("go"), {"role": "assistant", "content": [
-            {"type": "tool_use", "id": f"t{n}", "name": "Read", "input": {}} for n in range(3)]}, {**three, "content": middle}]), set())
+        call = {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{n}", "name": "Read", "input": {}} for n in range(3)]}
+        results = {"role": "user", "content": [*({"type": "tool_result", "tool_use_id": f"t{n}", "content": text}
+                                                 for n, text in enumerate(("one\nline", "two", "three"))),
+                                               {"type": "text", "text": "<system-reminder>r</system-reminder>"}]}
+        body = {"model": "m", "messages": [codec.user_message("go"), call, results]}
+        items = codec.items(body)
+        self.assertEqual([codec.classify(i).text for i in items[2:]], ["one\nline", "two", "three\n<system-reminder>r</system-reminder>"])
+        self.assertEqual(codec.with_items(body, items), body)
+        self.assertEqual((codec.orphans(items), codec.boundaries(items)), (set(), {0, 1, 5}))  # (no cut between them)
+        edited = codec.with_items(body, [*items[:3], codec.edit(items[3], "TWO", ()), items[4]])["messages"][2]["content"]
+        self.assertEqual([b.get("content") for b in edited[:3]], ["one\nline", [{"type": "text", "text": "TWO"}], "three"])
+        self.assertEqual(codec.orphans(items[:4]), {1})  # a result gone: its call is not answered
+        request = codec.summary_request(body, items, "SUMMARIZE")
+        self.assertEqual(request["messages"][:3], body["messages"])
 
     def test_notes_join_a_trailing_user_turn_where_roles_must_alternate(self) -> None:
         result = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "ok"}]}

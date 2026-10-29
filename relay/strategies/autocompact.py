@@ -14,17 +14,17 @@ AutoCompact released no prompts; the guidance and the summary prompt follow its 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..core.ir import Context, Item, Kind, Request
 from .base import Summarizer
 from .compaction import Compaction
-from .conversation import answered, own, responses, signalled
+from .conversation import responses, signalled, step
 
 GUIDANCE = """## Compaction
 
-Compact your context when the state of the task, not its length, says it would help: at a transition between phases of the task (for example, once the issue is localized and before you begin the edit), when the earlier exploration (files inspected, hypotheses tested, failed attempts) is no longer needed. To compact, run the shell command `echo "[compact]"`, alone. Then you write an # Auto Context Summary of your working state, and from then on you see the user's messages, your most recent turn and that summary instead of the full history."""
+Compact your context when the state of the task, not its length, says it would help: at a transition between phases of the task (for example, once the issue is localized and before you begin the edit), when the earlier exploration (files inspected, hypotheses tested, failed attempts) is no longer needed. To compact, run the shell command `echo "[compact]"`, alone (no other tool call beside it). Then you write an # Auto Context Summary of your working state, and from then on you see the user's messages, your most recent turn and that summary instead of the full history."""
 PROMPT = """You called compact(). Write an # Auto Context Summary that replaces the history above: only the original task, your most recent turn and this summary stay, so keep the working state needed for the next phase of the task, all of it: the objective, the conclusions reached (paths ruled out included), the files modified, the verification status and the next action, with exact names and values. Leave out exploration details that are no longer needed. Start with the line "# Auto Context Summary"."""
 HEADER = "# Auto Context Summary"
 SIGNAL = re.compile(r"\[(compact)\][ \t]*([^\n]*)")
@@ -46,18 +46,22 @@ class AutoCompact:
         if not request.tools:
             return None
         items, guidance = request.current, Item(Kind.SYSTEM, GUIDANCE)
-        found = {n: echo[2] for n in range(len(items) - 1) if (echo := signalled(items[n], items[n + 1], SIGNAL)) is not None}
-        calls = [n for n, call in found.items() if not own(items[n + 1], call).startswith(HEADER)]
-        cut = min((b for b in request.boundaries if calls and b >= calls[-1] + 2), default=None)
+        found, n = [], 0  # each call: its response's start, the echo's result, its step's end
+        while (taken := step(items, n)) is not None:
+            start, first, n = taken
+            signal = signalled(items[start:first], items[first:n], SIGNAL)
+            if signal is not None and not items[first + signal[2]].text.startswith(HEADER):
+                found.append((start, first + signal[2], n))
+        cut = min((b for b in request.boundaries if found and b >= found[-1][2]), default=None)
         if cut is None:
             context = self.fallback.plan(request, summarizer)
             return Context((guidance, *(context.items if context else items)))
-        n = calls[-1]  # the last call counts; the history before it is summarized
-        starts = [start for start in responses(items) if start <= n]
+        start, echo, _ = found[-1]  # the last call counts; the history before it is summarized
+        starts = [n for n in responses(items) if n <= start]
         recent = starts[-2] if len(starts) > 1 else starts[-1]  # the turn before the call's, unless a user spoke since
         if any(item.kind in (Kind.USER, Kind.SUMMARY) for item in items[recent:starts[-1]]):
             recent = starts[-1]
         summary = summarizer.summarize(cut, PROMPT).strip()
         summary = summary if summary.startswith(HEADER) else f"{HEADER}\n\n{summary}"
         users = (item for item in items[:recent] if item.kind is Kind.USER)
-        return Context((guidance, *users, *items[recent:n + 1], answered(items[n + 1], found[n], summary), *items[n + 2:]))
+        return Context((guidance, *users, *items[recent:echo], replace(items[echo], text=summary), *items[echo + 1:]))

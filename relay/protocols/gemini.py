@@ -1,7 +1,9 @@
 """Google Gemini API (`.../models/<model>:generateContent` and `:streamGenerateContent`).
 
-Items are `contents` entries. A model turn with `functionCall` parts and the user turn
-carrying the `functionResponse` parts form one group. Streaming is chosen by the URL,
+Items are `contents` entries, but a turn answering several function calls is an item per
+`functionResponse` part, joined again when sent: each call's result can be rewritten alone. A model
+turn with `functionCall` parts and the user turn carrying the `functionResponse` parts form one
+group. Streaming is chosen by the URL,
 so a summary request sent to the same URL may come back as a stream. Like the API, the
 codec accepts snake_case field names (`function_call`, as litellm sends) as well.
 """
@@ -24,25 +26,24 @@ class Gemini:
         return isinstance(body.get("contents"), list)
 
     def items(self, body: Body) -> list[WireItem]:
-        return list(body.get("contents") or [])
+        return [part for content in body.get("contents") or [] for part in _answers(content)]
 
     def with_items(self, body: Body, items: list[WireItem]) -> Body:
-        return {**body, "contents": items}
+        return {**body, "contents": _rejoined(items)}
 
     def classify(self, item: WireItem) -> Item:
         parts = _distinct(item.get("parts") or [])
         text = "\n".join(filter(None, (_part_text(part) for part in parts)))
-        named = _named(parts) if len(parts) > 1 else ()
         if item.get("role") == "model":
             opaque = sum(decoded(part.get("thoughtSignature") or part.get("thought_signature")) for part in parts)
             if any(_has(part, "functionCall") for part in parts):
-                return Item(Kind.TOOL_CALL, text, opaque=opaque, parts=named)
+                return Item(Kind.TOOL_CALL, text, opaque=opaque)
             if parts and all(part.get("thought") for part in parts):
                 return Item(Kind.REASONING, text, opaque=opaque)
             return Item(Kind.ASSISTANT, text, opaque=opaque)
         media = tuple(m for part in parts if (m := _media(part)))
         if item.get("role") == "function" or any(_has(part, "functionResponse") for part in parts):
-            return Item(Kind.TOOL_RESULT, text, media=media, parts=named)
+            return Item(Kind.TOOL_RESULT, text, media=media)
         return Item(Kind.USER, text, media=media)
 
     def canonical(self, item: WireItem) -> bytes:
@@ -56,7 +57,7 @@ class Gemini:
     def boundaries(self, items: list[WireItem]) -> frozenset[int]:
         legal = {0}
         for index, item in enumerate(items):
-            if self.classify(item).kind is not Kind.TOOL_CALL:
+            if self.classify(item).kind is not Kind.TOOL_CALL and not (index + 1 < len(items) and _continues(item, items[index + 1])):
                 legal.add(index + 1)
         return frozenset(legal)
 
@@ -73,30 +74,18 @@ class Gemini:
             return {"role": "user", "parts": _content(item.text, item.media)}
         raise ValueError(f"Relay cannot write a {item.kind.value} item")
 
-    def edit(self, wire: WireItem, text: str, media: tuple[Media, ...], parts: tuple[tuple[str, str], ...] = ()) -> WireItem:
+    def edit(self, wire: WireItem, text: str, media: tuple[Media, ...]) -> WireItem:
         """Thoughts stay as they were; tool results share the new content: the first carries it
-        (and its repeats), or, given each call's new text (`parts`), each call's result its own."""
+        (and its repeats)."""
 
-        blocks = [part for part in wire.get("parts") or [] if isinstance(part, dict)]
+        parts = [part for part in wire.get("parts") or [] if isinstance(part, dict)]
         if wire.get("role") == "model":
-            if media or any(_has(part, "functionCall") for part in blocks):
+            if media or any(_has(part, "functionCall") for part in parts):
                 raise ValueError("the content of a tool call cannot change on its own")
-            return {**wire, "parts": [*(part for part in blocks if part.get("thought")), {"text": text}]}
-        responses = [part for part in blocks if _has(part, "functionResponse")]
+            return {**wire, "parts": [*(part for part in parts if part.get("thought")), {"text": text}]}
+        responses = [part for part in parts if _has(part, "functionResponse")]
         if not responses:
             return {**wire, "parts": _content(text, media)}
-        by_call, calls, previous = dict(parts), [], None
-        for part in responses:  # each response's call, as `classify` names it (a repeat: the one it repeats)
-            value = part.get("functionResponse", part.get("function_response")) or {}
-            same = previous is not None and canonical_json(part) == canonical_json(previous)
-            calls.append(calls[-1] if same else (value.get("id") if isinstance(value, dict) else None)
-                         or f"#{sum(1 for c in dict.fromkeys(calls))}")
-            previous = part
-        if by_call and not media and len(responses) == len(blocks) and all(c in by_call for c in calls):
-            edited = [part if by_call[call] == _part_text(part) else {**part, key: {**part[key], "response": {"output": by_call[call]}}}
-                      for part, call in zip(responses, calls)
-                      for key in ("functionResponse" if "functionResponse" in part else "function_response",)]
-            return {**wire, "parts": edited}  # (each call's result where it was, its repeats too)
         edited = []
         for part in responses:  # a result Gemini CLI repeats (it does on resume) stays repeated
             key = "functionResponse" if "functionResponse" in part else "function_response"
@@ -106,20 +95,21 @@ class Gemini:
 
     def orphans(self, items: list[WireItem]) -> set[int]:
         """Model turns whose function calls the turn right after them does not answer, and turns
-        answering calls the turn before them does not make."""
+        answering calls the turn before them does not make (a turn's responses: each of its items)."""
 
         def count(item: WireItem, kind: str) -> int:  # (Gemini CLI repeats responses on resume)
             return len({canonical_json(part) for part in _distinct(item.get("parts") or []) if _has(part, kind)})
 
+        groups = _groups(items)
+        turns = [_joined([items[n] for n in group]) for group in groups]
         lonely = set()
-        for n, item in enumerate(items):
+        for n, item in enumerate(turns):
             asked = count(item, "functionCall") if item.get("role") == "model" else 0
-            if asked and not (n + 1 < len(items) and count(items[n + 1], "functionResponse") == asked):
-                lonely.add(n)
             answered = count(item, "functionResponse")
-            before = count(items[n - 1], "functionCall") if n and items[n - 1].get("role") == "model" else 0
-            if answered and answered != before:
-                lonely.add(n)
+            before = count(turns[n - 1], "functionCall") if n and turns[n - 1].get("role") == "model" else 0
+            if (asked and not (n + 1 < len(turns) and count(turns[n + 1], "functionResponse") == asked)
+                    or answered and answered != before):
+                lonely.update(groups[n])
         return lonely
 
     def note(self, items: list[WireItem], text: str) -> list[WireItem]:
@@ -151,7 +141,7 @@ class Gemini:
 
     def summary_request(self, body: Body, items: list[WireItem], prompt: str) -> Body:
         request = {key: value for key, value in body.items() if key not in {"toolConfig", "tool_config"}}
-        request["contents"] = [*items, self.user_message(prompt)]
+        request["contents"] = [*_rejoined(items), self.user_message(prompt)]
         if request.get("tools"):
             request["toolConfig"] = {"functionCallingConfig": {"mode": "NONE"}}
         for name in ("generationConfig", "generation_config"):
@@ -163,7 +153,7 @@ class Gemini:
     def request(self, body: Body, system: str, items: list[WireItem]) -> Body:
         drop = {"tools", "systemInstruction", "system_instruction"}
         request = self.summary_request({k: v for k, v in body.items() if k not in drop}, items, "")
-        request["contents"] = items
+        request["contents"] = _rejoined(items)
         if system:
             request["systemInstruction"] = {"parts": [{"text": system}]}
         return request
@@ -197,6 +187,58 @@ class Gemini:
         return status == 400 and any(p in message for p in OVERFLOW_PHRASES)
 
 
+def _answers(content: WireItem) -> list[WireItem]:
+    """A turn answering several function calls as a turn per response, each with the parts after it
+    up to the next response (a repeat of it, as Gemini CLI sends, included; those before the
+    first, with the first)."""
+
+    parts = content.get("parts")
+    if content.get("role") == "model" or not isinstance(parts, list) or sum(map(_response, _distinct(parts))) < 2:
+        return [content]
+    split: list[list[Any]] = []
+    for part in parts:
+        repeat = bool(split) and isinstance(part, dict) and canonical_json(part) == canonical_json(split[-1][-1])
+        if not split or _response(part) and not repeat and any(map(_response, split[-1])):
+            split.append([])
+        split[-1].append(part)
+    return [{**content, "parts": part} for part in split]
+
+
+def _continues(previous: WireItem, item: WireItem) -> bool:
+    """`item` answers function calls beside `previous` (`_answers`): a turn starting with a
+    response, right after one of the same role holding responses."""
+
+    parts = item.get("parts")
+    return (item.get("role") != "model" and previous.get("role") == item.get("role") and isinstance(parts, list)
+            and bool(parts) and _response(parts[0]) and any(map(_response, previous.get("parts") or [])))
+
+
+def _groups(items: list[WireItem]) -> list[list[int]]:
+    """The items of each turn (`_answers`), by position."""
+
+    groups: list[list[int]] = []
+    for n, item in enumerate(items):
+        if groups and _continues(items[n - 1], item):
+            groups[-1].append(n)
+        else:
+            groups.append([n])
+    return groups
+
+
+def _joined(turns: list[WireItem]) -> WireItem:
+    return turns[0] if len(turns) == 1 else {**turns[0], "parts": [p for turn in turns for p in turn.get("parts") or []]}
+
+
+def _rejoined(items: list[WireItem]) -> list[WireItem]:
+    """The turns `_answers` made items of, as one turn again."""
+
+    return [_joined([items[n] for n in group]) for group in _groups(items)]
+
+
+def _response(part: Any) -> bool:
+    return isinstance(part, dict) and _has(part, "functionResponse")
+
+
 def _distinct(parts: list[Any]) -> list[dict[str, Any]]:
     """The parts, a part repeated right after itself once (Gemini CLI repeats tool results)."""
 
@@ -211,20 +253,6 @@ def _parts(payload: Body) -> list[dict[str, Any]]:
     candidates = payload.get("candidates") or [{}]
     content = candidates[0].get("content") or {}
     return [part for part in content.get("parts") or [] if isinstance(part, dict)]
-
-
-def _named(parts: list[dict[str, Any]]) -> tuple[tuple[str, str], ...]:
-    """Each part's text with the call it is or answers: its id, else its place among the calls
-    (a response follows the order of the calls); "" for the model's text."""
-
-    named, calls = [], 0
-    for part in parts:
-        key = next((k for k in ("functionCall", "functionResponse") if _has(part, k)), None)
-        value = part.get(key, part.get(_snake(key))) if key else None
-        named.append(((value.get("id") if isinstance(value, dict) else None) or f"#{calls}" if key else "",
-                      _part_text(part)))
-        calls += key is not None
-    return tuple(named)
 
 
 def _part_text(part: dict[str, Any]) -> str:

@@ -1,4 +1,5 @@
-"""What counts as a signal: a lone `echo` of it, run as a command, its output its own (`signalled`)."""
+"""What counts as a signal: a lone `echo` of it, run as a command, its output its own (`signalled`):
+among parallel calls too, each call's result an item of its own."""
 
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ def anthropic(name: str, args: dict[str, Any], output: Any, text: str = "") -> t
 
 
 def said(call: Item, result: Item) -> tuple[str, str] | None:
-    found = signalled(call, result, SIGNAL, whole=True)
+    found = signalled([call], [result], SIGNAL, whole=True)
     return found and found[:2]
 
 
@@ -59,14 +60,26 @@ class Signalled(unittest.TestCase):
 
     def test_beside_the_models_text_and_other_calls(self) -> None:
         codec = AnthropicMessages()
-        call = codec.classify({"role": "assistant", "content": [
-            {"type": "text", "text": "Opening a branch."},
+        body = {"messages": [{"role": "assistant", "content": [
+            {"type": "text", "text": "Opening a [branch]."},
             {"type": "tool_use", "id": "x", "name": "Read", "input": {"file_path": "a.py"}},
-            {"type": "tool_use", "id": "b", "name": "Bash", "input": {"command": ECHO}}]})
-        result = codec.classify({"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": "x", "content": "A TEXT"},
-            {"type": "tool_result", "tool_use_id": "b", "content": "[branch] Read models :: read models.py"}]})
-        self.assertEqual(signalled(call, result, SIGNAL, whole=True), ("branch", "Read models :: read models.py", "b"))
+            {"type": "tool_use", "id": "b", "name": "Bash", "input": {"command": ECHO}}]},
+            {"role": "user", "content": [  # (as Claude Code sends them: in the order they finished)
+                {"type": "tool_result", "tool_use_id": "b", "content": "[branch] Read models :: read models.py"},
+                {"type": "tool_result", "tool_use_id": "x", "content": "A TEXT"}]}]}
+        call, *results = map(codec.classify, codec.items(body))
+        self.assertEqual(signalled([call], results, SIGNAL, whole=True), ("branch", "Read models :: read models.py", 0))
+
+    def test_parallel_calls_of_their_own(self) -> None:  # Codex: an item per call; a grep beside it that finds the signal
+        codec = OpenAIResponses()
+        calls = [codec.classify({"type": "function_call", "call_id": c, "name": "exec_command", "arguments": json.dumps({"cmd": cmd})})
+                 for c, cmd in (("g", 'grep -rn "branch" .'), ("e", ECHO))]
+        results = [codec.classify({"type": "function_call_output", "call_id": c, "output": out})
+                   for c, out in (("g", "notes.md:3:[branch] Read tests :: read tests"), ("e", "[branch] Read models :: read models.py"))]
+        self.assertEqual(signalled(calls, results, SIGNAL), ("branch", "Read models :: read models.py", 1))
+        empty = [results[1], codec.classify({"type": "function_call_output", "call_id": "g", "output": ""})]
+        self.assertEqual(signalled(calls, empty, SIGNAL), ("branch", "Read models :: read models.py", 0))
+        self.assertIsNone(signalled(calls, [empty[1], empty[1]], SIGNAL))  # (whose empty output: not known)
 
     def test_responses_shell_with_an_argument_list(self) -> None:  # Codex
         codec = OpenAIResponses()

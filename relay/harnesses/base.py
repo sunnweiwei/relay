@@ -176,11 +176,11 @@ class Harness:
             return item
         return replace(item, text=text) if text or item.media else None
 
-    def recalled(self, items: list[Item], originals: list[Item]) -> list[Item]:
+    def recalled(self, items: list[Item], originals: list[Item], raw: list[WireItem]) -> list[Item]:
         """`items` (the context as it will be sent) with what the harness's tools answered from its
-        own history of the conversation, where that is no longer in the context, answered again
-        (a harness that tells the model to refer to an earlier result). `items` itself where nothing
-        changes."""
+        own history of the conversation (`originals`, as sent: `raw`), where that is no longer in
+        the context, answered again (a harness that tells the model to refer to an earlier result).
+        `items` itself where nothing changes."""
 
         return items
 

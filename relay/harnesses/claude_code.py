@@ -6,14 +6,16 @@ tags, and starts a self-compacted session with a fixed continuation preamble.
 
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import replace
 import re
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
-from ..core.ir import Item, Kind, joined
+from ..core.ir import Item, Kind
 from ..install import Setting
+from ..protocols.base import WireItem
 from .base import REMINDER, Harness, command_hook
 # Slash commands and their output, which Claude Code writes into a user message, at times
 # together with what the user typed next (`/compact` followed by the next request).
@@ -45,38 +47,37 @@ class ClaudeCode(Harness):
     compaction_prompts = (COMPACT_PROMPT,)  # `/compact` and auto-compact append it to the last user message
     direct_window = 300_000  # its Claude models run with 1M windows (the catalog: 200k); about Codex's
 
-    def recalled(self, items: list[Item], originals: list[Item]) -> list[Item]:
+    def recalled(self, items: list[Item], originals: list[Item], raw: list[WireItem]) -> list[Item]:
         """Its Read answers a file unchanged since an earlier Read of it (the same input) with a
         pointer to that result, which Relay may have folded or compacted away: there the earlier
-        result answers the Read again (the file is unchanged, so it is the file as it is). Only a
-        result that goes back whole (its text and its media, each where they belong) does; any
-        other stays the pointer it was."""
+        result answers the Read again (the file is unchanged, so it is the file as it is). Each
+        result is an item of its own (the codec's), found by the call it answers."""
 
-        reads: dict[str, tuple[int, str, tuple]] = {}  # a Read's input -> its last result in full (ref, text, media)
-        pointers: dict[tuple[int, str], tuple[str, tuple]] = {}  # (result ref, call id) -> what answers it again
-        for call, result in zip(originals, originals[1:]):
-            if call.kind is not Kind.TOOL_CALL or result.kind is not Kind.TOOL_RESULT:
+        shown = {item.ref for item in items if item.ref is not None
+                 and (item.text, item.media) == (originals[item.ref].text, originals[item.ref].media)}
+        reads: dict[str, str] = {}  # a Read's id -> its input
+        answers: dict[str, tuple[int, str, tuple]] = {}  # a Read's input -> its last result in full (ref, text, media)
+        pointers: dict[int, tuple[str, str, tuple]] = {}  # a pointer's ref -> (its text, what answers it again)
+        for item, wire in zip(originals, raw):
+            content = wire.get("content")
+            blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+            reads.update({b.get("id"): json.dumps(b.get("input"), sort_keys=True) for b in blocks
+                          if b.get("type") == "tool_use" and b.get("name") == "Read"})
+            result = next((b for b in blocks if b.get("type") == "tool_result"), None)
+            if item.kind is not Kind.TOOL_RESULT or result is None or (use := reads.get(result.get("tool_use_id"))) is None:
                 continue
-            for id_, use in ([(i, t) for i, t in call.parts if i] if call.parts else [("", call.text)]):
-                answer = next((t for i, t in result.parts if i == id_), None) if id_ and result.parts else result.text
-                if not use.startswith("Read(") or answer is None:
-                    continue
-                key = (result.ref, id_ if result.parts else "")
-                if not answer.startswith(UNCHANGED):  # (its media are its own only where it is the message's one result)
-                    reads[use] = (result.ref, answer, result.media) if not (result.media and result.parts) else None
-                elif (earlier := reads.get(use)) is not None and not (earlier[2] and result.parts) and not any(
-                        item.ref == earlier[0] and earlier[1] in item.text and item.media == earlier[2] for item in items):
-                    pointers[key] = earlier[1:]
+            text = _text(result.get("content"))
+            if not text.startswith(UNCHANGED):
+                answers[use] = (item.ref, text, item.media)
+            elif (earlier := answers.get(use)) is not None and earlier[0] not in shown and text in item.text:
+                pointers[item.ref] = (text, earlier[1], earlier[2])
         if not pointers:
             return items
         recalled = []
         for item in items:
-            original = originals[item.ref] if item.ref is not None else None
-            if original is not None and (item.text, item.media) == (original.text, original.media) and any(
-                    ref == item.ref for ref, _ in pointers):
-                parts = tuple((i, pointers.get((item.ref, i), (t,))[0]) for i, t in item.parts or (("", item.text),))
-                media = next((m for (ref, _), (_, m) in pointers.items() if ref == item.ref and m), item.media)
-                item = replace(item, text=joined(parts), media=media, parts=parts if item.parts else ())
+            if item.ref in pointers and item.ref in shown:  # (as the harness sent it)
+                pointer, text, media = pointers[item.ref]
+                item = replace(item, text=item.text.replace(pointer, text, 1), media=(*media, *item.media))
             recalled.append(item)
         return recalled
 
@@ -120,3 +121,11 @@ class ClaudeCode(Harness):
 
     def launch(self, relay_url: str, args: list[str]) -> tuple[list[str], dict[str, str]]:
         return ["claude", *args], {"ANTHROPIC_BASE_URL": relay_url}
+
+
+def _text(content: object) -> str:
+    """A tool result's text (its content's text blocks)."""
+
+    if isinstance(content, str):
+        return content
+    return "\n".join(b.get("text") or "" for b in content or [] if isinstance(b, dict) and b.get("type") == "text")

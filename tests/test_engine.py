@@ -394,9 +394,8 @@ class ReadRecallTests(unittest.TestCase):
         self.assertIn("SHOT TEXT", sent[0]["text"])
         self.assertEqual(sent[1]["source"]["data"], "aGk=")
 
-    def test_a_result_that_cannot_go_back_whole_stays_the_pointer(self) -> None:
-        # The image of one of two results answered in one message is not that result's alone (an
-        # item's media are the message's): it does not go back, and the pointer stays.
+    def test_a_result_beside_others_goes_back_with_its_image(self) -> None:
+        # Each result is an item of its own, its image with it.
         image = [{"type": "text", "text": "SHOT TEXT"},
                  {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}}]
         calls = {"role": "assistant", "content": [
@@ -405,14 +404,15 @@ class ReadRecallTests(unittest.TestCase):
         results = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "r1", "content": image},
                                                {"type": "tool_result", "tool_use_id": "x", "content": "EXCEPTIONS TEXT"}]}
         history = [calls, results, *self.read("r2", WASTED, "shot.png")]
-        self.assertEqual(self.send(Folds("SHOT TEXT"), *history)[-1], history[-1])
+        self.assertEqual(self.send(Folds("SHOT TEXT"), *history)[-1]["content"][0]["content"], image)
 
     def test_two_reads_answered_in_one_message_each_get_their_own_text(self) -> None:
         calls = {"role": "assistant", "content": [
             {"type": "tool_use", "id": "r3", "name": "Read", "input": {"file_path": "models.py"}},
             {"type": "tool_use", "id": "r4", "name": "Read", "input": {"file_path": "adapters.py"}}]}
-        results = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "r3", "content": WASTED},
-                                               {"type": "tool_result", "tool_use_id": "r4", "content": WASTED}]}
+        results = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "r4", "content": WASTED},
+                                               {"type": "tool_result", "tool_use_id": "r3", "content": WASTED}]}
+        # (in the order they finished, as Claude Code sends them)
         history = [*self.read("r1", "MODELS TEXT"), *self.read("r2", "ADAPTERS TEXT", "adapters.py"), calls, results]
         sent = self.send(Folds("MODELS TEXT", "ADAPTERS TEXT"), *history)[-1]["content"]
         self.assertEqual({b["tool_use_id"]: b["content"] for b in sent},

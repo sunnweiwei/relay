@@ -143,7 +143,9 @@ Three layers keep strategies free of harness and protocol details:
 - the **codec** knows the wire protocol: items (their text and media), legal cuts, how a
   message is written, how an item gets new content with its structure kept (a tool result
   still answers its call), which items the API would reject where they stand (a call without its
-  result), and where it allows system messages;
+  result), and where it allows system messages. Each call's result is an item of its own: where
+  the protocol answers parallel calls in one message (Anthropic Messages, Gemini), the codec
+  takes it apart into an item per result and joins them again when sending;
 - the **harness profile** knows what the harness writes itself: which items are injected
   context (`refine`), what makes two requests the same conversation for the prefix store
   (`identity`, robust to instructions re-rendered in place and resumed histories), the
@@ -518,10 +520,14 @@ returned codes and neither file's text, and the model answered right and no long
 the request after the fold the upstream's cache served 69% to 98% of the prompt where it reports
 cache use (Codex 86%, Claude Code 89%, Gemini CLI on Gemini 72%). Gemini CLI on GPT, which had not
 been told about branches (see the LiteLLM note under CLM), used its own sub-agent tool
-(`invoke_agent`); told, it branches and folds too. Codex at times reaches for its `spawn_agent`. A signal is a lone echo of it in a tool's input (one
-argument, nothing after it), read from the echo's output in whatever form a harness reports it
-(plain, JSON, `Command: … Output: …`), else, where the call reports no output, from the command;
-text that only mentions it (the model's, another tool's input, a grep for it) is none.
+(`invoke_agent`); told, it branches and folds too. Codex at times reaches for its `spawn_agent`. A
+signal is a lone echo of it in a tool's input (one argument, nothing after it), read from the
+echo's output in whatever form a harness reports it (plain, JSON, `Command: … Output: …`), else,
+where the call reports no output, from the command; text that only mentions it (the model's,
+another tool's input, a grep for it) is none. The guidance asks for the echo as the only tool
+call of its response; one beside others still counts: of the results answering that response
+(an item each, in whatever order the harness sends them), the echo's is the one saying what it
+printed, and only that result is rewritten.
 
 ## PRO-LONG
 

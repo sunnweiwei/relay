@@ -25,16 +25,17 @@ from ..core.ir import Context, Item, Kind, Request
 from ..core.tokens import item_tokens
 from .base import Summarizer
 from .compaction import Compaction
-from .conversation import answered, signalled
+from .conversation import signalled, step
 
 GUIDANCE = """## Branches (context folding)
 
 For a focused sub-task (exploring code, reading a set of files, trial and error), open a branch:
 run the shell command `echo "[branch] <3-5 word description> :: <task: objectives and what to
-report>"`, alone. You keep everything you know; work on the sub-task only. When it is done, or you
-cannot go further, run `echo "[return] <message>"`, alone: a comprehensive message with the outcome,
-every exact value found, files changed, and what is still pending. Then the branch's steps are
-folded away and only your message stays, so put everything that matters into it. A branch cannot
+report>"`, alone (no other tool call beside it). You keep everything you know; work on the sub-task
+only. When it is done, or you cannot go further, run `echo "[return] <message>"`, alone (no other
+tool call beside it): a comprehensive message with the outcome, every exact value found, files
+changed, and what is still pending. Then the branch's steps are folded away and only your message
+stays, so put everything that matters into it. A branch cannot
 open another branch."""
 # FoldAgent's messages (agents/prompts.py BRANCH_MESSAGE, agents/fold_agent.py).
 BRANCH = """ROLE CHANGE: `MODE: BRANCH`
@@ -74,41 +75,35 @@ class ContextFolding:
     def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
         if not request.tools:
             return None
-        items, changed, opened = list(request.current), False, None  # opened: the open branch's call
-        signalled_ = None  # the open branch's result as the harness sent it, and the echo's call in it
+        items, changed, opened = list(request.current), False, None  # opened: the open branch's result, its step's end
         n = 0
-        while n < len(items) - 1:
-            call, result = items[n], items[n + 1]
-            if result.kind is Kind.TOOL_RESULT and BRANCH[:20] in result.text:
-                opened = n  # opened earlier, still open
-                sent = {item.ref: item for item in request.history if item.ref is not None}
-                raw = sent.get(result.ref)
-                found = _signal(sent[call.ref], raw) if raw is not None and call.ref in sent else None
-                signalled_ = (raw, found[2]) if found else None
-            elif result.kind is Kind.TOOL_RESULT and RETURNED[:20] in result.text:
-                opened = signalled_ = None
-            if (signal := _signal(call, result)) is None:
-                n += 1
+        while (found := step(items, n)) is not None:
+            start, first, end = found
+            results = items[first:end]
+            if (marked := [first + k for k, result in enumerate(results) if BRANCH[:20] in result.text]):
+                opened = marked[0], end  # opened earlier, still open
+            elif any(RETURNED[:20] in result.text for result in results):
+                opened = None
+            if (signal := _signal(items[start:first], results)) is None:
+                n = end
                 continue
-            kind, text, echo = signal
+            kind, text, k = signal
+            echo = first + k
             if kind == "branch" and opened is not None:
-                items[n + 1] = answered(result, echo, NESTED)
+                items[echo] = replace(items[echo], text=NESTED)
             elif kind == "branch":
                 description, _, task = text.partition("::")
-                message = BRANCH.format(description=description.strip(), task=task.strip())
-                items[n + 1] = answered(result, echo, message)
-                opened, signalled_ = n, (result, echo)
+                items[echo] = replace(items[echo], text=BRANCH.format(description=description.strip(), task=task.strip()))
+                opened = echo, end
             elif opened is not None:  # the branch returns: its steps and the return call fold away
-                message = RETURNED.format(message=text)
-                items[opened + 1] = (answered(*signalled_, message) if signalled_ is not None
-                                     else replace(items[opened + 1], text=message, parts=()))
-                del items[opened + 2: n + 2]
-                n, opened, signalled_ = opened, None, None
+                items[opened[0]] = replace(items[opened[0]], text=RETURNED.format(message=text))
+                del items[opened[1]:end]
+                end, opened = opened[1], None
             else:  # a return with no branch open: left as it is
-                n += 1
+                n = end
                 continue
             changed = True
-            n += 2
+            n = end
         guidance = Item(Kind.SYSTEM, GUIDANCE)
         folded = items if changed else list(request.current)
         tokens = request.tokens - sum(map(item_tokens, request.current)) + sum(map(item_tokens, folded))
@@ -117,9 +112,10 @@ class ContextFolding:
         return Context((guidance, *folded))
 
 
-def _signal(call: Item, result: Item) -> tuple[str, str, str] | None:
-    """A branch signal, what it says and the echo's call (see `signalled`); None once its output is rewritten."""
+def _signal(response: list[Item], results: list[Item]) -> tuple[str, str, int] | None:
+    """A branch signal, what it says and which result is the echo's (see `signalled`); None once
+    its output is rewritten."""
 
-    if any(mark[:20] in result.text for mark in (BRANCH, RETURNED, NESTED)):
+    if any(mark[:20] in result.text for result in results for mark in (BRANCH, RETURNED, NESTED)):
         return None
-    return signalled(call, result, SIGNAL, whole=True)
+    return signalled(response, results, SIGNAL, whole=True)
