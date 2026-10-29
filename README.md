@@ -518,10 +518,16 @@ returned codes and neither file's text, and the model answered right and no long
 the request after the fold the upstream's cache served 69% to 98% of the prompt where it reports
 cache use (Codex 86%, Claude Code 89%, Gemini CLI on Gemini 72%). Gemini CLI on GPT, which had not
 been told about branches (see the LiteLLM note under CLM), used its own sub-agent tool
-(`invoke_agent`); told, it branches and folds too. Codex at times reaches for its `spawn_agent`. A signal is a lone echo of it in a tool's input (one
-argument, nothing after it), read from the echo's output in whatever form a harness reports it
-(plain, JSON, `Command: … Output: …`), else, where the call reports no output, from the command;
-text that only mentions it (the model's, another tool's input, a grep for it) is none.
+(`invoke_agent`); told, it branches and folds too. Codex at times reaches for its `spawn_agent`. A
+signal is a lone echo of it in a tool's input (one argument, nothing after it), read from the
+echo's output in whatever form a harness reports it (plain, JSON, `Command: … Output: …`), else,
+where the call reports no output, from the command; text that only mentions it (the model's,
+another tool's input, a grep for it) is none. The guidance asks for the echo as the only tool
+call of its response (as for AutoCompact's and ACM's signals); one beside other calls is ignored,
+and the model is told so: in the echo's own result where it has one (Codex, Chat Completions,
+Claude Code's hook; of several results, the one saying what the echo printed, in whatever order
+they come), else, where one message answers all the calls (Anthropic Messages, Gemini), in a note
+on the request right after. The other calls' results stay as they were.
 
 ## PRO-LONG
 

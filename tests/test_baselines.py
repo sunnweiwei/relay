@@ -15,6 +15,7 @@ from relay.protocols import Gemini, OpenAIChat, OpenAIResponses
 from relay.strategies import ACM, MEM1, AutoCompact, Compaction, SelfCompact
 from relay.strategies.acm import NOTHING, QUERY_MEMORY_PROMPT, SUMMARY_INSTRUCTION
 from relay.strategies.autocompact import PROMPT
+from relay.strategies.conversation import IGNORED
 from relay.prompts import SUMMARY_PREFIX
 from relay.strategies.selfcompact import RUBRIC, SUMMARIZER
 
@@ -244,8 +245,8 @@ if __name__ == "__main__":
 
 
 class ParallelSignalTests(unittest.TestCase):
-    """A signal echoed beside other calls (Claude Code answers them in one message): only the echo's
-    result is rewritten; the others stay, each with its call."""
+    """A signal echoed beside other calls (Claude Code answers them in one message) is ignored, the
+    results as they were, and the model told so on that request."""
 
     def send(self, strategy: Any, command: str) -> list[dict[str, Any]]:
         from relay.harnesses import ClaudeCode
@@ -266,16 +267,12 @@ class ParallelSignalTests(unittest.TestCase):
     def test_autocompact(self) -> None:
         from relay.strategies import AutoCompact
         sent = self.send(AutoCompact(), 'echo "[compact]"')
-        results = {b["tool_use_id"]: b["content"] for m in sent if isinstance(m["content"], list) for b in m["content"]
-                   if b.get("type") == "tool_result"}
-        self.assertEqual(results["x"], "A TEXT")
-        self.assertIn("Auto Context Summary", json.dumps(results["s"]))
+        self.assertEqual(sent[-1]["content"][:2], self.messages[-1]["content"])
+        self.assertEqual(sent[-1]["content"][2]["text"], IGNORED.format(name="compact"))
 
     def test_acm(self) -> None:
         from relay.strategies import ACM
         with tempfile.TemporaryDirectory() as directory:
             sent = self.send(ACM(directory=directory), 'echo "[manage_context]"')
-        results = {b["tool_use_id"]: b["content"] for m in sent if isinstance(m["content"], list) for b in m["content"]
-                   if b.get("type") == "tool_result"}
-        self.assertEqual(results["x"], "A TEXT")
-        self.assertNotEqual(results["s"], "[manage_context]")
+        self.assertEqual(sent[-1]["content"][:2], self.messages[-1]["content"])
+        self.assertTrue(sent[-1]["content"][2]["text"].startswith(IGNORED.format(name="manage_context")))  # (its token count after)

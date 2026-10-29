@@ -8,6 +8,7 @@ from relay.core.engine import Engine
 from relay.harnesses import Harness
 from relay.protocols import AnthropicMessages, Gemini, OpenAIChat, OpenAIResponses
 from relay.strategies import Compaction, ContextFolding
+from relay.strategies.conversation import IGNORED
 from relay.strategies.folding import BRANCH as BRANCH_MESSAGE, NESTED, RETURNED
 
 CODEC, HARNESS = OpenAIResponses(), Harness()
@@ -87,7 +88,21 @@ class FoldingTests(unittest.TestCase):
         items = self.send(*self.history, *BRANCH, *read(2), *read(3), *ret).body["input"]
         self.assertEqual(self.text(items[-1]), RETURNED.format(message="file_2: c2\nfile_3: c3\nnothing pending"))
 
-    def test_a_branch_opened_beside_other_calls_keeps_their_results(self) -> None:
+    def test_a_branch_beside_other_calls_of_their_own_is_answered_that_it_was_ignored(self) -> None:
+        # Codex: an item per parallel call, then their outputs; a grep beside the echo finds the signal too.
+        grep = run(9, 'grep -rn "branch" notes.md', "notes.md:3:[branch] Old :: an old note")
+        beside = [BRANCH[0], grep[0], grep[1], BRANCH[1]]
+        sent = self.send(*self.history, *beside).body["input"]
+        self.assertEqual(sent[-4:-1], [BRANCH[0], grep[0], grep[1]])
+        self.assertEqual(self.text(sent[-1]), IGNORED.format(name="branch"))
+        self.assertEqual(sent[-1]["call_id"], "c10")
+        # Run again alone, it opens; the one ignored stays answered so.
+        alone = run(12, 'echo "[branch] Read files :: read file_2"', "[branch] Read files :: read file_2")
+        later = self.send(*self.history, *beside, *alone).body["input"]
+        self.assertEqual(self.text(later[-3]), IGNORED.format(name="branch"))
+        self.assertTrue(self.text(later[-1]).startswith("ROLE CHANGE"))
+
+    def test_a_branch_beside_other_calls_is_ignored_and_the_model_told(self) -> None:
         # Claude Code answers parallel tool uses in one message, in its own order.
         codec = AnthropicMessages()
 
@@ -105,39 +120,17 @@ class FoldingTests(unittest.TestCase):
 
         def send(*messages: dict[str, Any]) -> Any:
             return self.engine.prepare(codec, HARNESS, {"model": "m", "messages": list(messages), "tools": [{"name": "Bash"}]},
-                                       tenant="a", post=lambda r: (500, {}))
+                                       tenant="a", post=lambda r: (500, {})).body["messages"]
 
-        def by_id(message: dict[str, Any]) -> dict[str, str]:
-            return {b["tool_use_id"]: json.dumps(b["content"], ensure_ascii=False) for b in message["content"]}
-
-        sent = by_id(send(task, calls, results).body["messages"][-1])
-        self.assertEqual(json.loads(sent["x"]), "EXCEPTIONS TEXT")  # each result still answers its own call
-        self.assertEqual(json.loads(sent["y"]), "MODELS TEXT")
-        self.assertIn(BRANCH_MESSAGE.split("\n")[0], sent["b"])
-        self.assertNotIn("TEXT", sent["b"])
-        # The return folds the branch's steps; the reads beside its opening stay, each with its call.
-        ret = [{"role": "assistant", "content": [use("r", "Bash", 'echo "[return] models: 1180 lines"')]},
-               {"role": "user", "content": [result("r", "[return] models: 1180 lines")]}]
-        folded = send(task, calls, results, *ret).body["messages"]
-        self.assertEqual(len(folded), 3)
-        kept = by_id(folded[-1])
-        self.assertEqual(json.loads(kept["x"]), "EXCEPTIONS TEXT")
-        self.assertEqual(json.loads(kept["y"]), "MODELS TEXT")
-        self.assertIn("models: 1180 lines", kept["b"])
-
-    def test_a_branch_answered_first_beside_other_calls_says_its_line_only(self) -> None:
-        codec = AnthropicMessages()
-        task = {"role": "user", "content": "investigate the files"}
-        calls = {"role": "assistant", "content": [
-            {"type": "tool_use", "id": "b", "name": "Bash", "input": {"command": 'echo "[branch] Read models :: read models.py"'}},
-            {"type": "tool_use", "id": "y", "name": "Read", "input": {"file_path": "models.py"}}]}
-        results = {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": "b", "content": "[branch] Read models :: read models.py"},
-            {"type": "tool_result", "tool_use_id": "y", "content": "MODELS TEXT"}]}
-        sent = self.engine.prepare(codec, HARNESS, {"model": "m", "messages": [task, calls, results], "tools": [{"name": "Bash"}]},
-                                   tenant="a", post=lambda r: (500, {})).body["messages"][-1]["content"]
-        self.assertNotIn("MODELS TEXT", json.dumps(sent[0]))
-        self.assertEqual(sent[1]["content"], "MODELS TEXT")
+        sent = send(task, calls, results)
+        self.assertEqual(sent[-1]["content"][:3], results["content"])  # each result as it was
+        self.assertEqual(sent[-1]["content"][3], {"type": "text", "text": IGNORED.format(name="branch")})
+        # Told once: on the request after, the step is as the harness sent it; run alone, the echo opens a branch.
+        alone = [{"role": "assistant", "content": [use("c", "Bash", 'echo "[branch] Read models :: read models.py"')]},
+                 {"role": "user", "content": [result("c", "[branch] Read models :: read models.py")]}]
+        later = send(task, calls, results, *alone)
+        self.assertEqual(later[2], results)
+        self.assertIn(BRANCH_MESSAGE.split("\n")[0], json.dumps(later[-1]))
 
     def test_a_signal_the_model_only_mentions_beside_its_calls_opens_nothing(self) -> None:
         # Claude Code (trace 394): the model explains, in the text beside two reads, why it cannot open
@@ -170,9 +163,9 @@ class FoldingTests(unittest.TestCase):
                                    post=lambda r: (500, {})).body["messages"]
         self.assertIn("ROLE CHANGE", json.dumps(sent[-1]))
 
-    def test_a_branch_opened_on_an_earlier_request_keeps_the_results_beside_it_when_it_returns(self) -> None:
-        # Claude Code: its own context (reminders) leads the history, and the branch opened on a
-        # request before the return (its context stored, then found again).
+    def test_a_return_after_a_branch_that_was_ignored_folds_nothing(self) -> None:
+        # Claude Code: its own context (reminders) leads the history; the branch beside other calls
+        # was ignored, so the return has no branch to fold.
         from relay.harnesses import ClaudeCode
         codec, harness = AnthropicMessages(), ClaudeCode()
 
@@ -198,14 +191,11 @@ class FoldingTests(unittest.TestCase):
 
         tokens = {"role": "system", "content": "<total_tokens>900000 tokens left</total_tokens>"}  # (after each step)
         send(task, tokens, calls, results, tokens)
-        send(task, tokens, calls, results, tokens, *step, tokens)  # (the branch's context found again)
-        folded = send(task, tokens, calls, results, tokens, *step, tokens, *ret).body["messages"]
-        kept = {b["tool_use_id"]: json.dumps(b["content"], ensure_ascii=False) for m in folded if isinstance(m["content"], list)
-                for b in m["content"] if b.get("type") == "tool_result"}
-        self.assertEqual(json.loads(kept["x"]), "EXCEPTIONS TEXT")
-        self.assertEqual(json.loads(kept["y"]), "MODELS TEXT")
-        self.assertIn("models: 1180 lines", kept["b"])
-        self.assertNotIn("s", kept)  # the branch's step folded away
+        send(task, tokens, calls, results, tokens, *step, tokens)
+        history = [task, tokens, calls, results, tokens, *step, tokens, *ret]
+        sent = send(*history)
+        self.assertFalse(sent.compacted)
+        self.assertEqual(sent.body["messages"], history)
 
     def test_a_signal_in_another_tools_input_opens_nothing(self) -> None:
         # Claude Code (trace 458): the model hands a sub-agent a task that tells it how to branch; the
@@ -224,7 +214,7 @@ class FoldingTests(unittest.TestCase):
         sent = self.send(*self.history, *run(10, 'echo "[branch] Read files :: read file_2"', "")).body["input"]
         self.assertTrue(self.text(sent[-1]).startswith("ROLE CHANGE"))
 
-    def test_gemini_parallel_calls_keep_their_results(self) -> None:
+    def test_gemini_a_branch_beside_other_calls_is_ignored(self) -> None:
         codec = Gemini()
 
         def call(command: str) -> dict[str, Any]:
@@ -238,8 +228,7 @@ class FoldingTests(unittest.TestCase):
         results = {"role": "user", "parts": [output("file 1 text"), output("[branch] Read :: read file_2")]}
         sent = self.engine.prepare(codec, HARNESS, {"contents": [task, calls, results], "tools": [{}]}, tenant="g",
                                    post=lambda r: (500, {})).body["contents"][-1]["parts"]
-        self.assertEqual(sent[0], output("file 1 text"))  # as it was
-        self.assertIn("ROLE CHANGE", sent[1]["functionResponse"]["response"]["output"])
+        self.assertEqual(sent, [*results["parts"], {"text": IGNORED.format(name="branch")}])
 
     def test_gemini_folds_once(self) -> None:
         codec = Gemini()
