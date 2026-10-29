@@ -407,26 +407,25 @@ class ReadRecallTests(unittest.TestCase):
         history = [calls, results, *self.read("r2", WASTED, "shot.png")]
         self.assertEqual(self.send(Folds("SHOT TEXT"), *history)[-1], history[-1])
 
-    def test_two_reads_answered_in_one_message_each_get_their_own_text(self) -> None:
+    def test_pointers_answered_beside_others_stay_as_they_were(self) -> None:
+        # One item answers both calls: a pointer among them does not go back.
         calls = {"role": "assistant", "content": [
             {"type": "tool_use", "id": "r3", "name": "Read", "input": {"file_path": "models.py"}},
             {"type": "tool_use", "id": "r4", "name": "Read", "input": {"file_path": "adapters.py"}}]}
-        results = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "r3", "content": WASTED},
-                                               {"type": "tool_result", "tool_use_id": "r4", "content": WASTED}]}
+        results = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "r4", "content": WASTED},
+                                               {"type": "tool_result", "tool_use_id": "r3", "content": WASTED}]}
         history = [*self.read("r1", "MODELS TEXT"), *self.read("r2", "ADAPTERS TEXT", "adapters.py"), calls, results]
-        sent = self.send(Folds("MODELS TEXT", "ADAPTERS TEXT"), *history)[-1]["content"]
-        self.assertEqual({b["tool_use_id"]: b["content"] for b in sent},
-                         {"r3": [{"type": "text", "text": "MODELS TEXT"}], "r4": [{"type": "text", "text": "ADAPTERS TEXT"}]})
+        self.assertEqual(self.send(Folds("MODELS TEXT", "ADAPTERS TEXT"), *history)[-1], results)
 
-    def test_a_read_beside_others_gets_its_text_alone(self) -> None:
+    def test_an_earlier_result_answered_beside_others_answers_a_read_again(self) -> None:
+        # Found by the call it answers, in the order Claude Code sends results (as they finished).
         calls = {"role": "assistant", "content": [
-            {"type": "tool_use", "id": "r2", "name": "Read", "input": {"file_path": "models.py"}},
+            {"type": "tool_use", "id": "r1", "name": "Read", "input": {"file_path": "models.py"}},
             {"type": "tool_use", "id": "x", "name": "Read", "input": {"file_path": "exceptions.py"}}]}
-        results = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "r2", "content": WASTED},
-                                               {"type": "tool_result", "tool_use_id": "x", "content": "EXCEPTIONS TEXT"}]}
-        sent = self.send(Folds("MODELS TEXT"), *self.read("r1", "MODELS TEXT"), calls, results)
-        self.assertEqual([b["content"] for b in sent[-1]["content"]], [[{"type": "text", "text": "MODELS TEXT"}], "EXCEPTIONS TEXT"])
-
+        results = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "EXCEPTIONS TEXT"},
+                                               {"type": "tool_result", "tool_use_id": "r1", "content": "MODELS TEXT"}]}
+        sent = self.send(Folds("MODELS TEXT"), calls, results, *self.read("r2", WASTED))
+        self.assertEqual(sent[-1]["content"][0]["content"], [{"type": "text", "text": "MODELS TEXT"}])
 
 class InitialContextTests(unittest.TestCase):
     def test_initial_context_survives_repeated_compaction_in_codex_layout(self) -> None:

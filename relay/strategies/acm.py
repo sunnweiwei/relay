@@ -15,14 +15,14 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from ..core.ir import LABELS, Context, Item, Kind, Request
 from ..core.tokens import approx_tokens
 from .base import Summarizer
-from .conversation import answered, own, responses, signalled
+from .conversation import ignored, signalled, step
 from .. import settings
 
 GUIDANCE = """## Context memory
@@ -31,9 +31,9 @@ Your in-context information serves as short-term memory; previously compressed s
 
 After each tool result, the system appends "[CURRENT CONTEXT TOKEN: N]" at the end of the conversation — this tells you your current context usage. Read it; do NOT emit it yourself.
 
-To manage your context, run the shell command `echo "[manage_context]"`, alone. The system then compresses everything in your conversation since your previous manage_context call (or since the start of the conversation if this is your first call) up to (but not including) the message that issued the call. The system prompt and the user's messages are always preserved. The original messages in the compressed range are saved to disk; the command's result becomes a summary of paths explored, reasoning, and conclusions, prefixed with "[summary_id: N]".
+To manage your context, run the shell command `echo "[manage_context]"`, alone (no other tool call beside it). The system then compresses everything in your conversation since your previous manage_context call (or since the start of the conversation if this is your first call) up to (but not including) the message that issued the call. The system prompt and the user's messages are always preserved. The original messages in the compressed range are saved to disk; the command's result becomes a summary of paths explored, reasoning, and conclusions, prefixed with "[summary_id: N]".
 
-To retrieve detailed information from any prior summary's original messages, run `echo "[query_memory] <summary_id> :: <query>"`, alone; its result becomes the information retrieved.
+To retrieve detailed information from any prior summary's original messages, run `echo "[query_memory] <summary_id> :: <query>"`, alone (no other tool call beside it); its result becomes the information retrieved.
 
 Strategy:
 - Watch the [CURRENT CONTEXT TOKEN: N] marker. When it climbs and your recent rounds contain dead ends or duplicates, call manage_context to compress them into a [summary_id: N] entry, freeing space. Do not write this marker in your own responses; it is an environmental signal you consume, not produce.
@@ -123,32 +123,35 @@ class ACM:
     def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
         if not request.tools:
             return None
-        items, tokens, n = list(request.current), request.tokens, 0
-        while n < len(items) - 1:
-            call, result = items[n], items[n + 1]
-            found = signalled(call, result, SIGNAL)
-            found = None if found is None or own(result, found[2]).startswith(ANSWERED) else found
-            if found is None:
-                n += 1
+        items, tokens, ignoring, n = list(request.current), request.tokens, (), 0
+        while (found := step(items, n)) is not None:
+            start, first, end = found
+            if (signal := signalled(items[start:first], items[first:end], SIGNAL)) is None:
+                n = end
                 continue
-            if found[0] == "query_memory":
-                text = self._recall(request, found[1], summarizer)
+            name, said, k, alone = signal
+            if not alone:  # beside other calls
+                ignoring += ignored(items, None if k is None else first + k, end, name)
+            if not alone or items[first].text.startswith(ANSWERED):
+                n = end
+                continue
+            if name == "query_memory":
+                text = self._recall(request, said, summarizer)
             else:  # compress from the last summary on, up to the response that called
-                start = max((m + 1 for m in range(n) if _summary(items[m])), default=0)
-                end = max(s for s in responses(items) if s <= n)
-                dropped = [item for item in items[start:end] if item.kind is not Kind.USER]
+                since = max((m + 1 for m in range(start) if _summary(items[m])), default=0)
+                dropped = [item for item in items[since:start] if item.kind is not Kind.USER]
                 text = NOTHING
                 if dropped:
-                    number = sum(map(_summary, items[:start])) + 1
-                    text = f"{SUMMARY_ID}{number}] {self._compress(request, items[:n], dropped, number, summarizer)}"
-                    items[start:end] = [item for item in items[start:end] if item.kind is Kind.USER]
-                    n -= len(dropped)
+                    number = sum(map(_summary, items[:since])) + 1
+                    text = f"{SUMMARY_ID}{number}] {self._compress(request, items[:start], dropped, number, summarizer)}"
+                    items[since:start] = [item for item in items[since:start] if item.kind is Kind.USER]
+                    first, end = first - len(dropped), end - len(dropped)
                     tokens -= sum(approx_tokens(item.text) for item in dropped)
-            tokens += approx_tokens(text) - approx_tokens(own(items[n + 1], found[2]))
-            items[n + 1] = answered(items[n + 1], found[2], text)
-            n += 2
+            tokens += approx_tokens(text) - approx_tokens(items[first].text)  # (its only call: the one result)
+            items[first] = replace(items[first], text=text)
+            n = end
         window = f" Your context window is {request.window} tokens." if request.window else ""
-        notes = (f"[CURRENT CONTEXT TOKEN: {tokens}]",) if any(i.kind is Kind.TOOL_RESULT for i in items) else ()
+        notes = (*ignoring, *((f"[CURRENT CONTEXT TOKEN: {tokens}]",) if any(i.kind is Kind.TOOL_RESULT for i in items) else ()))
         return Context((Item(Kind.SYSTEM, GUIDANCE.format(window=window)), *items), notes=notes)
 
     def _compress(self, request: Request, before: list[Item], dropped: list[Item], number: int,

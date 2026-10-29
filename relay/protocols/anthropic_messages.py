@@ -32,21 +32,19 @@ class AnthropicMessages:
         role, blocks = item.get("role"), _blocks(item.get("content"))
         types = {block.get("type") for block in blocks}
         text = "\n".join(filter(None, (_block_text(block) for block in blocks)))
-        parts = tuple((block.get("id") or block.get("tool_use_id") or "", _block_text(block))
-                      for block in blocks) if len(blocks) > 1 else ()
         if role == "system":
             return Item(Kind.SYSTEM, text)
         if role == "assistant":
             # Redacted thinking is encrypted thinking; a thinking block's signature only verifies it.
             opaque = sum(decoded(block.get("data")) for block in blocks if block.get("type") == "redacted_thinking")
             if "tool_use" in types:
-                return Item(Kind.TOOL_CALL, text, opaque=opaque, parts=parts)
+                return Item(Kind.TOOL_CALL, text, opaque=opaque)
             if types <= {"thinking", "redacted_thinking"}:
                 return Item(Kind.REASONING, text, opaque=opaque)
             return Item(Kind.ASSISTANT, text, opaque=opaque)
         media = tuple(m for block in blocks for m in _media(block))
         if "tool_result" in types:
-            return Item(Kind.TOOL_RESULT, text, media=media, parts=parts)
+            return Item(Kind.TOOL_RESULT, text, media=media)
         return Item(Kind.USER, text, media=media)
 
     def canonical(self, item: WireItem) -> bytes:
@@ -80,11 +78,9 @@ class AnthropicMessages:
             return {"role": "user", "content": _content(item.text, item.media)}
         raise ValueError(f"Relay cannot write a {item.kind.value} item")
 
-    def edit(self, wire: WireItem, text: str, media: tuple[Media, ...], parts: tuple[tuple[str, str], ...] = ()) -> WireItem:
+    def edit(self, wire: WireItem, text: str, media: tuple[Media, ...]) -> WireItem:
         """The text blocks become one; thinking stays as it was (its signature verifies it).
-        A user message's tool results share the new content: the first carries it, but results
-        whose text the new content keeps whole at its start or end keep their own (a strategy that
-        rewrites one of parallel results leaves the others answering their own calls)."""
+        A user message's tool results share the new content: the first carries it."""
 
         blocks = _blocks(wire.get("content"))
         if wire.get("role") == "assistant":
@@ -95,14 +91,8 @@ class AnthropicMessages:
         results = [b for b in blocks if b.get("type") == "tool_result"]
         if not results:
             return {**wire, "content": _content(text, media)}
-        by_call = dict(parts)
-        if parts and not media and len(results) == len(blocks) and all(b.get("tool_use_id") in by_call for b in results):
-            return {**wire, "content": [b if by_call[b["tool_use_id"]] == _block_text(b) and not _media(b)
-                                        else {**b, "content": _content(by_call[b["tool_use_id"]], ()) if by_call[b["tool_use_id"]] else ""}
-                                        for b in results]}  # (each call's result where it was)
-        start, end, text = _kept(blocks, text, media)
-        content = [*results[:start], {**results[start], "content": _content(text, media)},
-                   *({**b, "content": ""} for b in results[start + 1:end]), *results[end:]]
+        content = [{**results[0], "content": _content(text, media)},
+                   *({**b, "content": ""} for b in results[1:])]
         return {**wire, "content": content}
 
     def orphans(self, items: list[WireItem]) -> set[int]:
@@ -295,26 +285,6 @@ def _block_text(block: dict[str, Any]) -> str:
             return content
         return "\n".join(_block_text(inner) for inner in _blocks(content))
     return ""
-
-
-def _kept(blocks: list[dict[str, Any]], text: str, media: tuple[Media, ...]) -> tuple[int, int, str]:
-    """The results before `start` and from `end` on, whose text `text` keeps whole at its start and
-    end (as `classify` joins them), and the rest of `text`, for the results between. Without
-    media and only for a message of tool results; otherwise all of them, and all of `text`."""
-
-    if media or any(b.get("type") != "tool_result" or _media(b) for b in blocks):
-        return 0, len(blocks), text
-    texts = [_block_text(b) for b in blocks]
-    start, end, rest = 0, len(blocks), text
-    while start < end - 1 and (not texts[start] or rest.startswith(texts[start] + "\n")):
-        rest = rest[len(texts[start]) + 1:] if texts[start] else rest
-        start += 1
-    start = start if any(texts[:start]) else 0  # (empty results alone keep nothing apart)
-    while end - 1 > start and (not texts[end - 1] or rest.endswith("\n" + texts[end - 1])):
-        rest = rest[:-len(texts[end - 1]) - 1] if texts[end - 1] else rest
-        end -= 1
-    end = end if any(texts[end:]) else len(blocks)
-    return start, end, rest
 
 
 def _media(block: dict[str, Any]) -> list[Media]:

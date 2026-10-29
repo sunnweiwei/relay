@@ -52,23 +52,6 @@ class Item:
     media: tuple[Media, ...] = ()
     wire: str | None = None  # JSON of a wire item Relay writes, when not a plain message
     opaque: int = 0  # bytes of opaque content the model reads (encrypted reasoning, ...), decoded
-    # A message of several blocks (tool uses beside each other or beside the model's text; their
-    # results), as the harness sent it: (the call's id, or "" for the model's text; the block's text),
-    # in order, `text` being the non-empty ones joined by newlines. Empty for one block.
-    parts: tuple[tuple[str, str], ...] = ()
-
-
-def joined(parts: tuple[tuple[str, str], ...]) -> str:
-    """The text of an item of these parts."""
-
-    return "\n".join(text for _, text in parts if text)
-
-
-def placed(item: Item, original: Item) -> tuple[tuple[str, str], ...]:
-    """The new parts of an item where they say its new text, call by call ("" for none: an item
-    with new text alone, its parts as they were sent, says nothing of where each call's goes)."""
-
-    return item.parts if item.parts and item.parts != original.parts and joined(item.parts) == item.text else ()
 
 
 @dataclass(frozen=True)
