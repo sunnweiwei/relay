@@ -119,6 +119,46 @@ class SetupTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.run_cli("stop")  # (there is no stopping Relay: uninstalling is going back)
 
+    def test_setup_says_how_to_leave(self) -> None:
+        with mock.patch.object(service, "status", return_value=None), mock.patch.object(service, "taken", return_value=False), \
+                mock.patch.object(service, "start", return_value="systemd"), \
+                mock.patch.object(service, "wait", return_value={"strategy": "compaction"}):
+            code, out = self.run_cli("setup", "codex")
+        self.assertIn("To leave Relay: `relay uninstall codex` (or ask the agent to run it)", out)
+
+    def test_a_conversation_recorded_with_a_smaller_window_is_judged_by_the_harnesss_now(self) -> None:
+        # Recorded before Claude Code's allowance (Relay 25f6507: the catalog's 200k).
+        install.install("claude_code", "http://127.0.0.1:8787", [])
+        (self.root / "relay").mkdir(parents=True, exist_ok=True)
+        (self.root / "relay" / "conversations.json").write_text(json.dumps({"old": {
+            "harness": "claude_code", "title": "fix it", "last": time.time(), "window": 200_000, "whole": 182_000}}))
+        with mock.patch.object(service, "status", return_value=None), mock.patch.object(service, "release"):
+            code, out = self.run_cli("uninstall", "claude")
+        self.assertEqual((code, install.installed()), (0, []))  # it fits direct: restored at once
+
+    def test_an_old_record_is_handed_back_by_the_harnesss_own_compaction(self) -> None:
+        # Recorded before conversations were named apart from the strategy: its compaction, under
+        # the new name, hands it back by the harness and what its user first typed.
+        install.install("claude_code", "http://127.0.0.1:8787", [])
+        (self.root / "relay").mkdir(parents=True, exist_ok=True)
+        (self.root / "relay" / "conversations.json").write_text(json.dumps({"old": {
+            "harness": "claude_code", "title": "fix it", "last": time.time(), "window": 300_000, "whole": 400_000}}))
+        with mock.patch.object(service, "status", return_value=None):
+            self.run_cli("uninstall", "claude")
+        self.assertEqual(len(leaving.needing("claude_code")), 1)
+        leaving.seen("claude_code", "new", "fix it", 400_000, 300_000, True)  # its own /compact, through Relay
+        self.assertEqual(leaving.needing("claude_code"), [])
+
+    def test_uninstall_gives_the_command_that_compacts_the_conversation_and_asks_the_agent_to_ask(self) -> None:
+        install.install("claude_code", "http://127.0.0.1:8787", [])
+        leaving.seen("claude_code", "c1", "fix it", 400_000, 300_000, False, session="d6f1-session")
+        with mock.patch.object(service, "status", return_value=None):
+            code, out = self.run_cli("uninstall", "claude")
+        self.assertIn('`claude --resume d6f1-session -p "/compact"`', out)
+        last = out.strip().splitlines()[-1]
+        self.assertIn("ask", last.lower())
+        self.assertIn("A, B or C", last)
+
     def test_a_harness_with_long_conversations_leaves_once_they_no_longer_need_relay(self) -> None:
         install.install("codex", "http://127.0.0.1:8787", [])
         leaving.seen("codex", "c1", "fix the flaky test", 300_000, 128_000, False)  # grew past the window
@@ -129,8 +169,11 @@ class SetupTests(unittest.TestCase):
             self.assertIn('"fix the flaky test" — ~300k tokens for a 128k window', out)
             self.assertNotIn("a short one", out)
             self.assertIn("`relay uninstall codex --now`", out)
+            # The last lines say it is not done, and what finishes it (an agent puts them to its user).
+            self.assertIn("Not finished: codex still goes through Relay", out)
+            self.assertEqual([line.strip()[:2] for line in out.strip().splitlines()[-4:-1]], ["A.", "B.", "C."])
             code, out = self.run_cli("status")
-            self.assertIn("leaving Relay: codex, restored by itself once", out)
+            self.assertIn("leaving Relay (uninstall not finished): codex, restored by itself once", out)
             self.assertIn("harnesses set up: none", out)
             leaving.seen("codex", "c1", "fix the flaky test", 300_000, 128_000, True)  # its own /compact, through Relay
             code, out = self.run_cli("status")

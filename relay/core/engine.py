@@ -64,6 +64,7 @@ class Exchange:
     whole: int = 0  # the harness's own history as it sent it, estimated (tokens)
     compacting: bool = False  # the harness compacting its own history
     direct: bool = False  # forwarded as the harness sent it, as going direct would (`direct_within`)
+    lasting: str = ""  # the conversation's name whatever the strategy (`conversation` changes with it)
 
 
 class Engine:
@@ -95,11 +96,12 @@ class Engine:
         tenant: str,
         post: Post,
         force: bool = False,
-        direct_within: int | None = None,
+        direct_within: int | Callable[[str], int | None] | None = None,
     ) -> Exchange:
         """`direct_within`: a harness leaving Relay. A request whose own history (as the harness sent
         it) is estimated within this many tokens goes as it came, without the stored context or the
-        strategy: what going direct would send, and it fits."""
+        strategy: what going direct would send, and it fits. A function of the conversation's lasting
+        name gives each conversation's own (less where the upstream refused it going direct)."""
 
         codec = harness.codec(codec)
         raw = codec.items(body)
@@ -118,6 +120,13 @@ class Engine:
         depth, state = self.store.match(partition, keys) or (0, {})
         named = [key for key in keys if key not in (b"\0system", b"\0context")][:3]
         thread = partition + hashlib.sha256(b"\0".join(named)).digest()  # names the conversation
+        lasting = hashlib.sha256(self.store.partition(tenant, codec.name, harness.name)
+                                 + hashlib.sha256(b"\0".join(named)).digest()).hexdigest()[:16]
+        latest = self.store.partition("latest", tenant, codec.name, harness.name)  # lasting name -> its last context's partition
+        if compacting and not state.get("covered"):  # (the strategy changed since: the context the model last saw)
+            pointer = (self.store.match(latest, [lasting.encode()]) or (0, {}))[1].get("partition")
+            if pointer and bytes.fromhex(pointer) != partition:
+                depth, state = self.store.match(bytes.fromhex(pointer), keys) or (depth, state)
         diverged = None if state.get("covered") or compacting else self._diverged(thread, keys, depth)
         originals = [replace(harness.refine(codec.classify(item)), ref=index) for index, item in enumerate(raw)]
 
@@ -136,9 +145,11 @@ class Engine:
         title = next((typed.text[:80] for item in originals if item.kind is Kind.USER
                       and (typed := harness.typed(item)) is not None and typed.text.strip()), "")
         whole = math.ceil(size([*originals, *volatile_items]) * state.get("rate", 1.0))
+        if callable(direct_within):
+            direct_within = direct_within(lasting)
         if direct_within is not None and not compacting and whole <= direct_within:
             return Exchange(body, partition, [], state, estimate=whole, conversation=name, title=title, whole=whole,
-                            direct=True)
+                            direct=True, lasting=lasting)
         if isinstance(state.get("tokens"), int):  # the upstream's count for the stored prefix, then new items,
             # estimated at the rate the upstream's count of this conversation has shown (the text's own
             # density: code, another language, numbers)
@@ -237,6 +248,7 @@ class Engine:
                         stored.update({"strategy": context.state} if context.state is not None else {})
                         stored.update({"instructions": answered} if answered else {})
                         self.store.put(partition, keys, stored)
+                        self.store.put(latest, [lasting.encode()], {"partition": partition.hex()})
                         state = stored
                     notes, instructions = context.notes, answered
             except Exception:
@@ -264,7 +276,7 @@ class Engine:
             forwarded = codec.with_instructions(forwarded, "\n\n".join(instructions))
         estimate = size([*items, *volatile_items]) + approx_tokens(" ".join([*notes, *instructions]), per_token)
         return Exchange(forwarded, partition, [] if compacting else keys, state, changed, estimate, depth, diverged,
-                        name, title, whole, compacting)
+                        name, title, whole, compacting, lasting=lasting)
 
     def answer(self, request: Request, summarizer: Summarizer) -> Context | None:
         """The strategy's answer on a conversation a harness hook hands over before a request; the

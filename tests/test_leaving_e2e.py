@@ -99,7 +99,7 @@ class LeavingTests(unittest.TestCase):
         self.assertIn("codex is leaving Relay", out)
         self.assertIn('"read the logs, part 0"', out)  # the conversation that would fail direct
         self.assertIn("/up/codex-0", self.config.read_text())  # still through Relay
-        self.assertIn("leaving Relay: codex", self.relay("status"))
+        self.assertIn("leaving Relay (uninstall not finished): codex", self.relay("status"))
         self.turn(app, thread, "while leaving")  # Relay keeps it working
 
         app.done("thread/compact/start", {"threadId": thread})  # Codex's own compaction, through Relay

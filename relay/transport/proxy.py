@@ -181,6 +181,7 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
         release(harness, request.headers)
         # The model's own window (not Relay's threshold): what fits once the harness goes direct.
         window = harness.window(body.get("model")) or context_window(body.get("model")) or engine.window
+        window = max(window or 0, harness.direct_window or 0) or None
         departing = harness.name in leaving.leaving() and window  # (`relay uninstall`: see relay/leaving.py)
 
         def prepare(force: bool = False) -> Exchange:
@@ -191,11 +192,13 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
                 tenant=next((request.headers[h] for h in TENANT_HEADERS if h in request.headers), ""),
                 post=post,
                 force=force,
-                direct_within=int(leaving.FITS * window) if departing and not force else None,
+                direct_within=(lambda name: leaving.direct_within(harness.name, name, window)) if departing and not force
+                else None,
             )
 
         def noted(exchange: Exchange) -> None:
-            leaving.seen(harness.name, exchange.conversation, exchange.title, exchange.whole, window, exchange.compacting)
+            leaving.seen(harness.name, exchange.lasting or exchange.conversation, exchange.title, exchange.whole, window,
+                         exchange.compacting, session=harness.session(request.headers))
             if departing and (restored := leaving.settle()):
                 log.info("no conversation of %s needs Relay any more: its configuration is restored", ", ".join(restored))
 
@@ -205,10 +208,6 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
             log.exception("could not prepare the request; forwarding it unchanged")
             return await _passthrough(client, "POST", url, headers, content)
 
-        try:
-            await run_in_threadpool(noted, exchange)
-        except Exception:
-            log.exception("could not note the conversation")
         items = harness.codec(codec).items  # as the engine counts them
         trace(path=request.url.path, user_agent=request.headers.get("user-agent"),
               items=len(items(body)), sent=len(items(exchange.body)), direct=exchange.direct,
@@ -227,6 +226,8 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
                 log.warning("upstream refused %s (%d): %s", request.url.path, response.status_code, error[:400])
                 if not codec.is_overflow(response.status_code, _json(error)) or exchange.compacted:
                     return Response(error, response.status_code, _response_headers(response.headers))
+                if exchange.direct:  # sent as going direct would, and too long: it does not fit direct
+                    await run_in_threadpool(leaving.refused, harness.name, exchange.lasting or exchange.conversation)
                 retry = await run_in_threadpool(prepare, True)  # compact now, then try once more
                 if not retry.compacted:
                     return Response(error, response.status_code, _response_headers(response.headers))
@@ -234,6 +235,11 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
                 response = await _send(client, url, plain, exchange.body)
         except httpx.HTTPError as exc:
             return _unreachable(exc)
+        try:  # (once the upstream took it: a conversation going direct may yet turn out not to fit)
+            if response.status_code < 400:
+                await run_in_threadpool(noted, exchange)
+        except Exception:
+            log.exception("could not note the conversation")
         streaming = _is_stream(response, exchange.body)
 
         def on_usage(tokens: int | None, cached: int | None) -> None:

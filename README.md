@@ -117,7 +117,12 @@ So `relay uninstall` restores a harness at once only when none of its recent con
 past the window through Relay. Otherwise it leaves in two steps (`relay/leaving.py`): it stays
 pointed at Relay, which forwards each request whose history fits the window as the harness sent
 it (`Engine.prepare(direct_within=...)`, as going direct would) and keeps managing the others;
-`relay uninstall` names those and says to run the harness's own `/compact` in them. A compaction
+`relay uninstall` names those, says it is not finished, and lists the choices: the harness's own
+`/compact` in them (with the command that runs it where the harness has one: Claude Code's
+`claude --resume <session> -p "/compact"`), waiting, or `--now`, and asks an agent running it to put
+them to its user. A conversation is judged by the window the harness allows now, so one recorded
+before it (with a smaller window) is not held back; one recorded before conversations were named
+apart from the strategy is handed back by the harness and what its user first typed. A compaction
 of the harness's own hands its conversation back. Once no conversation needs Relay, or each was
 last used a week ago, the harness's configuration is restored: by the Relay serving it, or by the
 next `relay status` or `relay start`. Relay remembers the conversations it served for that week

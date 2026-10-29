@@ -30,6 +30,7 @@ from .settings import home
 GRACE = 7 * 24 * 3600  # a conversation not used for this long no longer holds its harness on Relay
 FITS = 0.9  # of the window: a history this size goes direct (the harness's own compaction then takes over)
 KEPT = 500  # conversations remembered at most
+NAMED = 2  # how conversations are named: apart from the strategy (records without it: before)
 
 _lock = threading.Lock()
 _noted: dict[Path, dict[str, dict[str, Any]]] = {}  # Relay's directory -> its conversations, as served
@@ -57,8 +58,9 @@ def _write(name: str, value: dict[str, Any]) -> None:
 
 
 def seen(harness: str, conversation: str, title: str, whole: int, window: int | None, compacting: bool,
-         now: float | None = None) -> None:
-    """A request of `conversation`: its history's size, and whether it was the harness compacting it."""
+         now: float | None = None, session: str = "") -> None:
+    """A request of `conversation`: its history's size, and whether it was the harness compacting it.
+    `session`: the harness's own name for the conversation, where it sends one (to compact it by)."""
 
     if not conversation or not window:
         return
@@ -66,11 +68,17 @@ def seen(harness: str, conversation: str, title: str, whole: int, window: int | 
     with _lock:
         _conversations = _noted.setdefault(home(), _read("conversations.json"))
         entry = _conversations.setdefault(conversation, {"harness": harness, "title": title})
-        entry.update(harness=harness, last=now, window=window, whole=whole)
+        entry.update(harness=harness, last=now, window=window, whole=whole, named=NAMED)
         entry["title"] = entry.get("title") or title
+        if session:
+            entry["session"] = session
         if compacting:
             entry["handed"] = now  # its own history is the summary from here on
-        elif whole <= FITS * window:
+            for old in _conversations.values():  # (one recorded before conversations were named so: by what its user typed)
+                if old.get("named") is None and old.get("harness") == harness and title and old.get("title") == title:
+                    old["handed"] = now
+            entry.pop("refused", None)  # (and short: what did not fit direct says nothing of it now)
+        elif whole <= FITS * window and "refused" not in entry:
             entry.pop("handed", None)  # (fits as it is: nothing to hand back)
         for name in [n for n, e in _conversations.items() if now - e.get("last", 0) > GRACE]:
             del _conversations[name]
@@ -81,6 +89,42 @@ def seen(harness: str, conversation: str, title: str, whole: int, window: int | 
             _written[home()] = now
 
 
+def refused(harness: str, conversation: str, now: float | None = None) -> None:
+    """The upstream found `conversation`'s history, sent as going direct would, too long. A history
+    only grows: it does not fit direct from then on, whatever the window was taken to be, until
+    the harness compacts it."""
+
+    if not conversation:
+        return
+    now = time.time() if now is None else now
+    with _lock:
+        _conversations = _noted.setdefault(home(), _read("conversations.json"))
+        entry = _conversations.setdefault(conversation, {"harness": harness, "title": ""})
+        entry.update(harness=harness, last=now, refused=now)
+        entry.pop("handed", None)
+        _write("conversations.json", _conversations)
+        _written[home()] = now
+
+
+def direct_within(harness: str, conversation: str, window: int) -> int | None:
+    """The largest history of `conversation` that goes direct: `FITS` of the window; none once the
+    upstream refused it going direct."""
+
+    with _lock:
+        entry = (_noted.get(home()) or _read("conversations.json")).get(conversation) or {}
+    return None if "refused" in entry else int(FITS * window)
+
+
+def window(entry: dict[str, Any]) -> int:
+    """The window a conversation is judged by: as recorded, or the harness's allowance where it is
+    larger now (a record from before it, say)."""
+
+    from .harnesses import HARNESSES  # (the harness profiles import what Relay's directory holds)
+
+    profile = HARNESSES.get(entry.get("harness", ""))
+    return max(entry.get("window", 0), (profile.direct_window if profile else None) or 0)
+
+
 def needing(harness: str, now: float | None = None) -> list[dict[str, Any]]:
     """The harness's conversations that would not fit direct, used within `GRACE`, newest first."""
 
@@ -88,7 +132,7 @@ def needing(harness: str, now: float | None = None) -> list[dict[str, Any]]:
     with _lock:
         conversations = _noted.get(home()) or _read("conversations.json")
         found = [e for e in conversations.values() if e.get("harness") == harness and now - e.get("last", 0) <= GRACE
-                 and e.get("whole", 0) > FITS * e.get("window", 0) and "handed" not in e]
+                 and (e.get("whole", 0) > FITS * window(e) or "refused" in e) and "handed" not in e]
     return sorted(found, key=lambda e: -e["last"])
 
 

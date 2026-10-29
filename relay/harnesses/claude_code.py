@@ -43,6 +43,7 @@ class ClaudeCode(Harness):
     injected = (REMINDER, COMMAND)
     summaries = (SUMMARY_PREFIX,)
     compaction_prompts = (COMPACT_PROMPT,)  # `/compact` and auto-compact append it to the last user message
+    direct_window = 300_000  # its Claude models run with 1M windows (the catalog: 200k); about Codex's
 
     def recalled(self, items: list[Item], originals: list[Item]) -> list[Item]:
         """Its Read answers a file unchanged since an earlier Read of it (the same input) with a
@@ -83,6 +84,12 @@ class ClaudeCode(Harness):
         return "x-claude-code-session-id" in headers or headers.get(
             "user-agent", ""
         ).startswith("claude-cli")
+
+    def session(self, headers: Mapping[str, str]) -> str:
+        return headers.get("x-claude-code-session-id", "")
+
+    def compacts(self, session: str) -> str | None:
+        return f'claude --resume {session} -p "/compact"' if re.fullmatch(r"[\w-]+", session) else None
 
     def state_key(self, item: Item) -> str | None:
         """Reminders that restate its state, wherever they come (after compacting itself it

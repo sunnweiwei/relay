@@ -178,6 +178,7 @@ def _setup(harness: Harness, strategy: str | None, assignments: list[str], via: 
               f"(or set Relay up with --autostart)")
     print(f"{harness.name} goes through Relay: conversations started from now on use {wanted}; one already "
           f"open goes on as it was until a new one is started (`relay help`, \"Which conversations change\")")
+    print(f"To leave Relay: `relay uninstall {harness.name}` (or ask the agent to run it)")
     return 0
 
 
@@ -260,8 +261,9 @@ def _status() -> int:
               + (" (newer: served as the newest of those)" if newer else ""))
     for name in departing:
         waiting = leaving.needing(name)
-        print(f"leaving Relay: {name}, restored by itself once {'this conversation does' if len(waiting) == 1 else 'these do'}"
-              f" not need Relay any more (its own `/compact` in it, or a week after its last use):")
+        print(f"leaving Relay (uninstall not finished): {name}, restored by itself once "
+              f"{'this conversation does' if len(waiting) == 1 else 'these do'} not need Relay any more (its own "
+              f"`/compact` in it, or a week after its last use; `relay uninstall {name} --now`: at once):")
         for entry in waiting:
             print(f"  · {_described(entry)}")
     for name, when in leaving.restored().items():
@@ -323,9 +325,19 @@ def _uninstall(harness: Harness, now: bool = False) -> int:
               f"{'it' if one else 'they'} would fail direct, so Relay keeps managing {'it' if one else 'them'}:")
         for entry in waiting:
             print(f"  · {_described(entry)}")
-        print(f"To keep {'it' if one else 'one'}, run {name}'s own `/compact` in it: then it fits, and goes direct too.")
-        print(f"Once no conversation needs Relay (or a week after the last use of each), {name}'s configuration is "
-              f"restored by itself. `relay status` shows what is left; `relay uninstall {name} --now` restores it now.")
+        print(f"Not finished: {name} still goes through Relay (its configuration is not restored yet). "
+              "To finish, pick one:")
+        commands = [harness.compacts(entry["session"]) if entry.get("session") else None for entry in waiting]
+        how = (f": {', '.join(f'`{c}`' for c in commands)}" if all(commands)  # (run without opening the conversation)
+               else "")
+        print(f"  A. run {name}'s own `/compact` in {'it' if one else 'each'}{how}: then it fits and goes direct, and "
+              f"{'' if one else 'once none needs Relay, '}{name}'s configuration is restored by itself")
+        print(f"  B. leave it: a week after the last use of {'it' if one else 'each'}, the configuration is "
+              "restored by itself (`relay status` shows what is left)")
+        print(f"  C. `relay uninstall {name} --now`: restored now; {'that conversation then fails' if one else 'those then fail'} "
+              "direct (start a new one)")
+        print("An agent running this for its user: ask them which of A, B or C to take (a question with these choices, "
+              "where you can ask one), then run it.")
         return 0
     leaving.stay(name)
     paths = install.uninstall(name)
@@ -367,7 +379,7 @@ def _ago(when: float) -> str:
 
 def _described(entry: dict) -> str:
     return (f"\"{entry.get('title') or '(no text)'}\" — ~{entry['whole'] / 1000:.0f}k tokens for a "
-            f"{entry['window'] / 1000:.0f}k window, last used {_ago(entry['last'])}")
+            f"{leaving.window(entry) / 1000:.0f}k window, last used {_ago(entry['last'])}")
 
 
 def _settle() -> None:
