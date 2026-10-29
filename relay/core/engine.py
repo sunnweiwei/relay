@@ -43,6 +43,7 @@ RATE = (0.5, 4.0)  # how far the upstream's count may scale Relay's estimate of 
 Post = Callable[[Body], tuple[int, Any]]  # send a body upstream -> (status, JSON payload)
 TRANSIENT = {429, 500, 502, 503, 504}  # summary request errors worth retrying
 RETRIES = 5  # Codex's default stream_max_retries
+SENDABLE = 0.95  # of the context window: the most a context Relay adds to may reach (Codex's effective window)
 SUMMARY_SHARE = 0.95  # of the context window: whatever Relay would forward uncompacted fits one summary request
 
 
@@ -242,12 +243,22 @@ class Engine:
                 log.warning("%s failed; forwarding the last context", self.strategy.name, exc_info=True)
                 self._retry_at[thread] = time.monotonic() + self.retry_after
 
+        # What the harness's tools answered from its own history, where the context no longer has
+        # it, answered again: on every request, as the context is (not stored).
+        recalled = harness.recalled(items, originals)
+        # (never past what fits, nor on a retry after the upstream found the request too long: the
+        # pointer the harness wrote stays, as the model would have seen it anyway)
+        fits = request.window is None or size([*recalled, *volatile_items]) * state.get("rate", 1.0) < SENDABLE * request.window
+        answers_again = recalled is not items and fits and not force
+        if answers_again:
+            wire = [w if new is old else _wire(codec, raw, originals, new) for w, old, new in zip(wire, items, recalled)]
+            items = recalled
         # Notes for this request alone at the end; the strategy's instructions join the system
         # prompt (the same on every request, so the prompt cache still holds).
         sent = [*wire, *volatile]
         if notes:
             sent = codec.note(sent, "\n\n".join(notes))
-        unchanged = not state.get("head") and not state.get("covered") and not notes
+        unchanged = not state.get("head") and not state.get("covered") and not notes and not answers_again
         forwarded = body if unchanged else codec.with_items(body, sent)
         if instructions:
             forwarded = codec.with_instructions(forwarded, "\n\n".join(instructions))
