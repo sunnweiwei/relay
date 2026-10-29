@@ -32,16 +32,17 @@ class Gemini:
     def classify(self, item: WireItem) -> Item:
         parts = _distinct(item.get("parts") or [])
         text = "\n".join(filter(None, (_part_text(part) for part in parts)))
+        named = _named(parts) if len(parts) > 1 else ()
         if item.get("role") == "model":
             opaque = sum(decoded(part.get("thoughtSignature") or part.get("thought_signature")) for part in parts)
             if any(_has(part, "functionCall") for part in parts):
-                return Item(Kind.TOOL_CALL, text, opaque=opaque)
+                return Item(Kind.TOOL_CALL, text, opaque=opaque, parts=named)
             if parts and all(part.get("thought") for part in parts):
                 return Item(Kind.REASONING, text, opaque=opaque)
             return Item(Kind.ASSISTANT, text, opaque=opaque)
         media = tuple(m for part in parts if (m := _media(part)))
         if item.get("role") == "function" or any(_has(part, "functionResponse") for part in parts):
-            return Item(Kind.TOOL_RESULT, text, media=media)
+            return Item(Kind.TOOL_RESULT, text, media=media, parts=named)
         return Item(Kind.USER, text, media=media)
 
     def canonical(self, item: WireItem) -> bytes:
@@ -72,18 +73,30 @@ class Gemini:
             return {"role": "user", "parts": _content(item.text, item.media)}
         raise ValueError(f"Relay cannot write a {item.kind.value} item")
 
-    def edit(self, wire: WireItem, text: str, media: tuple[Media, ...]) -> WireItem:
+    def edit(self, wire: WireItem, text: str, media: tuple[Media, ...], parts: tuple[tuple[str, str], ...] = ()) -> WireItem:
         """Thoughts stay as they were; tool results share the new content: the first carries it
-        (and its repeats)."""
+        (and its repeats), or, given each call's new text (`parts`), each call's result its own."""
 
-        parts = [part for part in wire.get("parts") or [] if isinstance(part, dict)]
+        blocks = [part for part in wire.get("parts") or [] if isinstance(part, dict)]
         if wire.get("role") == "model":
-            if media or any(_has(part, "functionCall") for part in parts):
+            if media or any(_has(part, "functionCall") for part in blocks):
                 raise ValueError("the content of a tool call cannot change on its own")
-            return {**wire, "parts": [*(part for part in parts if part.get("thought")), {"text": text}]}
-        responses = [part for part in parts if _has(part, "functionResponse")]
+            return {**wire, "parts": [*(part for part in blocks if part.get("thought")), {"text": text}]}
+        responses = [part for part in blocks if _has(part, "functionResponse")]
         if not responses:
             return {**wire, "parts": _content(text, media)}
+        by_call, calls, previous = dict(parts), [], None
+        for part in responses:  # each response's call, as `classify` names it (a repeat: the one it repeats)
+            value = part.get("functionResponse", part.get("function_response")) or {}
+            same = previous is not None and canonical_json(part) == canonical_json(previous)
+            calls.append(calls[-1] if same else (value.get("id") if isinstance(value, dict) else None)
+                         or f"#{sum(1 for c in dict.fromkeys(calls))}")
+            previous = part
+        if by_call and not media and len(responses) == len(blocks) and all(c in by_call for c in calls):
+            edited = [part if by_call[call] == _part_text(part) else {**part, key: {**part[key], "response": {"output": by_call[call]}}}
+                      for part, call in zip(responses, calls)
+                      for key in ("functionResponse" if "functionResponse" in part else "function_response",)]
+            return {**wire, "parts": edited}  # (each call's result where it was, its repeats too)
         edited = []
         for part in responses:  # a result Gemini CLI repeats (it does on resume) stays repeated
             key = "functionResponse" if "functionResponse" in part else "function_response"
@@ -198,6 +211,20 @@ def _parts(payload: Body) -> list[dict[str, Any]]:
     candidates = payload.get("candidates") or [{}]
     content = candidates[0].get("content") or {}
     return [part for part in content.get("parts") or [] if isinstance(part, dict)]
+
+
+def _named(parts: list[dict[str, Any]]) -> tuple[tuple[str, str], ...]:
+    """Each part's text with the call it is or answers: its id, else its place among the calls
+    (a response follows the order of the calls); "" for the model's text."""
+
+    named, calls = [], 0
+    for part in parts:
+        key = next((k for k in ("functionCall", "functionResponse") if _has(part, k)), None)
+        value = part.get(key, part.get(_snake(key))) if key else None
+        named.append(((value.get("id") if isinstance(value, dict) else None) or f"#{calls}" if key else "",
+                      _part_text(part)))
+        calls += key is not None
+    return tuple(named)
 
 
 def _part_text(part: dict[str, Any]) -> str:

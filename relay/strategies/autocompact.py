@@ -14,13 +14,13 @@ AutoCompact released no prompts; the guidance and the summary prompt follow its 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.ir import Context, Item, Kind, Request
 from .base import Summarizer
 from .compaction import Compaction
-from .conversation import responses, signal
+from .conversation import answered, own, responses, signalled
 
 GUIDANCE = """## Compaction
 
@@ -46,8 +46,8 @@ class AutoCompact:
         if not request.tools:
             return None
         items, guidance = request.current, Item(Kind.SYSTEM, GUIDANCE)
-        calls = [n for n in range(len(items) - 1)
-                 if not items[n + 1].text.startswith(HEADER) and signal(items[n], items[n + 1], SIGNAL)]
+        found = {n: echo[2] for n in range(len(items) - 1) if (echo := signalled(items[n], items[n + 1], SIGNAL)) is not None}
+        calls = [n for n, call in found.items() if not own(items[n + 1], call).startswith(HEADER)]
         cut = min((b for b in request.boundaries if calls and b >= calls[-1] + 2), default=None)
         if cut is None:
             context = self.fallback.plan(request, summarizer)
@@ -60,4 +60,4 @@ class AutoCompact:
         summary = summarizer.summarize(cut, PROMPT).strip()
         summary = summary if summary.startswith(HEADER) else f"{HEADER}\n\n{summary}"
         users = (item for item in items[:recent] if item.kind is Kind.USER)
-        return Context((guidance, *users, *items[recent:n + 1], replace(items[n + 1], text=summary), *items[n + 2:]))
+        return Context((guidance, *users, *items[recent:n + 1], answered(items[n + 1], found[n], summary), *items[n + 2:]))

@@ -25,7 +25,7 @@ from ..core.ir import Context, Item, Kind, Request
 from ..core.tokens import item_tokens
 from .base import Summarizer
 from .compaction import Compaction
-from .conversation import signal
+from .conversation import answered, signalled
 
 GUIDANCE = """## Branches (context folding)
 
@@ -75,27 +75,35 @@ class ContextFolding:
         if not request.tools:
             return None
         items, changed, opened = list(request.current), False, None  # opened: the open branch's call
+        signalled_ = None  # the open branch's result as the harness sent it, and the echo's call in it
         n = 0
         while n < len(items) - 1:
             call, result = items[n], items[n + 1]
             if result.kind is Kind.TOOL_RESULT and BRANCH[:20] in result.text:
                 opened = n  # opened earlier, still open
+                sent = {item.ref: item for item in request.history if item.ref is not None}
+                raw = sent.get(result.ref)
+                found = _signal(sent[call.ref], raw) if raw is not None and call.ref in sent else None
+                signalled_ = (raw, found[2]) if found else None
             elif result.kind is Kind.TOOL_RESULT and RETURNED[:20] in result.text:
-                opened = None
+                opened = signalled_ = None
             if (signal := _signal(call, result)) is None:
                 n += 1
                 continue
-            kind, text = signal
+            kind, text, echo = signal
             if kind == "branch" and opened is not None:
-                items[n + 1] = replace(result, text=NESTED)
+                items[n + 1] = answered(result, echo, NESTED)
             elif kind == "branch":
                 description, _, task = text.partition("::")
-                items[n + 1] = replace(result, text=BRANCH.format(description=description.strip(), task=task.strip()))
-                opened = n
+                message = BRANCH.format(description=description.strip(), task=task.strip())
+                items[n + 1] = answered(result, echo, message)
+                opened, signalled_ = n, (result, echo)
             elif opened is not None:  # the branch returns: its steps and the return call fold away
-                items[opened + 1] = replace(items[opened + 1], text=RETURNED.format(message=text))
+                message = RETURNED.format(message=text)
+                items[opened + 1] = (answered(*signalled_, message) if signalled_ is not None
+                                     else replace(items[opened + 1], text=message, parts=()))
                 del items[opened + 2: n + 2]
-                n, opened = opened, None
+                n, opened, signalled_ = opened, None, None
             else:  # a return with no branch open: left as it is
                 n += 1
                 continue
@@ -109,9 +117,9 @@ class ContextFolding:
         return Context((guidance, *folded))
 
 
-def _signal(call: Item, result: Item) -> tuple[str, str] | None:
-    """A branch signal and what it says; None once its output is rewritten."""
+def _signal(call: Item, result: Item) -> tuple[str, str, str] | None:
+    """A branch signal, what it says and the echo's call (see `signalled`); None once its output is rewritten."""
 
     if any(mark[:20] in result.text for mark in (BRANCH, RETURNED, NESTED)):
         return None
-    return signal(call, result, SIGNAL)
+    return signalled(call, result, SIGNAL, whole=True)

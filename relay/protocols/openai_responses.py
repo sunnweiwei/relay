@@ -96,7 +96,7 @@ class OpenAIResponses:
             return {"type": "message", "role": "user", "content": _content(item.text, item.media)}
         raise ValueError(f"Relay cannot write a {item.kind.value} item")
 
-    def edit(self, wire: WireItem, text: str, media: tuple[Media, ...]) -> WireItem:
+    def edit(self, wire: WireItem, text: str, media: tuple[Media, ...], parts: tuple[tuple[str, str], ...] = ()) -> WireItem:
         kind = wire.get("type", "message")
         if kind == "message" and wire.get("role") == "assistant" and not media:
             return {**wire, "content": [{"type": "output_text", "text": text}]}

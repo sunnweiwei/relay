@@ -15,14 +15,14 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..core.ir import LABELS, Context, Item, Kind, Request
 from ..core.tokens import approx_tokens
 from .base import Summarizer
-from .conversation import responses, signal
+from .conversation import answered, own, responses, signalled
 from .. import settings
 
 GUIDANCE = """## Context memory
@@ -126,7 +126,8 @@ class ACM:
         items, tokens, n = list(request.current), request.tokens, 0
         while n < len(items) - 1:
             call, result = items[n], items[n + 1]
-            found = None if result.text.startswith(ANSWERED) else signal(call, result, SIGNAL)
+            found = signalled(call, result, SIGNAL)
+            found = None if found is None or own(result, found[2]).startswith(ANSWERED) else found
             if found is None:
                 n += 1
                 continue
@@ -143,8 +144,8 @@ class ACM:
                     items[start:end] = [item for item in items[start:end] if item.kind is Kind.USER]
                     n -= len(dropped)
                     tokens -= sum(approx_tokens(item.text) for item in dropped)
-            tokens += approx_tokens(text) - approx_tokens(items[n + 1].text)
-            items[n + 1] = replace(items[n + 1], text=text)
+            tokens += approx_tokens(text) - approx_tokens(own(items[n + 1], found[2]))
+            items[n + 1] = answered(items[n + 1], found[2], text)
             n += 2
         window = f" Your context window is {request.window} tokens." if request.window else ""
         notes = (f"[CURRENT CONTEXT TOKEN: {tokens}]",) if any(i.kind is Kind.TOOL_RESULT for i in items) else ()
