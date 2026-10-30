@@ -331,6 +331,47 @@ class StarterTests(unittest.TestCase):
         install.uninstall("kimi_code")
         self.assertEqual(tomllib.loads(config.read_text())["hooks"], [{"event": "Stop", "command": "echo mine"}])
 
+    def test_kimi_codes_tables_named_with_a_slash_are_found_and_kept_toml(self) -> None:
+        # (reported: its model `luna/gpt-6-luna` got a second, unquoted table, and Kimi Code read no config)
+        import tomllib
+
+        from relay.harnesses import HARNESSES
+        from relay.harnesses.base import NEVER
+
+        config = self.root / "kimi" / "config.toml"
+        config.parent.mkdir()
+        original = ('default_model = "luna/gpt-6-luna"\n\n[providers."luna.example"]\ntype = "openai"\n'
+                    'base_url = "https://luna.example/v1"\n\n[models."luna/gpt-6-luna"]\nprovider = "luna.example"\n'
+                    'max_context_size = 400000\n')
+        config.write_text(original)
+        install.install("kimi_code", "http://relay", HARNESSES["kimi_code"].settings())
+        written = tomllib.loads(config.read_text())  # (valid TOML)
+        self.assertEqual(config.read_text().count("[models."), 1)
+        self.assertEqual(written["models"]["luna/gpt-6-luna"]["max_context_size"], NEVER)
+        self.assertTrue(written["providers"]["luna.example"]["base_url"].startswith("http://relay/up/"))
+        install.uninstall("kimi_code")
+        self.assertEqual(config.read_text(), original)
+        # A new table's name is quoted.
+        install.install("kimi_code", "http://relay", [install.Setting(config, ("models", "sol/gpt-6", "max_context_size"), 1)])
+        self.assertEqual(tomllib.loads(config.read_text())["models"]["sol/gpt-6"], {"max_context_size": 1})
+        self.assertIn('[models."sol/gpt-6"]', config.read_text())
+        install.uninstall("kimi_code")
+
+    def test_kimi_codes_config_an_earlier_relay_broke_is_repaired_on_uninstall(self) -> None:
+        # What `relay setup` wrote before: the same table again, unquoted, after the user's own.
+        import tomllib
+
+        config = self.root / "kimi" / "config.toml"
+        config.parent.mkdir()
+        original = '[models."luna/gpt-6-luna"]\nprovider = "luna"\nmax_context_size = 400000\n'
+        config.write_text(original + "\n[models.luna/gpt-6-luna]\nmax_context_size = 9007199254740992\n")
+        key = ["models", "luna/gpt-6-luna", "max_context_size"]
+        install.state_file().parent.mkdir(parents=True, exist_ok=True)
+        install.state_file().write_text(json.dumps({"kimi_code": [{"path": str(config), "key": key, "previous": None}]}))
+        install.uninstall("kimi_code")
+        self.assertEqual(config.read_text(), original)
+        self.assertEqual(tomllib.loads(config.read_text())["models"]["luna/gpt-6-luna"]["max_context_size"], 400000)
+
 
 class ServiceTests(unittest.TestCase):
     def test_the_service_runs_relay_and_restarts_it(self) -> None:
