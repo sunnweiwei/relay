@@ -80,8 +80,13 @@ class TransferEndToEndTests(unittest.TestCase):
         self.assertTrue(results[1]["content"].startswith(f"The file {self.work / 'notes.txt'} has been updated successfully."))
         self.assertEqual((results[2]["content"], results[2].get("is_error")), ("Exit code 3\nout\n", True))
         self.assertEqual(results[3]["content"][0]["type"], "image")
-        self.assertEqual(messages[0]["content"] if isinstance(messages[0]["content"], str) else messages[0]["content"][0]["text"],
-                         "Work on the files.")
+        texts = [m["content"] if isinstance(m["content"], str) else b.get("text", "") for m in messages
+                 for b in ([None] if isinstance(m["content"], str) else m["content"])]
+        told = [text for text in texts if "moved here from Codex" in text]
+        self.assertEqual(len(told), 1)  # (its note, which Claude Code sends the model)
+        self.assertNotIn("No response requested.", texts)  # (nothing of Claude Code's own made up around it)
+        self.assertIn("Tools it used in Codex are not available here (`exec_command`, `view_image`)", told[0])
+        self.assertIn("Work on the files.", texts[:3])
 
     def test_claude_code_to_codex(self) -> None:
         notes = str(self.work / "notes.txt")
@@ -102,7 +107,10 @@ class TransferEndToEndTests(unittest.TestCase):
                                 ("exec_command", {"cmd": "echo out; exit 3"}), ("view_image", {"path": "pic.png"})])
         outputs = [i["output"] for i in items if i["type"] == "function_call_output"]
         self.assertTrue(outputs[0].endswith("Output:\nCODE: amber\nline two\n"))
-        self.assertTrue(outputs[1].endswith("Success. Updated the following files:\nM notes.txt\n"))
+        self.assertIn("Success. Updated the following files:\nM notes.txt\n(Moved from Claude Code: made there with its `Edit` tool.)",
+                      outputs[1])
+        told = [i["content"][0]["text"] for i in items if i.get("role") == "developer" and "moved here from Claude Code" in i["content"][0]["text"]]
+        self.assertEqual(len(told), 1)  # (its note, which Codex sends the model)
         self.assertIn("Process exited with code 3\n", outputs[2])
         self.assertEqual(outputs[3][0]["type"], "input_image")
         users = [i["content"][0]["text"] for i in items if i.get("role") == "user" and not i["content"][0]["text"].startswith("<")]

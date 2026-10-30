@@ -25,12 +25,13 @@ from typing import Any
 from ..core.ir import Kind, Media
 from ..harnesses.claude_code import ClaudeCode
 from ..protocols import AnthropicMessages
-from . import Call, Message, Session, Written, note
+from . import Call, Message, Session, Written, made, moved, note
 
 PROFILE, CODEC = ClaudeCode(), AnthropicMessages()
 VERSION = "2.1.309"  # the release whose sessions are written (resumed so by 2.1.309 and 2.1.312)
 CURRENT = " (file state is current in your context — no need to Read it back)"
 UPDATED = "The file {path} has been updated successfully." + CURRENT
+TOOLS, HOW = {"Bash", "Read", "Edit", "Write"}, "commands as Bash, file reads as Read, file changes as Edit and Write"
 
 
 class _ClaudeCode:
@@ -104,6 +105,11 @@ class _ClaudeCode:
             rows.append(row)
             return row["uuid"]
 
+        if session.harness != "claude_code":  # (its own kind of note: the model reads it, its interface does not show it;
+            # first, with the first message, as at the end it would have Claude Code answer it "No response requested.")
+            entry("user", {"role": "user", "content": f"<system-reminder>\n{moved(session, 'claude_code', HOW, TOOLS)}\n"
+                                                      "</system-reminder>"}, session.messages[0].time if session.messages else "",
+                  isMeta=True)
         for message in session.messages:
             if message.role == "user":
                 content = [*([{"type": "text", "text": message.text}] if message.text else []), *map(_image, message.media)]
@@ -112,10 +118,12 @@ class _ClaudeCode:
             uses, results, texts = [], [], [message.text] if message.text else []
             for call in message.calls:
                 if (native := _native(call, cwd)) is None:
-                    texts.append(note(call))
+                    texts.append(note(call, session.harness))
                     notes += 1
                     continue
                 for name, given, answer, error, reported in native:
+                    if call.tool == "change" and session.harness != "claude_code" and isinstance(answer, str):
+                        answer = f"{answer}\n{made(call, session.harness)}".lstrip("\n")
                     uses.append({"type": "tool_use", "id": _id("toolu_"), "name": name, "input": given})
                     results.append((uses[-1]["id"], answer, error, reported))
             content = [*({"type": "text", "text": text} for text in texts), *uses]

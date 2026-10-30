@@ -216,7 +216,9 @@ compaction on. Each call becomes the other harness's own tool (a command, a file
 changed: Claude Code's Bash, Read, Edit and Write, Codex's commands and apply_patch), its result as
 that tool reports one, so the other harness, and its interface, show the conversation as their own.
 A call the other has no tool like (a sub-agent, an MCP tool, a plan) is written as text saying what
-was called and what it answered. The system prompt, instruction files and the like are each
+was called there and what it answered. The model is told where the conversation came from and which
+tools it used there are not here (a note the harness's interface does not show), and a file change
+written as another kind of tool says which tool made it. The system prompt, instruction files and the like are each
 harness's own, and the model's reasoning stays with the model that wrote it.
 
 ## Other commands

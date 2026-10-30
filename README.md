@@ -666,8 +666,13 @@ its codec and its profile so that what the harness wrote itself stays behind, an
 session from it as the harness writes its own: Claude Code's chain of entries with each tool's
 `toolUseResult`, Codex's rollout with its interface's turns of items. Each result is written as the
 tool reports one (Claude Code's "The file … has been updated successfully.", Codex's
-`Chunk ID … Process exited with code N … Output:` and apply_patch's report); a call without a
-counterpart is written as text. Read: the conversation from the harness's latest compaction on (its
+`Chunk ID … Process exited with code N … Output:` and apply_patch's report). Where the move is not
+exact the model is told, so that it is not misled: the session starts with a note of the harness's
+own kind, which the model reads and its interface does not show (Claude Code's meta
+`<system-reminder>`, Codex's developer message), saying where the conversation came from, how its
+calls are written here and which tools it used there are not here; a call written as another kind
+of tool (a patch as edits, an edit as a patch) says in its result which tool made it there; a call
+without a counterpart is written as text saying it was made there, with a tool not here. Read: the conversation from the harness's latest compaction on (its
 summary first), its latest branch (Claude Code), the calls of one response together, Codex's
 code-mode scripts that make one call as that call; reasoning is not moved (encrypted or signed for
 its own model).

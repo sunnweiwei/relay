@@ -29,12 +29,14 @@ from ..core.ir import Kind, Media
 from ..harnesses.codex import Codex
 from ..prompts import SUMMARY_PREFIX
 from ..protocols import OpenAIResponses
-from . import Call, Message, Session, Written, note
+from . import Call, Message, Session, Written, made, moved, note
 
 PROFILE, CODEC = Codex(), OpenAIResponses()
 VERSION = "0.165.0"  # the release whose sessions are written (resumed so by 0.165)
 HEREDOC = re.compile(r"\s*apply_patch\s*<<-?\s*['\"]?(\w+)['\"]?\n(.*)\n\1\s*", re.S)
 CALLS = ("function_call", "custom_tool_call", "local_shell_call")
+TOOLS = {"exec_command", "view_image"}
+HOW = "commands, file reads (as cat or sed) and file changes (as apply_patch) as exec_command calls, images as view_image"
 
 
 class _Codex:
@@ -98,6 +100,10 @@ class _Codex:
                                       "originator": "codex_cli_rs", "cli_version": VERSION, "source": "cli",
                                       "model_provider": _provider(), "history_mode": "paginated",
                                       "context_window": {"window_id": _uuid7()}})]
+        if session.harness != "codex":  # (its own kind of note, first, as its own instructions are: the model reads it,
+            # its interface does not show it)
+            rows.append(_row("response_item", {"type": "message", "role": "developer", "content": [
+                {"type": "input_text", "text": moved(session, "codex", HOW, TOOLS)}]}))
         turn: dict[str, Any] = {}  # the turn its interface shows the messages in: from a user message to the next
         notes = 0
 
@@ -136,10 +142,12 @@ class _Codex:
             texts, items, outputs, views = [message.text] if message.text else [], [], [], []
             for call in message.calls:
                 if (native := _native(call, cwd)) is None:
-                    texts.append(note(call))
+                    texts.append(note(call, session.harness))
                     notes += 1
                     continue
                 for name, given, output, view in native:
+                    if call.tool == "change" and session.harness != "codex" and isinstance(output, str):
+                        output = f"{output.rstrip(chr(10))}\n{made(call, session.harness)}"
                     call_id = _id()
                     items.append({"type": "function_call", "name": name, "arguments": json.dumps(given, ensure_ascii=False),
                                   "call_id": call_id})

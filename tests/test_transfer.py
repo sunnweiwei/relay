@@ -16,6 +16,8 @@ from relay.core.ir import Media
 from relay.transfer import HARNESSES, Call, Message, Session, transfer
 from relay.transfer.claude_code import CURRENT, project
 
+MADE = "(Moved from {}: made there with its `{}` tool.)"  # (a call written as another kind of tool, in its result)
+
 SESSIONS = Path(__file__).parent / "sessions"
 CLAUDE, CODEX = HARNESSES["claude_code"], HARNESSES["codex"]
 
@@ -85,8 +87,18 @@ class WriteTests(Home):
                                             "new_string": "CODE: birch", "replace_all": False})
         results = {b["tool_use_id"]: (b, r["toolUseResult"]) for r in rows if r["type"] == "user"
                    for b in r["message"]["content"] if isinstance(b, dict) and b.get("type") == "tool_result"}
-        self.assertEqual(results[uses[1]["id"]][0]["content"], f"The file /tmp/tmp67v19v6e/work/notes.txt has been updated successfully.{CURRENT}")
-        self.assertEqual(results[uses[2]["id"]][0]["content"], f"File created successfully at: /tmp/tmp67v19v6e/work/added.txt{CURRENT}")
+        self.assertEqual(results[uses[1]["id"]][0]["content"], f"The file /tmp/tmp67v19v6e/work/notes.txt has been updated successfully.{CURRENT}"
+                                                               f"\n{MADE.format('Codex', 'exec_command')}")
+        self.assertEqual(results[uses[2]["id"]][0]["content"], f"File created successfully at: /tmp/tmp67v19v6e/work/added.txt{CURRENT}"
+                                                               f"\n{MADE.format('Codex', 'exec_command')}")
+        self.assertEqual(results[uses[0]["id"]][0]["content"], "CODE: amber\nline two\n")  # (a command as a command: nothing more)
+        # It starts with its own kind of note, which the model reads and its interface does not show.
+        self.assertEqual((rows[0]["type"], rows[0]["isMeta"]), ("user", True))
+        self.assertEqual(rows[0]["message"]["content"], (
+            "<system-reminder>\nThe conversation that follows was moved here from Codex (its model: gpt-5.1-codex) with `relay transfer`. "
+            "Its tool calls are written as Claude Code's own: commands as Bash, file reads as Read, file changes as Edit and Write; "
+            "calls with no tool like them here are described in text. Tools it used in Codex are not available here "
+            "(`exec_command`, `view_image`): use the tools you have now.\n</system-reminder>"))
         self.assertEqual(results[uses[3]["id"]][0], {"type": "tool_result", "tool_use_id": uses[3]["id"],
                                                      "content": "Exit code 3\nout\nerr\n", "is_error": True})
         self.assertEqual(results[uses[4]["id"]][0]["content"][0]["type"], "image")
@@ -122,7 +134,13 @@ class WriteTests(Home):
         outputs = [i["output"] for i in items if i["type"] == "function_call_output"]
         self.assertRegex(outputs[0], r"^Chunk ID: [0-9a-f]{6}\nWall time: 0.0000 seconds\nProcess exited with code 0\n"
                                      r"Original token count: \d+\nOutput:\nCODE: amber\nline two\n$")
-        self.assertTrue(outputs[1].endswith("Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess. Updated the following files:\nM notes.txt\n"))
+        self.assertTrue(outputs[1].endswith("Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess. Updated the following files:\nM notes.txt\n"
+                                            + MADE.format("Claude Code", "Edit")))
+        self.assertEqual(items[0], {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": (
+            "The conversation that follows was moved here from Claude Code (its model: claude-opus-5-5) with `relay transfer`. Its tool "
+            "calls are written as Codex's own: commands, file reads (as cat or sed) and file changes (as apply_patch) as "
+            "exec_command calls, images as view_image; calls with no tool like them here are described in text. Tools it used in "
+            "Claude Code are not available here (`Bash`, `Edit`, `Read`, `Write`): use the tools you have now.")}]})
         self.assertIn("Process exited with code 3\n", outputs[3])
         self.assertEqual(outputs[4][0]["type"], "input_image")
         events = [r["payload"] for r in rows if r["type"] == "event_msg"]  # (what its interface shows: turns of items)
@@ -148,7 +166,8 @@ class WriteTests(Home):
         self.assertEqual(written.notes, 1)
         self.assertEqual(len(texts), 1)
         self.assertIn("Asking.", texts[0])
-        self.assertIn('`Agent` with: {"prompt": "find the parser"}', texts[0])
+        self.assertIn('[Moved from Claude Code: there I called its tool `Agent`, which is not available here, with: '
+                      '{"prompt": "find the parser"}', texts[0])
         self.assertIn("It is in parser.py.", texts[0])
 
     def test_files_changed_as_each_harness_changes_them(self) -> None:
@@ -252,11 +271,11 @@ class EdgeTests(Home):
     def test_media_keep_their_place(self) -> None:
         image = Media("image", "image/png", "aGk=")
         session = Session("codex", "s", "/w", (Message("user", "look", media=(image,)),))
-        rows = self.rows(CLAUDE.write(session, "/w").path)
-        self.assertEqual(rows[0]["message"]["content"], [{"type": "text", "text": "look"}, {
+        rows = self.rows(CLAUDE.write(session, "/w").path)  # (after its note of where the conversation came from)
+        self.assertEqual(rows[1]["message"]["content"], [{"type": "text", "text": "look"}, {
             "type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aGk="}}])
         items = [r["payload"] for r in self.rows(CODEX.write(session, "/w").path) if r["type"] == "response_item"]
-        self.assertEqual(items[0]["content"][1], {"type": "input_image", "image_url": "data:image/png;base64,aGk="})
+        self.assertEqual(items[0]["content"][1], {"type": "input_image", "image_url": "data:image/png;base64,aGk="})  # (its own: no note)
 
 
 if __name__ == "__main__":

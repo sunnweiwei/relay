@@ -14,6 +14,15 @@ writes itself (its system prompt, instruction files, environment, reminders; the
 own), the model's reasoning (encrypted or signed for the model that wrote it), and calls without a
 counterpart, which become text saying what was run and what it answered.
 
+Where the move is not exact, the model is told, so that what it reads does not mislead it: the
+conversation starts with a note of the harness's own kind (Claude Code's meta reminder, Codex's
+developer message: read by the model, not shown) saying where it came from, how its calls are
+written here, and which of the tools it used there are not here (`moved`); a call written as
+another kind of tool here (a patch as edits, an edit as a patch) says, in its result, which tool
+made it there (`made`); a call without a counterpart says it was made there, with a tool not here
+(`note`). A call written as the same kind of tool (a command, a file read, an image viewed) says
+nothing more.
+
 The standard tools (`Call.tool`, its `args`):
 
 - `shell`: a command, `{command}`; the result is its output (stdout and stderr as the model read
@@ -102,12 +111,34 @@ def transfer(source: str, session: str, target: str, cwd: str | None = None) -> 
     return read, harnesses[target].write(read, cwd or read.cwd)
 
 
-def note(call: Call) -> str:
-    """A call without a counterpart, as text: what was called and what it answered."""
+NAMES = {"claude_code": "Claude Code", "codex": "Codex"}
+
+
+def note(call: Call, source: str) -> str:
+    """A call without a counterpart, as text: where it was made, with what, and what it answered."""
 
     given = call.input if isinstance(call.input, str) else json.dumps(call.input, ensure_ascii=False)
     answer = call.output + (f" [{len(call.media)} image(s)]" if call.media else "")
-    return f"[Earlier I called the tool `{call.name}` with: {given}\nIt answered{' (an error)' if call.error else ''}: {answer}]"
+    return (f"[Moved from {NAMES.get(source, source)}: there I called its tool `{call.name}`, which is not available here, "
+            f"with: {given}\nIt answered{' (an error)' if call.error else ''}: {answer}]")
+
+
+def made(call: Call, source: str) -> str:
+    """What a call written as another kind of tool says of the tool that made it."""
+
+    return f"(Moved from {NAMES.get(source, source)}: made there with its `{call.name}` tool.)"
+
+
+def moved(session: Session, target: str, how: str, tools: set[str]) -> str:
+    """The note a moved conversation starts with: where it came from, how its calls are written here
+    (`how`), and the tools it used there that are not here (`tools`: the target's own)."""
+
+    source, model = NAMES.get(session.harness, session.harness), f" (its model: {session.model})" if session.model else ""
+    gone = sorted({call.name for message in session.messages for call in message.calls} - tools)
+    return (f"The conversation that follows was moved here from {source}{model} with `relay transfer`. Its tool calls are written "
+            f"as {NAMES.get(target, target)}'s own: {how}; calls with no tool like them here are described in text."
+            + (f" Tools it used in {source} are not available here ({', '.join(f'`{name}`' for name in gone)}): use the "
+               f"tools you have now." if gone else ""))
 
 
 from . import claude_code, codex  # noqa: E402 (each maps its harness to and from the space above)
