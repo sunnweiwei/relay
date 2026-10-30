@@ -38,6 +38,7 @@ ALIASES = {"claude": "claude_code", "dsh": "deepseek_harness", "mini": "mini_swe
 GUIDE = Path(__file__).with_name("HELP.md")
 
 
+UNREACHABLE = 3  # `relay status`: its process runs but does not answer (0: running, 1: not running)
 # Settings read only as Relay starts: `relay set` restarts the service for them.
 AT_START = {"host", "port", "intercept_port", "harness", "trace", "event_log", "log_level", "openai_base_url", "chatgpt_base_url",
             "anthropic_base_url", "gemini_base_url", "openai_api_key", "anthropic_api_key", "cache_path",
@@ -127,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
     port = getattr(options, "port", None) or config.port
     if config.intercept_port:  # (started by a harness that goes through it, Relay inherits its proxy)
         intercept.forget_own(config.intercept_port)
-    uvicorn.run(create_app(config=config), host=host, port=port, ws="none")
+    uvicorn.run(create_app(config=config), host=host, port=port, ws="none", timeout_graceful_shutdown=service.GRACEFUL)
     return 0
 
 
@@ -141,6 +142,8 @@ def _setup(harness: Harness, strategy: str | None, assignments: list[str], via: 
     restart = bool(AT_START & set(changes))
     settings.save(changes)
     wanted = settings.value("strategy", "compaction")
+    if service.status() is None and (pid := service.process()) is not None and service.wait(seconds=5) is None:
+        raise RuntimeError(f"settings saved; {service.unreachable(pid)}")
     moved = service.status() is None and service.taken()  # (something else there: not Relay)
     if moved:
         if "port" in changes:
@@ -202,6 +205,9 @@ def _change(changes: dict, removed: tuple[str, ...]) -> int:
     if "strategy" in changes:
         _move(wanted)
     if service.status() is None:
+        if (pid := service.process()) is not None:
+            print(f"saved; {service.unreachable(pid)}", file=sys.stderr)
+            return 1
         print(f"saved; Relay is not running (`relay setup <harness>` starts it)")
         return 0
     if AT_START & {*changes, *removed} and service.record():
@@ -247,9 +253,13 @@ def _move(strategy: str) -> None:
 
 def _status() -> int:
     now, entry = service.status(), service.record()
-    print(f"Relay: {'running at ' + service.address() + ', strategy ' + now['strategy'] if now else 'not running'}")
-    kept = {"process": f"a process of its own (pid {entry.get('pid')})", "systemd": "a systemd user service",
-            "launchd": "a launchd agent"}
+    pid = service.process() if now is None else None
+    if now:
+        print(f"Relay: running at {service.address()}, strategy {now['strategy']}")
+    else:
+        print(f"Relay: unreachable. {service.unreachable(pid)}" if pid else "Relay: not running")
+    kept = {"process": f"a process of its own (pid {entry.get('pid')}{'' if now or pid else ', not running'})",
+            "systemd": "a systemd user service", "launchd": "a launchd agent"}
     print(f"kept running by: {kept.get(entry.get('manager'), 'nothing (started by hand?)')}")
     _settle()
     departing = leaving.leaving()
@@ -271,7 +281,7 @@ def _status() -> int:
             print(f"left Relay: {name}, restored by itself {_ago(when)} (no conversation needed Relay any more); "
                   "it talks to its provider directly")
     print(f"settings: {settings.path()}")
-    return 0 if now else 1
+    return 0 if now else UNREACHABLE if pid else 1
 
 
 def _tail(path: Path, lines: int = 20) -> str:
@@ -289,7 +299,7 @@ def _install(harness: Harness, via: str, url: str, extra: list | None = None, qu
             _intercepting()
         setup = path.installation(url)
         install.install(harness.name, url, [*setup.settings, *(extra or [])])
-    except ValueError as error:
+    except (ValueError, RuntimeError) as error:
         print(f"relay install: {error}", file=sys.stderr)
         return 1
     integrations.remember(harness.name, via, path.name)

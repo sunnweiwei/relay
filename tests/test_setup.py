@@ -6,6 +6,9 @@ from __future__ import annotations
 import io
 import json
 import os
+import signal
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -336,6 +339,45 @@ class ServiceTests(unittest.TestCase):
         self.assertIn("-m relay.cli serve", unit)
         self.assertIn("Restart=always", unit)
         self.assertIn("<key>KeepAlive</key><true/>", agent)
+
+    def process(self, code: str = "import time; time.sleep(60)", *args: str) -> subprocess.Popen:
+        child = subprocess.Popen([sys.executable, "-c", code, *args])
+        self.addCleanup(lambda: (child.kill(), child.wait()))
+        time.sleep(0.3)
+        return child
+
+    def test_a_relay_whose_process_runs_but_does_not_answer_is_unreachable(self) -> None:
+        # (from a sandbox that keeps commands off the network, as Codex runs them, or stuck)
+        relay = self.process("import time; time.sleep(60)", "-m", "relay.cli", "serve")
+        with relay_settings(port=service.free_port()), mock.patch.object(service, "wait", return_value=None):
+            service._remember({"manager": "process", "pid": relay.pid})
+            self.assertEqual(service.process(), relay.pid)
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(cli._status(), cli.UNREACHABLE)
+            self.assertIn(f"Relay: unreachable. Relay's process {relay.pid} runs, but does not answer", out.getvalue())
+            with self.assertRaisesRegex(RuntimeError, "end process"):  # not started again over it
+                service.ensure()
+            self.assertIsNone(relay.poll())
+            err = io.StringIO()
+            with redirect_stderr(err):
+                self.assertEqual(cli._change({"strategy": "folding"}, ()), 1)
+            self.assertIn("saved; Relay's process", err.getvalue())
+            # Its pid taken by another process since: not running.
+            other = self.process()
+            service._remember({"manager": "process", "pid": other.pid})
+            self.assertIsNone(service.process())
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(cli._status(), 1)
+
+    def test_a_relay_that_does_not_stop_when_asked_is_made_to(self) -> None:
+        # (one waiting on requests that stay open holds the HTTPS proxy's port)
+        relay = self.process("import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
+                             "-m", "relay.cli", "serve")
+        with relay_settings(), mock.patch.object(service, "STOPPING", 0.5):
+            service._remember({"manager": "process", "pid": relay.pid})
+            service.stop_process()
+        self.assertEqual(relay.wait(timeout=5), -signal.SIGKILL)
 
 
 if __name__ == "__main__":
