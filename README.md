@@ -652,6 +652,33 @@ Gemini was overloaded during much of it, answering 503s; failed pairs were run a
   another run its `read_file` answered a repeated read with "File unchanged since last read",
   pointing at content MEM1 had removed); pi on Gemini met Gemini's 503s.
 
+## Moving a conversation between harnesses
+
+`relay transfer <harness> <session> --to <harness>` (Claude Code and Codex so far) writes a
+conversation one harness recorded as a session of the other's own, which `claude --resume` or
+`codex resume` goes on with. It is apart from context management, which it neither uses nor
+changes. Each harness's record and tools are mapped to and from one standard space
+(`relay/transfer/__init__.py`), never to another harness's: a conversation of messages, each
+assistant message's tool calls with their results, and three standard tools, `shell`, `read` and
+`change` (files added, updated by hunks, exact edits or whole text, moved or deleted). A harness's
+module (`relay/transfer/claude_code.py`, `codex.py`) reads its session files into that space, using
+its codec and its profile so that what the harness wrote itself stays behind, and writes a
+session from it as the harness writes its own: Claude Code's chain of entries with each tool's
+`toolUseResult`, Codex's rollout with its interface's turns of items. Each result is written as the
+tool reports one (Claude Code's "The file … has been updated successfully.", Codex's
+`Chunk ID … Process exited with code N … Output:` and apply_patch's report); a call without a
+counterpart is written as text. Read: the conversation from the harness's latest compaction on (its
+summary first), its latest branch (Claude Code), the calls of one response together, Codex's
+code-mode scripts that make one call as that call; reasoning is not moved (encrypted or signed for
+its own model).
+
+Checked (tests/test_transfer_e2e.py, with Claude Code 2.1.309 and 2.1.312 and Codex 0.165 through a
+fake upstream): a session each recorded running every kind of call it has (reads, an edit and a
+new file, a failing command, an image), moved to the other, is resumed by it, and its next request
+carries the conversation as the other's own calls and results; both interfaces show it as they show
+their own (Codex's turns of items, Claude Code's edits with their diffs). Not yet checked with real
+models.
+
 ## Configuration
 
 Relay's settings live in `~/.config/relay/settings.json`, written by `relay setup`, `relay strategy`
