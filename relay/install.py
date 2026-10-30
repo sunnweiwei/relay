@@ -41,6 +41,8 @@ def install(name: str, relay_url: str, settings: list[Setting]) -> None:
     records = []
     for index, setting in enumerate(settings):
         record: dict[str, Any] = {"path": str(setting.path), "key": list(setting.key)}
+        if setting.key and not setting.path.exists():
+            record["created"] = True  # (uninstall removes it, once nothing is left in it)
 
         def value(previous: Any, setting: Setting = setting, record: dict[str, Any] = record) -> Any:
             if setting.endpoint is None:
@@ -77,7 +79,9 @@ def uninstall(name: str) -> list[Path]:
     if records is None:
         raise ValueError(f"{name} is not installed")
     for record in reversed(records):
-        edit(Path(record["path"]), tuple(record["key"]), record["previous"])
+        edit(path := Path(record["path"]), tuple(record["key"]), record["previous"])
+        if record.get("created") and path.read_text(encoding="utf-8").strip() in ("", "{}", "[]"):
+            path.unlink()  # (a file left empty may not be one the harness reads: DeepSeek Harness's patches)
     _save(state)
     return [Path(record["path"]) for record in records]
 

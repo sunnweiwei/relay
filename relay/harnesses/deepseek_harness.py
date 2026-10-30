@@ -1,9 +1,11 @@
-"""DeepSeek Harness (`dsh`); providers are plugin entries in the home-level cordis.patch.yml.
+"""DeepSeek Harness (`dsh`); providers are plugin entries in its cordis.patch.yml layers.
 
 The DeepSeek route takes a `baseURL` (its DEEPSEEK_BASE_URL may only be exported, never
 written to a file). Of the pi-ai routes (OpenAI, Google, Anthropic, gateways) only those the
-user already declared are wrapped: a patch replaces a plugin's whole config, so adding a
-pi-ai entry could hide routes configured in other layers.
+user already declared are wrapped, where they are declared: in the home-level patch, or in a
+profile's own (`$DSH_HOME/profiles/<name>/cordis.patch.yml`; the Desktop's is its `desktop`
+profile), which the home-level one comes after. A layer's entry replaces a plugin's whole config,
+so adding a pi-ai entry could hide routes configured in other layers.
 """
 
 from __future__ import annotations
@@ -89,11 +91,12 @@ class DeepSeekHarness(Harness):
     # No `starter`: its hooks (through its Claude Code hooks bridge) run in its sandbox, where
     # nothing can start Relay.
     def settings(self) -> list[Setting]:
-        patch = Path(os.getenv("DSH_HOME", "~/.dsh")).expanduser() / "cordis.patch.yml"
+        home = Path(os.getenv("DSH_HOME", "~/.dsh")).expanduser()
+        patch, profiles = home / "cordis.patch.yml", sorted(home.glob("profiles/*/cordis.patch.yml"))
         deepseek = os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com/anthropic"
         return [Setting(patch, DEEPSEEK, endpoint=deepseek)] + [
-            Setting(patch, (*ROUTES, route, "baseURL"), endpoint=DEFAULTS.get(route, ""))
-            for route in yaml_keys(patch, ROUTES)
+            Setting(layer, (*ROUTES, route, "baseURL"), endpoint=DEFAULTS.get(route, ""))
+            for layer in (patch, *profiles) for route in yaml_keys(layer, ROUTES)
         ] + [
             Setting(patch, ("[id=compaction-basic]", "config", "auto"), False),
             # It trims old tool results in place under token pressure.
