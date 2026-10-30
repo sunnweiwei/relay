@@ -165,6 +165,15 @@ While a harness points at Relay, it reaches its model only through Relay. If a m
 fails because nothing answers at Relay's address, run `relay start`. If that does not help, read
 the log (`~/.config/relay/relay.log`), or `relay uninstall` the harness.
 
+`relay status` says one of three things (and exits with 0, 3 or 1):
+
+- **running**: Relay answers, with its strategy.
+- **unreachable**: Relay's process runs but does not answer from where the command ran. A sandbox
+  that keeps commands off the network (Codex runs commands in one) does that: run it outside the
+  sandbox. If Relay does not answer there either, it is stuck: end the process it names, then run
+  `relay start`. `relay start`, `relay setup` and `relay set` never restart an unreachable Relay.
+- **not running**: no Relay process; `relay start` starts it.
+
 Going back to the harness on its own: `relay uninstall <harness>` (there is no stopping Relay by
 hand: a harness still pointed at it would fail), not changing its endpoint by hand (its own
 auto-compaction would stay off).

@@ -9,6 +9,11 @@ returns at once while Relay answers and starts it otherwise, so a machine's rest
 nothing. `relay setup --autostart` registers Relay with the system's service manager instead
 (a systemd user unit on Linux, a launchd agent on macOS), which starts it at login and again if it
 exits. What runs it is recorded in Relay's directory (`service.json`).
+
+A Relay that stops ends the requests still open after `GRACEFUL` seconds (a long stream; Remote
+Control keeps one open), and a restart makes sure the old process is gone before the new one takes
+its ports. A Relay whose process runs but does not answer is unreachable, not stopped: from a
+sandbox that keeps commands off the network (Codex's), or stuck; nothing is restarted then.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -34,6 +40,8 @@ from . import settings
 NAME = "relay"
 LABEL = "com.relay.serve"  # launchd
 PACKAGE = Path(__file__).resolve().parent.parent  # where `python -m relay.cli` finds Relay
+GRACEFUL = 3.0  # seconds a stopping Relay waits for the requests still open, then ends them
+STOPPING = GRACEFUL + 5.0  # seconds a Relay asked to stop gets before it is made to
 
 
 def command() -> list[str]:
@@ -81,6 +89,48 @@ def wait(strategy: str | None = None, seconds: float = 30.0) -> dict[str, Any] |
             return now
         time.sleep(0.3)
     return None
+
+
+def process() -> int | None:
+    """The process Relay runs as, as recorded, while it runs: whether it answers or not."""
+
+    entry = record()
+    try:
+        if entry.get("manager") == "systemd":
+            shown = subprocess.run(["systemctl", "--user", "show", "-p", "MainPID", "--value", f"{NAME}.service"],
+                                   capture_output=True, text=True).stdout.strip()
+            pid = int(shown) if shown.isdigit() else 0
+        elif entry.get("manager") == "launchd":
+            shown = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"], capture_output=True, text=True).stdout
+            pid = int(found.group(1)) if (found := re.search(r"^\s*pid = (\d+)", shown, re.M)) else 0
+        else:
+            pid = entry.get("pid") or 0
+    except OSError:
+        pid = 0
+    return pid if pid and _alive(pid) else None
+
+
+def unreachable(pid: int) -> str:
+    """What to do about a Relay whose process `pid` runs but does not answer."""
+
+    return (f"Relay's process {pid} runs, but does not answer at {address()} from here. Run in a sandbox (as Codex runs "
+            f"commands)? Run this again outside it. If Relay does not answer there either, it is stuck: end process "
+            f"{pid} (kill {pid}), then run `relay start`.")
+
+
+def _alive(pid: int) -> bool:
+    """Whether `pid` is a Relay that runs (one this process may not signal, as from a sandbox, does)."""
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    try:  # (and not another process that got its pid since)
+        return command()[2].encode() in Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return True  # (no /proc: macOS)
 
 
 def manager() -> str:
@@ -176,6 +226,10 @@ def ensure(seconds: float = 20.0) -> dict[str, Any] | None:
 
     if (now := status(timeout=1.0)) is not None:
         return now
+    if (pid := process()) is not None:  # (starting, or unreachable from here)
+        if (now := wait(seconds=5)) is None:
+            raise RuntimeError(unreachable(pid))
+        return now
     entry = record()
     if entry.get("manager") in ("systemd", "launchd"):
         restart()
@@ -220,19 +274,25 @@ def release() -> str | None:
 
 
 def stop_process() -> None:
+    """The process Relay was started as, stopped: asked, then made to (one waiting on requests that
+    stay open holds the HTTPS proxy's port). RuntimeError if it cannot be."""
+
     pid = record().get("pid")
-    if not pid:
+    if not pid or not _alive(pid):
         return
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError:
-        return
-    for _ in range(50):
+    for sent, seconds in ((signal.SIGTERM, STOPPING), (signal.SIGKILL, 5.0)):
         try:
-            os.kill(pid, 0)
-        except OSError:
+            os.kill(pid, sent)
+        except ProcessLookupError:
             return
-        time.sleep(0.1)
+        except PermissionError:
+            raise RuntimeError(f"Relay's process {pid} cannot be stopped from here (a sandbox?): run this outside it")
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if not _alive(pid):
+                return
+            time.sleep(0.1)
+    raise RuntimeError(f"Relay's process {pid} did not stop")
 
 
 def _rotate(limit: int = 5 * 1024 * 1024) -> None:
