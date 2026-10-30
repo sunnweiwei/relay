@@ -198,6 +198,29 @@ conversation it names, waiting, or `--now`) rather than stopping there. The hand
 Kimi Code, DeepSeek Harness, OpenClaw and Gemini CLI compact from their TUI only, which the checks
 cannot drive; mini-swe-agent has no compaction of its own (start a new conversation).
 
+## Moving a conversation to another harness
+
+    relay transfer codex <session> --to claude     # a Codex conversation, on in Claude Code
+    relay transfer claude <session> --to codex     # and the other way
+
+`<session>` is the harness's own id for the conversation (Claude Code's is the file name in
+`~/.claude/projects/<folder>/`, Codex's the end of its `rollout-…` file name in
+`~/.codex/sessions/`), or the session file itself. The conversation is written as a session of the
+other harness's own, and the command that goes on with it is printed (`cd <dir> && claude --resume
+<id>`, or `codex resume <id>`), in the conversation's directory unless `--cwd` names another.
+Relay does not have to run, and neither harness has to be set up with it.
+
+What moves is the conversation as its model last saw it: what the user typed (and its images), the
+model's answers, and its tool calls with their results, in order, from the harness's latest
+compaction on. Each call becomes the other harness's own tool (a command, a file read, a file
+changed: Claude Code's Bash, Read, Edit and Write, Codex's commands and apply_patch), its result as
+that tool reports one, so the other harness, and its interface, show the conversation as their own.
+A call the other has no tool like (a sub-agent, an MCP tool, a plan) is written as text saying what
+was called there and what it answered. The model is told where the conversation came from and which
+tools it used there are not here (a note the harness's interface does not show), and a file change
+written as another kind of tool says which tool made it. The system prompt, instruction files and the like are each
+harness's own, and the model's reasoning stays with the model that wrote it.
+
 ## Other commands
 
     relay serve                    # run Relay in the foreground (what its daemon runs)

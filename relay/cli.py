@@ -31,6 +31,7 @@ import uvicorn
 from . import install, integrations, intercept, leaving, service, settings
 from .harnesses import HARNESSES, Harness
 from .strategies import STRATEGIES
+from .transfer import HARNESSES as MOVABLE, transfer
 from .transport import ProxyConfig, create_app
 
 PATHS = {"proxy": "the proxy", "hook": "its hook", "https": "Relay as its HTTPS proxy"}  # (as messages name them)
@@ -81,6 +82,12 @@ def main(argv: list[str] | None = None) -> int:
     install_.add_argument("--url", help="Relay's address (default: the host and port settings)")
     install_.add_argument("--via", choices=["auto", "proxy", "hook", "https"], default="auto",
                           help="integration path (default: the harness's preferred one)")
+    movable = sorted({*MOVABLE, *(alias for alias, name in ALIASES.items() if name in MOVABLE)})
+    moved = commands.add_parser("transfer", help="a conversation of one harness as a session of another's")
+    moved.add_argument("source", choices=movable)
+    moved.add_argument("session", help="the conversation's session id (or its file)")
+    moved.add_argument("--to", dest="target", required=True, choices=movable)
+    moved.add_argument("--cwd", help="the directory it goes on in (default: the conversation's own)")
     run = commands.add_parser("run", help="run a harness through a private proxy")
     run.add_argument("harness", choices=harnesses)
     run.add_argument("args", nargs=argparse.REMAINDER, help="arguments for the harness")
@@ -104,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
             return _change(changes, tuple(getattr(options, "names", ())))
         if options.command == "status":
             return _status()
+        if options.command == "transfer":
+            return _transfer(options.source, options.session, options.target, options.cwd)
         if options.command == "start":
             _settle()
             now = service.ensure()
@@ -282,6 +291,17 @@ def _status() -> int:
                   "it talks to its provider directly")
     print(f"settings: {settings.path()}")
     return 0 if now else UNREACHABLE if pid else 1
+
+
+def _transfer(source: str, session: str, target: str, cwd: str | None) -> int:
+    source, target = ALIASES.get(source, source), ALIASES.get(target, target)
+    read, written = transfer(source, session, target, cwd)
+    calls = sum(len(message.calls) for message in read.messages)
+    print(f"{source} session {read.id}: {len(read.messages)} messages, {calls} tool calls, written as {target} session "
+          f"{written.id}" + (f" ({written.notes} of the calls as text: {target} has none like them)" if written.notes else ""))
+    print(f"  {written.path}")
+    print(f"Go on with it: {written.command}")
+    return 0
 
 
 def _tail(path: Path, lines: int = 20) -> str:
