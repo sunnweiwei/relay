@@ -108,6 +108,16 @@ class InstallTests(unittest.TestCase):
             install.uninstall("deepseek_harness")
         for name, text in files.items():
             self.assertEqual((self.root / name).read_text(), text, name)
+        self.assertFalse((self.root / "dsh/cordis.patch.yml").exists())  # (Relay made it; left empty, DSH would not start)
+
+    def test_a_file_relay_made_goes_on_uninstall_unless_something_else_is_in_it(self) -> None:
+        made, kept = self.root / "made" / "settings.json", self.root / "kept" / "settings.json"
+        install.install("a", "http://relay", [Setting(made, ("env", "X"), "1"), Setting(made, ("env", "Y"), "2"),
+                                              Setting(kept, ("env", "X"), "1")])
+        kept.write_text(json.dumps({**json.loads(kept.read_text()), "theme": "dark"}))  # (the harness's own, since)
+        install.uninstall("a")
+        self.assertFalse(made.exists())
+        self.assertEqual(json.loads(kept.read_text()), {"theme": "dark"})
 
     def test_nested_yaml_and_list_items(self) -> None:
         patch_file = self.root / "cordis.patch.yml"

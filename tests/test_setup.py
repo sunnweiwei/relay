@@ -115,7 +115,7 @@ class SetupTests(unittest.TestCase):
             code, out = self.run_cli("uninstall", "--all")
         self.assertEqual((code, install.installed(), released), (0, [], [1]))
         self.assertIn("no longer started at login", out)
-        self.assertNotIn("relay start", json.dumps(json.loads((claude / "settings.json").read_text())))  # (its hook went)
+        self.assertFalse((claude / "settings.json").exists())  # (its hook went, and the file Relay made with it)
         with self.assertRaises(SystemExit):
             self.run_cli("stop")  # (there is no stopping Relay: uninstalling is going back)
 
@@ -251,7 +251,7 @@ class SetupTests(unittest.TestCase):
             code, out = self.run_cli("status")
             self.assertIn("harnesses set up: claude_code (hook)", out)
             code, out = self.run_cli("uninstall", "claude")
-            self.assertEqual(config().get("env", {}), {})
+            self.assertFalse((claude / "settings.json").exists())  # (Relay made it: nothing of the user's in it)
 
     def test_settings_read_at_start_restart_the_service(self) -> None:
         with mock.patch.object(service, "status", return_value={"strategy": "compaction"}), \
