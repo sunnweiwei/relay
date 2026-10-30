@@ -91,6 +91,24 @@ class InstallTests(unittest.TestCase):
         for name, text in files.items():
             self.assertEqual((self.root / name).read_text(), text, name)
 
+    def test_deepseek_harness_routes_declared_in_a_profile_are_wrapped_there(self) -> None:
+        # (reported: the Desktop's OpenAI route is in its `desktop` profile's own patch)
+        desktop = "- id: llm-pi-ai\n  config:\n    providers:\n      openai:\n        apiKeyEnv: OPENAI_API_KEY\n"
+        files = {"dsh/profiles/desktop/cordis.patch.yml": desktop, "dsh/profiles/tui/cordis.patch.yml": "[]\n"}
+        for name, text in files.items():
+            (self.root / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / name).write_text(text)
+        routes = ("[id=llm-pi-ai]", "config", "providers")
+        with patch.dict(os.environ, {"DSH_HOME": str(self.root / "dsh")}):
+            install.install("deepseek_harness", "http://127.0.0.1:8787", HARNESSES["deepseek_harness"].settings())
+            wrapped = install.read(self.root / "dsh/profiles/desktop/cordis.patch.yml", (*routes, "openai", "baseURL"))
+            self.assertRegex(wrapped, r"^http://127\.0\.0\.1:8787/up/deepseek_harness-\d+/v1$")
+            self.assertNotIn("llm-pi-ai", (self.root / "dsh/cordis.patch.yml").read_text())  # (it would hide the profile's)
+            self.assertEqual(install.mounts()[wrapped.split("8787")[1].rsplit("/v1", 1)[0]], "https://api.openai.com")
+            install.uninstall("deepseek_harness")
+        for name, text in files.items():
+            self.assertEqual((self.root / name).read_text(), text, name)
+
     def test_nested_yaml_and_list_items(self) -> None:
         patch_file = self.root / "cordis.patch.yml"
         text = (
