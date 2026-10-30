@@ -162,6 +162,8 @@ def _apply(text: str, suffix: str, key: tuple[str, ...], value: Callable[[Any], 
         if (new := value(previous)) is not None:
             line = f"{name} = {_toml(new)}" if toml else f"{name}={new}"
             lines.insert(end if index is None else index, line)
+        if toml:
+            _toml_tidy(lines, table)
         text = "\n".join(lines) + "\n"
     return text, previous
 
@@ -315,18 +317,54 @@ def _yaml_key(line: str) -> str:
 
 
 def _toml_region(lines: list[str], table: list[str]) -> tuple[int, int]:
-    """Line range holding a table's keys (top level: before the first header).
-    A missing table is appended to `lines`."""
+    """Line range holding a table's keys (top level: before the first header), the table found by
+    its name however it is quoted. A missing table is appended to `lines`, its name quoted where
+    it is no bare key (`[models."luna/gpt-6-luna"]`). The header Relay once wrote unquoted (not
+    TOML) comes first: what Relay set is there, and goes with it (`_toml_tidy`)."""
 
     headers = [i for i, line in enumerate(lines) if line.lstrip().startswith("[")]
     if not table:
         return 0, headers[0] if headers else len(lines)
-    header = f"[{'.'.join(table)}]"
-    start = next((i + 1 for i in headers if lines[i].strip() == header), None)
+    start = next((i + 1 for i in headers if lines[i].strip() == f"[{'.'.join(table)}]"), None)
+    start = start or next((i + 1 for i in headers if _toml_header(lines[i]) == table), None)
     if start is None:
-        lines += ["", header]
+        lines += ["", f"[{'.'.join(map(_toml_key, table))}]"]
         return len(lines), len(lines)
     return start, next((i for i in headers if i >= start), len(lines))
+
+
+def _toml_tidy(lines: list[str], table: list[str]) -> None:
+    """The table's header Relay once wrote unquoted (not TOML) gone, once nothing is left under it."""
+
+    legacy = f"[{'.'.join(table)}]"
+    if not table or legacy == f"[{'.'.join(map(_toml_key, table))}]":
+        return
+    start = next((i for i, line in enumerate(lines) if line.strip() == legacy), None)
+    if start is None:
+        return
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].lstrip().startswith("[")), len(lines))
+    if not any(line.strip() for line in lines[start + 1:end]):
+        if start and not lines[start - 1].strip():
+            start -= 1  # (the blank line written before it)
+        del lines[start:end]
+
+
+def _toml_header(line: str) -> list[str] | None:
+    """The name of the table a header line opens (None for an array of tables, or no header)."""
+
+    try:
+        node: Any = tomllib.loads(line.strip())
+    except tomllib.TOMLDecodeError:
+        return None
+    names = []
+    while isinstance(node, dict) and len(node) == 1:
+        (name, node), = node.items()
+        names.append(name)
+    return names if node == {} else None
+
+
+def _toml_key(name: str) -> str:
+    return name if re.fullmatch(r"[A-Za-z0-9_-]+", name) else json.dumps(name, ensure_ascii=False)
 
 
 def _toml(value: Any) -> str:
