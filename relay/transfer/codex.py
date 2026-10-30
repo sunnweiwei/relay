@@ -328,6 +328,9 @@ def _scripted(script: str) -> tuple[str, str] | None:
     if called[0] == "exec_command":
         found = re.match(r"\s*\{[^}]*?\bcmd\s*:\s*", after, re.S)
         after = after[found.end():] if found else ""
+    if (named := re.match(r"\s*([A-Za-z_$][\w$]*)\s*[,})]", after)) is not None:  # (given by name: what it was set to)
+        found = re.search(rf"\b(?:const|let|var)\s+{re.escape(named.group(1))}\s*=\s*", script)
+        after = script[found.end():] if found else ""
     literal = re.match(r'\s*(?:"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'|`((?:[^`\\$]|\\.|\$(?!\{))*)`)', after, re.S)
     if not literal:
         return None

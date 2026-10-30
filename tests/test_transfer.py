@@ -255,13 +255,16 @@ class EdgeTests(Home):
                 *script(1, 'const r = await tools.exec_command({cmd:"cat file_1.txt",workdir:"/project",max_output_tokens:3000});\n'
                            "text(r.output);\n", "file 1 text\n"),
                 *script(2, "await tools.apply_patch(`*** Begin Patch\n*** Add File: a.txt\n+a $HOME\n*** End Patch`);\n", "Done"),
-                *script(3, 'for (const f of ["a", "b"]) { text((await tools.exec_command({cmd: `cat ${f}`})).output); }', "a\nb\n")]
+                *script(3, 'for (const f of ["a", "b"]) { text((await tools.exec_command({cmd: `cat ${f}`})).output); }', "a\nb\n"),
+                *script(4, 'const p = "*** Begin Patch\\n*** Update File: notes.txt\\n@@\\n-CODE: birch\\n+CODE: cobalt\\n*** End Patch";\n'
+                           "text(await tools.apply_patch(p));\n", "{}")]  # (as GPT-6 wrote one: the patch given by name)
         path = self.root / "rollout.jsonl"
         path.write_text("".join(json.dumps(r) + "\n" for r in rows))
-        shell, patch, loop = calls(CODEX.read(path))
+        shell, patch, loop, named = calls(CODEX.read(path))
         self.assertEqual((shell.tool, shell.args, shell.output), ("shell", {"command": "cat file_1.txt"}, "file 1 text\n"))
         self.assertEqual(patch.args["files"], [{"path": "a.txt", "kind": "add", "content": "a $HOME\n"}])
         self.assertEqual((loop.tool, loop.output), ("", "a\nb\n"))  # (a script of its own: said as text)
+        self.assertEqual(named.args["files"], [{"path": "notes.txt", "kind": "update", "hunks": [["-CODE: birch", "+CODE: cobalt"]]}])
 
     def test_claude_codes_folder_for_a_directory_is_its_own(self) -> None:
         self.assertEqual(project("/tmp/x y/work").name, "-tmp-x-y-work")
