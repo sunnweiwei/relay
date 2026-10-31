@@ -959,6 +959,14 @@ folding, AgentFold, AutoCompact, selective discard, PRO-LONG, multi-granularity
 compaction) live unchanged in `relay/experimental/` until they are ported to this
 interface.
 
+## EdgeBench evaluation
+
+[The EdgeBench eval](evals/edgebench.py) runs SForge's long tasks under five
+arms: stock Codex, unmanaged context, Relay compaction, CLM, and context folding.
+Relay runs inside each task container. The driver collects scores and Codex token
+usage, prints a comparison table, and exports CSV curves. See the module docstring for setup,
+a short smoke run, pricing assumptions, and compatibility limits.
+
 ## Development
 
 ```bash
