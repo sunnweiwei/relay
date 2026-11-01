@@ -1,7 +1,8 @@
 """Codex's sessions: rollout files, `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<local time>-<id>.jsonl`
-(CODEX_HOME, else ~/.codex), one JSON entry a line: `session_meta` first, then `response_item`s (the
-conversation as its model reads it: Responses API items), `compacted` where Codex compacted it (the
-history from there on), and events for its interface (`event_msg`).
+(CODEX_HOME, else ~/.codex; `.jsonl.zst`, compressed, once a week old), one JSON entry a line:
+`session_meta` first, then `response_item`s (the conversation as its model reads it: Responses API
+items), `compacted` where Codex compacted it (the history from there on), and events for its
+interface (`event_msg`).
 
 Its tools in the standard space: exec_command and shell (shell; change where the command is
 apply_patch, which Codex runs itself), apply_patch (change), view_image (read, the image), and in
@@ -42,15 +43,22 @@ HOW = "commands, file reads (as cat or sed) and file changes (as apply_patch) as
 class _Codex:
     def find(self, session: str) -> Path:
         path = Path(session).expanduser()
-        if path.suffix == ".jsonl" and path.exists():
+        if path.name.endswith((".jsonl", ".jsonl.zst")) and path.exists():
             return path
-        found = sorted(p for folder in ("sessions", "archived_sessions") for p in (home() / folder).rglob(f"rollout-*-{session}.jsonl"))
+        # (Codex compresses a rollout a week old into `<name>.jsonl.zst`)
+        found = sorted(p for folder in ("sessions", "archived_sessions") for name in ("jsonl", "jsonl.zst")
+                       for p in (home() / folder).rglob(f"rollout-*-{session}.{name}"))
         if not found:
             raise ValueError(f"no Codex session {session} in {home() / 'sessions'}")
         return found[0]
 
     def read(self, path: Path) -> Session:
-        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        data = path.read_bytes()
+        if path.suffix == ".zst":
+            import zstandard
+
+            data = zstandard.ZstdDecompressor().decompressobj().decompress(data)
+        rows = [json.loads(line) for line in data.decode("utf-8").splitlines() if line.strip()]
         meta = next((row.get("payload") or {} for row in rows if row.get("type") == "session_meta"), {})
         history: list[tuple[dict[str, Any], str]] = []  # the items its model reads, and when each came
         for row in rows:

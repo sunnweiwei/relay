@@ -197,6 +197,17 @@ class EdgeTests(Home):
         path.write_text("".join(json.dumps(r) + "\n" for r in rows))
         return path
 
+    def test_a_codex_session_a_week_old_is_found_compressed(self) -> None:
+        import zstandard
+
+        sid = json.loads((SESSIONS / "codex-0.165.0.jsonl").read_text().splitlines()[0])["payload"]["id"]
+        folder = self.root / "codex/sessions/2026/10/20"
+        folder.mkdir(parents=True)
+        path = folder / f"rollout-2026-10-20T10-00-00-{sid}.jsonl.zst"
+        path.write_bytes(zstandard.ZstdCompressor(level=3).compress((SESSIONS / "codex-0.165.0.jsonl").read_bytes()))
+        self.assertEqual(CODEX.find(sid), path)
+        self.assertEqual(CODEX.read(path), CODEX.read(SESSIONS / "codex-0.165.0.jsonl"))
+
     def test_claude_codes_compaction_split_messages_and_calls_left_unanswered(self) -> None:
         use = lambda i, name="Bash": {"type": "tool_use", "id": i, "name": name, "input": {"command": f"echo {i}"}}  # noqa: E731
         result = lambda i: {"type": "tool_result", "tool_use_id": i, "content": i}  # noqa: E731

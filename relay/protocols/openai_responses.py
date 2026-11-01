@@ -37,8 +37,10 @@ class OpenAIResponses:
 
     def classify(self, item: WireItem) -> Item:
         kind = item.get("type", "message")
-        if kind != "message" and item.get("role") in {"system", "developer"}:
-            return Item(Kind.SYSTEM, _string(item))  # e.g. Codex's `additional_tools` declarations
+        if (kind != "message" and item.get("role") in {"system", "developer"}) or kind == "configuration_update":
+            # Declarations: Codex's and pi's `additional_tools`, and the reasoning that applies from
+            # a `configuration_update` on (until the next one).
+            return Item(Kind.SYSTEM, _string(item))
         if kind == "message":
             text, media = _content_text(item.get("content"))
             return Item(_ROLES.get(item.get("role"), Kind.OTHER), text, media=media)

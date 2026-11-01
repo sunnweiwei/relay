@@ -1,7 +1,8 @@
 """HKUDS nanobot; providers take an `apiBase` in ~/.nanobot/config.json.
 
 nanobot uses the Responses API only when the OpenAI base URL is api.openai.com, so the
-profile pins `apiType: responses` for a provider that was talking to OpenAI directly.
+profile pins it (`apiType: responses`; `api` since 0.4) for a provider that was talking to OpenAI
+directly.
 """
 
 from __future__ import annotations
@@ -32,7 +33,10 @@ class Nanobot(Harness):
         settings = [Setting(config, ("providers", name, "apiBase"), endpoint=DEFAULTS[name]) for name in names]
         openai = providers.get("openai") or {}
         if "openai" in names and "api.openai.com" in (openai.get("apiBase") or DEFAULTS["openai"]) \
-                and openai.get("apiType", "auto") == "auto":
-            settings.append(Setting(config, ("providers", "openai", "apiType"), value="responses"))
+                and openai.get("apiType", "auto") == "auto" and openai.get("api") is None:
+            # Both forms: 0.4 replaced `apiType` with `api`, which wins where both are given (0.3 ignores it).
+            settings += [Setting(config, ("providers", "openai", "apiType"), value="responses"),
+                         Setting(config, ("providers", "openai", "api"),
+                                 value={"supportedApis": ["responses"], "preferredApi": "responses"})]
         # Its checkpoints follow contextWindowTokens (0 would starve its memory archive).
         return [*settings, Setting(config, ("agents", "defaults", "contextWindowTokens"), NEVER)]

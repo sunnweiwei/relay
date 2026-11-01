@@ -27,6 +27,20 @@ REMINDER = re.compile(r"<system-reminder\b[^>]*>.*?</system-reminder>", re.S)
 NEVER = 10**9
 
 
+def declared(item: Item) -> str | None:
+    """The state a declaration the harness sent as an item of its own stands for, read whole into
+    the item's text (Responses): each set of tools it declares (`additional_tools`, which add up),
+    and its configuration (`configuration_update`, which applies until the next one)."""
+
+    if item.kind is not Kind.SYSTEM or not item.text.startswith("{"):
+        return None
+    try:
+        kind = json.loads(item.text).get("type")
+    except (ValueError, AttributeError):
+        return None
+    return {"additional_tools": "tools:" + item.text, "configuration_update": "configuration"}.get(kind)
+
+
 @dataclass(frozen=True)
 class State:
     """What the harness has told the model about its state, as it stands now: request items
@@ -146,7 +160,7 @@ class Harness:
                 pieces.append(replace(item, ref=i))
             elif item.kind is Kind.USER:  # (sent as a message of the block alone)
                 pieces += [Item(Kind.CONTEXT, block, ref=i) for block in self.blocks(item.text)]
-        keys = {n: key for n, piece in enumerate(pieces) if (key := self.state_key(piece))}
+        keys = {n: key for n, piece in enumerate(pieces) if (key := declared(piece) or self.state_key(piece))}
         latest = {key: n for n, key in sorted(keys.items())}
         chosen: list[int] = []
         for n, piece in enumerate(pieces):

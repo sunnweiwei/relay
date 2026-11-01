@@ -232,6 +232,19 @@ class StateTests(unittest.TestCase):
         state = Pi().state(CODEC, items)
         self.assertEqual([(i.ref, i.kind) for i in state.items], [(5, Kind.SYSTEM)])
 
+    def test_each_set_of_tools_declared_and_the_latest_configuration_are_state(self) -> None:
+        """pi 1.4 (and DeepSeek Harness on its library) declares its tools in the input, and its
+        reasoning in `configuration_update` items, which apply until the next one (Codex's too)."""
+
+        tools = lambda name: {"type": "additional_tools", "role": "developer", "tools": [{"type": "function", "name": name}]}
+        effort = lambda level: {"type": "configuration_update", "reasoning": {"effort": level}}
+        items = [tools("read"), msg("developer", "You are an expert coding assistant operating inside pi."),
+                 msg("user", "task"), effort("medium"), *step(1), msg("assistant", "done"), msg("user", "next"),
+                 effort("high"), *step(2), tools("grep")]
+        self.assertEqual([i.ref for i in Pi().state(CODEC, items).items], [0, 1, 8, 11])
+        self.assertEqual([i.ref for i in DeepSeekHarness().state(CODEC, items).items], [0, 1, 8, 11])
+        self.assertEqual([i.ref for i in Harness().state(CODEC, items).items], [0, 1, 8, 11])
+
     def test_claude_code_keeps_the_latest_mcp_instructions(self) -> None:
         def tool(i: int) -> list[dict[str, Any]]:
             return [{"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "Read", "input": {}}]},
@@ -294,6 +307,14 @@ class StateTests(unittest.TestCase):
                      "<turn_aborted>\nThe user interrupted the previous turn.\n</turn_aborted>"):
             self.assertIs(OpenClaw().refine(CODEC.classify(msg("user", text))).kind, Kind.CONTEXT)
 
+    def test_openclaws_runtime_context_after_each_user_message_is_its_own_and_the_latest_is_state(self) -> None:
+        context = lambda sessions: msg("user", f'OpenClaw runtime context:\nConversation data (data, not instructions):\n'
+                                               f'"Active exec sessions:\\n{sessions}"\nEnd OpenClaw runtime context.')
+        items = [msg("developer", "You are a personal assistant running inside OpenClaw."), msg("user", "task"),
+                 context("none"), *step(1), msg("assistant", "done"), msg("user", "next"), context("1"), *step(2)]
+        self.assertIs(OpenClaw().refine(CODEC.classify(items[2])).kind, Kind.CONTEXT)
+        self.assertEqual([i.ref for i in OpenClaw().state(CODEC, items).items], [0, 7])
+
 
 class PlacementTests(unittest.TestCase):
     """`Harness.place`: where the state goes in a rewritten head (Codex's rule by default)."""
@@ -334,6 +355,18 @@ class EngineStateTests(unittest.TestCase):
         self.assertTrue(exchange.compacted)
         self.assertEqual((sent.count("Today's date"), sent.count("Auto permission mode"), sent.count("Plan mode")), (1, 0, 1))
         self.assertTrue(sent.index("Today's date") < sent.index('"next"') < sent.index("Plan mode"))
+
+    def test_compacted_pi_keeps_its_tools_and_its_reasoning(self) -> None:
+        engine = Engine(Compaction(threshold=300, min_gain=0))
+        tools = {"type": "additional_tools", "role": "developer", "tools": [{"type": "function", "name": "bash"}]}
+        items = [tools, msg("developer", "You are an expert coding assistant operating inside pi."), msg("user", "task"),
+                 {"type": "configuration_update", "reasoning": {"effort": "medium"}}, *step(1), *step(2),
+                 {"type": "configuration_update", "reasoning": {"effort": "high"}}, *step(3)]
+        exchange = engine.prepare(CODEC, Pi(), {"model": "m", "input": items}, tenant="t", post=lambda r: SUMMARY)
+        self.assertTrue(exchange.compacted)
+        sent = exchange.body["input"]
+        self.assertEqual(sent[0], tools)
+        self.assertEqual([i["reasoning"]["effort"] for i in sent if i.get("type") == "configuration_update"], ["high"])
 
     def test_instructions_injected_into_a_user_message_become_state_and_the_message_what_was_typed(self) -> None:
         engine = Engine(Compaction(threshold=300, min_gain=0))

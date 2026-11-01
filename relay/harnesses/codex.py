@@ -136,9 +136,14 @@ class Codex(Harness):
         def kept(index: int, kind: Kind) -> Item:
             return replace(self.refine(codec.classify(items[index])), ref=index, kind=kind)
 
+        # A reasoning effort changed mid-conversation applies until the next change. (Codex,
+        # compacting itself, drops it and sends the effort with its requests; behind Relay its
+        # requests keep the effort they started with.)
+        configured = [index for index, item in enumerate(items) if item.get("type") == "configuration_update"]
         return State(
             (
                 *(kept(index, Kind.SYSTEM) for index in rendering.pinned),
+                *(kept(index, Kind.SYSTEM) for index in configured[-1:]),
                 *(kept(part, Kind.CONTEXT) if isinstance(part, int)
                   else Item(Kind.CONTEXT, codec.classify(part).text, wire=json.dumps(part, ensure_ascii=False))
                   for part in rendering.context),

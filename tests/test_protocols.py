@@ -8,7 +8,7 @@ from pathlib import Path
 
 from relay.core.ir import Item, Kind, Media
 from relay.core.tokens import bytes_per_token, item_tokens
-from relay.harnesses import ClaudeCode, Codex, detect
+from relay.harnesses import HARNESSES, ClaudeCode, Codex, detect
 from relay.protocols import AnthropicMessages, Gemini, MessageParts, OpenAIChat, OpenAIResponses
 
 TRACES = Path(__file__).parent / "traces"
@@ -36,6 +36,15 @@ class RecordedTraceTests(unittest.TestCase):
     def test_harness_is_detected_from_its_user_agent(self) -> None:
         for name, _, harness, _ in self.cases:
             self.assertIs(type(detect({"user-agent": load(name)["user_agent"]})), type(harness))
+
+    def test_the_release_in_the_user_agent(self) -> None:
+        for agent, name, release in (
+            ("opencode/1.19.5 (linux 5.15.0; x64) ai-sdk/provider-utils/4.0.40", "opencode", "1.19.5"),
+            ("opencode/latest/2.2.5/cli", "opencode", "2.2.5"),  # OpenCode 2
+            ("pi/1.4.0 (linux; node/v24.22.2; x64)", "pi", "1.4.0"),
+            ("pi (linux 5.15.0; x64)", "pi", None),  # (before 1.4)
+        ):
+            self.assertEqual(HARNESSES[name].version({"user-agent": agent}), release, agent)
 
     def test_codex_context_and_user_messages(self) -> None:
         codec, harness = OpenAIResponses(), Codex()
