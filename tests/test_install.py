@@ -91,6 +91,23 @@ class InstallTests(unittest.TestCase):
         for name, text in files.items():
             self.assertEqual((self.root / name).read_text(), text, name)
 
+    def test_goose_s_token_limit_and_nanobot_s_api_in_both_forms(self) -> None:
+        goose, nanobot = self.root / "xdg/goose/config.yaml", self.root / "home/.nanobot/config.json"
+        for path, text in ((goose, "GOOSE_PROVIDER: openai\n"), (nanobot, '{"providers": {"openai": {"apiKey": "k"}}}\n')):
+            path.parent.mkdir(parents=True)
+            path.write_text(text)
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.root / "xdg"), "HOME": str(self.root / "home")}):
+            for name in ("goose", "nanobot"):
+                install.install(name, "http://127.0.0.1:8787", HARNESSES[name].settings())
+            self.assertIn("GOOSE_AUTO_COMPACT_THRESHOLD: 0.99\nGOOSE_AUTO_COMPACT_TOKEN_LIMIT: 1000000000\n", goose.read_text())
+            openai = json.loads(nanobot.read_text())["providers"]["openai"]
+            self.assertEqual((openai["apiType"], openai["api"]),
+                             ("responses", {"supportedApis": ["responses"], "preferredApi": "responses"}))
+            for name in ("goose", "nanobot"):
+                install.uninstall(name)
+        self.assertEqual(goose.read_text(), "GOOSE_PROVIDER: openai\n")
+        self.assertEqual(json.loads(nanobot.read_text()), {"providers": {"openai": {"apiKey": "k"}}})
+
     def test_deepseek_harness_routes_declared_in_a_profile_are_wrapped_there(self) -> None:
         # (reported: the Desktop's OpenAI route is in its `desktop` profile's own patch)
         desktop = "- id: llm-pi-ai\n  config:\n    providers:\n      openai:\n        apiKeyEnv: OPENAI_API_KEY\n"

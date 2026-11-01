@@ -1,4 +1,5 @@
-"""OpenCode (anomalyco/opencode), built on the AI SDK."""
+"""OpenCode (anomalyco/opencode), built on the AI SDK. OpenCode 2 (`@opencode/cli`) reads OpenCode 1's
+settings too, but loads plugins of another kind, so Relay's plugin does not start Relay there."""
 
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ NUDGE = "Continue if you have next steps, or stop and ask for clarification if y
 class OpenCode(Harness):
     name = "opencode"
     verified = "1.19.0"
-    agent = re.compile(r"\bopencode/(\d[\w.-]*)")
+    agent = re.compile(r"\bopencode/(?:\w+/)?(\d[\w.-]*)")  # (OpenCode 2: `opencode/<channel>/<release>/cli`)
     config_file = "opencode/opencode.json"
     summaries = (QUESTION,)
 

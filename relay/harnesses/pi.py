@@ -22,6 +22,7 @@ SUMMARIES = ("The conversation history before this point was compacted into the 
 class Pi(Harness):
     name = "pi"
     verified = "1.1.0"
+    agent = re.compile(r"^pi/(\d[\w.-]*)")  # (since 1.4)
     summaries = SUMMARIES
 
     def state_key(self, item: Item) -> str | None:

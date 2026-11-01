@@ -78,6 +78,14 @@ class RebuildRuleTests(unittest.TestCase):
         context = rebuild(START)
         self.assertEqual((context.pinned, context.context), ((0, 1), (2, 3)))
 
+    def test_the_latest_reasoning_change_stays_with_the_prefix(self) -> None:
+        effort = lambda level: {"type": "configuration_update", "reasoning": {"effort": level}}
+        items = [*START, msg("assistant", "done"), msg("user", "harder"), effort("high"), CALL, OUTPUT,
+                 msg("user", "easier"), effort("low")]
+        state = Codex().state(OpenAIResponses(), items)
+        self.assertEqual([(i.ref, i.kind.value) for i in state.items], [(0, "system"), (1, "system"), (13, "system"),
+                                                                        (2, "context"), (3, "context")])
+
     def test_latest_section_update_replaces_it_in_place(self) -> None:
         moved = "<environment_context>\n  <cwd>/b</cwd>\n</environment_context>"
         plan = "<collaboration_mode>plan</collaboration_mode>"

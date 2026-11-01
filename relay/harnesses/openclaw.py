@@ -20,6 +20,9 @@ DEFAULTS = {  # provider -> (default endpoint, native request adapter)
 
 
 INTERNAL_CONTEXT = "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>"
+# Since 2026.10, the context of the turn (sessions, subagents, media tasks) in a user message of
+# its own on all but native endpoints (Relay's too), kept after the user message it goes with.
+RUNTIME_CONTEXT = "OpenClaw runtime context"
 # Messages it sends the model as the user would (`sendCustomMessage`): a check that a saved plan
 # still has steps left, a tool call cut off at the output limit, a turn the user interrupted.
 NOTICES = ("This run’s latest successfully saved plan", "Runtime notice: The tool call", "<turn_aborted>")
@@ -32,9 +35,12 @@ class OpenClaw(Harness):
 
     def refine(self, item: Item) -> Item:
         # Its internal-context message (sessions, subagents) follows each user message: OpenClaw's.
-        if item.kind is Kind.USER and item.text.lstrip().startswith((INTERNAL_CONTEXT, *NOTICES)):
+        if item.kind is Kind.USER and item.text.lstrip().startswith((INTERNAL_CONTEXT, RUNTIME_CONTEXT, *NOTICES)):
             return replace(item, kind=Kind.CONTEXT)
         return super().refine(item)
+
+    def state_key(self, item: Item) -> str | None:
+        return "runtime" if item.kind is Kind.CONTEXT and item.text.lstrip().startswith(RUNTIME_CONTEXT) else None
 
     def volatile(self, item: Item) -> bool:
         # Some versions append a fresh internal-context message to every request instead and drop

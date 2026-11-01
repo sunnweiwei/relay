@@ -32,7 +32,7 @@ relay help                         # the guide, for people and for agents settin
 `--autostart` makes it a systemd user unit or launchd agent instead), and once Relay answers,
 points the harness at it. Where the harness runs a command before its first model request (a
 session-start or prompt hook, an extension or a plugin: Claude Code, WorkBuddy, Gemini CLI, Kimi
-Code, pi, OpenCode, Kilo, Hermes), setup adds one that runs `relay start`, so
+Code, pi, OpenCode 1, Kilo, Hermes), setup adds one that runs `relay start`, so
 Relay starts again whenever it is needed; the hook only keeps Relay running and never sees the
 conversation, which still goes through the proxy. A harness reads its configuration as a conversation starts: conversations
 started after `relay setup` go through Relay; one already open goes on as it was. Once a harness
@@ -57,13 +57,13 @@ values are recorded in `~/.config/relay/installed.json` for `relay uninstall`.
 | Claude Code | `env.ANTHROPIC_BASE_URL` in `~/.claude/settings.json` |
 | Gemini CLI | `GOOGLE_GEMINI_BASE_URL` in `~/.gemini/.env` (API-key mode) |
 | pi | `providers.{openai,anthropic,google}.baseUrl` in `~/.pi/agent/models.json` |
-| OpenCode / Kilo | `provider.{openai,anthropic,google}.options.baseURL` in `opencode.json` / `kilo/config.json`, plus `compaction.prune = false` |
+| OpenCode / Kilo | `provider.{openai,anthropic,google}.options.baseURL` in `opencode.json` / `kilo/config.json`, plus `compaction.prune = false` (OpenCode 2, `@opencode/cli`, reads these too) |
 | Crush | `providers.<id>.base_url` in `~/.config/crush/crush.json` |
 | OpenClaw | `models.providers.{openai,anthropic,google}.baseUrl` in `~/.openclaw/openclaw.json` |
 | Kimi Code | `providers.<id>.base_url` in `~/.kimi-code/config.toml` |
-| Goose | `OPENAI_HOST` / `ANTHROPIC_HOST` / `GOOGLE_HOST` in `~/.config/goose/config.yaml` |
+| Goose | `OPENAI_HOST` / `ANTHROPIC_HOST` / `GOOGLE_HOST` in `~/.config/goose/config.yaml`, plus `GOOSE_AUTO_COMPACT_THRESHOLD` and (1.56) `GOOSE_AUTO_COMPACT_TOKEN_LIMIT` out of reach |
 | Hermes Agent | `model.base_url` in `~/.hermes/config.yaml`, plus the protocol Hermes would have picked from the original host (`api_mode: codex_responses` for api.openai.com; Gemini's OpenAI-compatible endpoint for Google) |
-| nanobot | `providers.{openai,gemini,anthropic}.apiBase` in `~/.nanobot/config.json`, plus `apiType: responses` for a provider that was talking to api.openai.com |
+| nanobot | `providers.{openai,gemini,anthropic}.apiBase` in `~/.nanobot/config.json`, plus `apiType: responses` and (0.4) `api: {supportedApis: [responses]}` for a provider that was talking to api.openai.com |
 | DeepSeek Harness | `llm-deepseek` `baseURL` and existing `llm-pi-ai` routes in `~/.dsh/cordis.patch.yml` |
 | WorkBuddy / CodeBuddy Code | `url` of each custom model in `~/.workbuddy/models.json` / `~/.codebuddy/models.json` |
 | mini-swe-agent | `OPENAI_BASE_URL` / `GEMINI_API_BASE` / `ANTHROPIC_BASE_URL` in its global `.env` (read by litellm) |
@@ -80,7 +80,7 @@ re-run (`tests/docker/features.py`, `check.py`). A final release after a checked
 | Codex | `codex` | 0.162.0–0.163.0 | yes |
 | Claude Code | `claude_code` | 2.1.294 | yes |
 | Gemini CLI | `gemini_cli` | 0.63.0 | yes |
-| pi | `pi` | 1.1.0 | no |
+| pi | `pi` | 1.1.0 | since 1.4 |
 | OpenCode | `opencode` | 1.19.0 | yes |
 | Kilo | `kilo` | 7.8.8 | yes |
 | Crush | `crush` | 0.98.1 | yes |
@@ -383,7 +383,8 @@ context to describe the session as it is now:
 | --- | --- | --- |
 | Fields sent with every request (top-level system prompt, instructions, tools) | Hermes Agent, nanobot, mini-swe-agent; Claude Code's and Gemini CLI's system prompts | Nothing to do: these are forwarded as sent. |
 | A first message re-rendered in place | OpenCode, Kilo, Crush, OpenClaw, Goose (system message with AGENTS.md / SOUL.md / `.goosehints`); Gemini CLI (`<session_context>` in the first user message); WorkBuddy (rules and memory in the first user message) | Prefix matching compares those items by position and user messages without the injected blocks (`Harness.identity`), so the compaction survives the change; the current version is what gets forwarded. Blocks in a user message are state of their own after a compaction (the message keeps what the user wrote). |
-| Updates appended to the history | Codex (world-state sections); pi (a new system prompt on resume); Kimi Code (date and mode reminders); DeepSeek Harness (runtime snapshots, changed instruction files); Claude Code (CLAUDE.md and the instruction files re-read since, in user messages; the environment, agents and MCP instructions as a system message); Crush (todo reminders) | The profile re-renders the initial context at compaction: Codex merges its section updates like Codex does; the others name each piece of state (`Harness.state_key`) and the latest version of each is re-injected, wherever it came (Claude Code re-injects its own below the summary of its own compaction). |
+| Updates appended to the history | Codex (world-state sections); pi (a new system prompt on resume); OpenClaw 2026.10 (its runtime context after each user message); Kimi Code (date and mode reminders); DeepSeek Harness (runtime snapshots, changed instruction files); Claude Code (CLAUDE.md and the instruction files re-read since, in user messages; the environment, agents and MCP instructions as a system message); Crush (todo reminders) | The profile re-renders the initial context at compaction: Codex merges its section updates like Codex does; the others name each piece of state (`Harness.state_key`) and the latest version of each is re-injected, wherever it came (Claude Code re-injects its own below the summary of its own compaction). |
+| Declarations in the input (Responses) | pi 1.4 and DeepSeek Harness (its tools, in `additional_tools` items); pi, DeepSeek Harness and Codex 0.165 (the reasoning effort, in `configuration_update` items, which apply until the next one) | State like the rest: each set of tools declared is kept, and the latest configuration. |
 
 Notifications (background tasks finishing, a sub-agent's report, OpenClaw's reminder of an
 unfinished plan) are events, not state, and are left to the summary. A harness's own
@@ -674,10 +675,11 @@ calls are written here and which tools it used there are not here; a call writte
 of tool (a patch as edits, an edit as a patch) says in its result which tool made it there; a call
 without a counterpart is written as text saying it was made there, with a tool not here. Read: the conversation from the harness's latest compaction on (its
 summary first), its latest branch (Claude Code), the calls of one response together, Codex's
-code-mode scripts that make one call as that call; reasoning is not moved (encrypted or signed for
+code-mode scripts that make one call as that call, its rollouts compressed once a week old (`.jsonl.zst`);
+reasoning is not moved (encrypted or signed for
 its own model).
 
-Checked (tests/test_transfer_e2e.py, with Claude Code 2.1.309 and 2.1.312 and Codex 0.165 through a
+Checked (tests/test_transfer_e2e.py, with Claude Code 2.1.309, 2.1.312 and 2.1.316 and Codex 0.165 and 0.166 through a
 fake upstream): a session each recorded running every kind of call it has (reads, an edit and a
 new file, a failing command, an image), moved to the other, is resumed by it, and its next request
 carries the conversation as the other's own calls and results; both interfaces show it as they show
@@ -814,7 +816,9 @@ different history, so Relay summarizes it again.
 
 Hermes Agent and nanobot choose their protocol from the endpoint's host name, which is why
 `relay install` pins it for them. Hermes ignores Anthropic endpoints on hosts it does not
-recognize, so its native Anthropic provider is not supported. DeepSeek models on DeepSeek
+recognize, so its native Anthropic provider is not supported; and on Gemini's OpenAI-compatible endpoint
+(Relay's address does not name Google) Hermes 0.22 sends Gemini's native `thinking_config` with a
+request that sets reasoning, its session titles' for one, which Gemini refuses. DeepSeek models on DeepSeek
 Harness were not checked (no key), but use the same Messages codec as Claude Code.
 
 Cursor, Windsurf, Amp and similar products route model requests through their own

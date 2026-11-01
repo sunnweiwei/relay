@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from ..install import Setting
-from .base import Harness
+from .base import NEVER, Harness
 
 DEFAULTS = {
     "OPENAI_HOST": "https://api.openai.com",
@@ -24,4 +24,6 @@ class Goose(Harness):
         config = Path(os.getenv("XDG_CONFIG_HOME", "~/.config")).expanduser() / "goose/config.yaml"
         return [*(Setting(config, (key,), endpoint=url) for key, url in DEFAULTS.items()),
                 # No switch, and values outside (0, 1) may mean the default: the window's edge.
-                Setting(config, ("GOOSE_AUTO_COMPACT_THRESHOLD",), 0.99)]
+                Setting(config, ("GOOSE_AUTO_COMPACT_THRESHOLD",), 0.99),
+                # (1.56: it also compacts at this many tokens, 225k by default, if that comes first)
+                Setting(config, ("GOOSE_AUTO_COMPACT_TOKEN_LIMIT",), NEVER)]

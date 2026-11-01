@@ -16,6 +16,7 @@ from relay import Compaction, Engine, PrefixStore, ProxyConfig, create_app
 from relay import intercept
 from relay.integrations import ClaudeCodeHook
 from relay.prompts import SUMMARY_PREFIX
+from relay.protocols import OpenAIResponses
 from relay.strategies import ContextFolding
 from tests.fakes import COMPACTION_MARKER, FINAL_TEXT, FakeUpstream, local_upstreams, serve
 
@@ -229,6 +230,39 @@ class ClaudeCodeHttpsTests(unittest.TestCase):
         self.assertFalse([r for r in requests if "thread" in r["body"]])  # (no server-side thread: Relay sees it all)
         self.assertNotIn("compact_boundary", transcript)  # (Claude Code never compacted: it saw nothing)
         self.assertNotIn(SUMMARY_PREFIX, transcript)
+
+
+class PiEndToEndTests(unittest.TestCase):
+    """pi (1.4) declares its tools and its reasoning in the input, not beside it: once compacted,
+    its requests keep both, and the model goes on calling tools."""
+
+    def test_a_compacted_request_keeps_the_tools_and_the_reasoning_pi_declared(self) -> None:
+        if shutil.which("pi") is None:
+            self.skipTest("pi is not installed")
+        fake = FakeUpstream(tool_calls=6, script=[{"name": "bash", "input": {"command": "seq 1 300"}}])
+        with serve(fake.app) as upstream, tempfile.TemporaryDirectory() as root:
+            home, work = Path(root, "home"), Path(root, "work")
+            (home / ".pi/agent").mkdir(parents=True), work.mkdir()
+            engine = Engine(Compaction(threshold=3_000), PrefixStore())
+            with serve(create_app(engine, ProxyConfig(upstreams=local_upstreams(upstream)))) as relay:
+                (home / ".pi/agent/models.json").write_text(json.dumps({"providers": {"openai": {"baseUrl": f"{relay}/v1"}}}))
+                (home / ".pi/agent/settings.json").write_text(json.dumps({"compaction": {"enabled": False}}))
+                env = {**_env(home), "OPENAI_API_KEY": "tenant"}
+                for resume in ([], ["-c"]):
+                    result = subprocess.run(["pi", *resume, "-p", "--model", "openai/gpt-6-luna", "--thinking", "high",
+                                             "List the files."], cwd=work, env=env, stdin=subprocess.DEVNULL,
+                                            capture_output=True, text=True, timeout=180)
+                    self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+                    self.assertIn(FINAL_TEXT, result.stdout)
+        bodies = fake.bodies("/v1/responses")
+        compacted = [b for b in bodies if any(SUMMARY_PREFIX in _text(i) for i in b["input"])]
+        self.assertGreater(len(compacted), 2)
+        configured = any(i.get("type") == "configuration_update" for i in bodies[0]["input"])  # (since 1.4)
+        for body in compacted:
+            self.assertTrue(OpenAIResponses().offers_tools(body))
+            if configured:
+                self.assertIn({"type": "configuration_update", "reasoning": {"effort": "high"}}, body["input"])
+        self.assertTrue(any(i.get("type") == "function_call" for b in compacted for i in b["input"]))  # (still calling tools)
 
 
 def _size(body: dict[str, Any]) -> int:
