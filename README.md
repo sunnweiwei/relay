@@ -582,6 +582,39 @@ trims old outputs itself): past the compaction threshold the conversation is com
 (`tests/docker/check.py --strategy ace`): after turn 1 the reflector and the curator ran, the
 playbook gained bullets, and every request of turn 2 carried them.
 
+## fast-jev-compaction
+
+[fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction) (`relay/strategies/jev.py`,
+MIT) compacts without summarizing: TypeSafe's Jev, a model that answers typed questions with
+probabilities and writes no text, decides which tool calls and results are still needed, and the
+rest of the conversation stays verbatim, in order. It follows the library and its Claude Code
+plugin as they are:
+
+- when the context reaches 60% of the window (the plugin's `compactAtPercent`; `compact_ratio`, or
+  the other `compaction` triggers), every tool call outside the first message and the newest six gets
+  the library's two `noul` questions: should the call stay, and should its result stay verbatim;
+- Jev's state is the whole conversation, oldest first, each result told by its size and long texts
+  abridged, shrunk in the library's stages to 25k tokens; the questions go in as many requests as fit
+  30k beside it, at once;
+- a call whose result Jev keeps (0.5 or more) stays as it is; one whose call it keeps keeps the
+  first 300 characters of its result and the library's note; the others go, with their results;
+- where Jev cannot answer (no key, an error, a history it cannot fit) or the result frees less than
+  a quarter of the context, `compaction` compacts it then, as the plugin falls back to Claude Code's
+  own summary.
+
+Relay sees a model response's calls and their results as one cut of the conversation (an Anthropic
+message holds all of a response's results), so a response's calls are kept or dropped together, as
+much as the one of them Jev keeps most; where the protocol writes the model's text (and thinking)
+in the message of its calls (Anthropic, Chat Completions, Gemini), it goes with them. A result is
+told to Jev by its size alone, without the library's `ok` or `error`, which Relay cannot tell.
+The state, the questions and their batches are the library's: run on the same conversations,
+fast-jev-compaction's own code and Relay's give the same state at each stage, the same token
+estimates and the same batches, but for the `ok` (checked against its commit e3f262a).
+
+Jev is TypeSafe's API (`relay set jev_api_key=...`, or `TYPESAFE_API_KEY`), or OpenRouter's, with
+the same requests (`jev_url`, `jev_model`; see [Configuration](#configuration)). What Jev reads (the
+conversation, results by size) goes to that service.
+
 ## The CLM paper's baselines
 
 The CLM paper compares against methods that manage context through predefined actions or a
@@ -696,14 +729,15 @@ starts, and `relay set` restarts the service for them.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `strategy` | `compaction` | The strategy: `compaction` (Codex's), `clm` (the model edits its own context), `folding` (the agent branches and returns), `prolong` (compaction, and a log the agent searches), or one of the CLM paper's baselines: `selfcompact`, `autocompact`, `acm`, `ace` (a playbook of lessons across conversations), `mem1`, `rlm`, `rlm_persistent`. |
+| `strategy` | `compaction` | The strategy: `compaction` (Codex's), `clm` (the model edits its own context), `folding` (the agent branches and returns), `prolong` (compaction, and a log the agent searches), `jev` (fast-jev-compaction: Jev deletes the tool calls and results no longer needed), or one of the CLM paper's baselines: `selfcompact`, `autocompact`, `acm`, `ace` (a playbook of lessons across conversations), `mem1`, `rlm`, `rlm_persistent`. |
 | `rlm_max_iterations`, `rlm_max_depth` | `30`, `1` | RLM: root turns per step, and recursion depth (1: sub-calls are plain model calls), the authors' defaults. |
 | `rlm_environment` | `local` | RLM: where the model's code runs; `local` is Relay's own process. |
 | `acm_dir` | `/tmp/.acm` | ACM: where the compressed messages are saved, a folder per conversation (Relay reads them back for `query_memory`). |
 | `ace_playbook` | `ace_playbook.md` in Relay's directory | ACE: the playbook's file, shared by every conversation. |
 | `prolong_log` | `/tmp/.prolong/log.jsonl` | PRO-LONG: the session log; the harness's tools must be able to read it (Relay writes a `.gitignore` next to it). |
 | `compact_threshold` | `compact_ratio` × context window | Prompt tokens that trigger compaction. |
-| `compact_ratio` | `0.9` | Share of the model's context window used when no threshold is set. |
+| `compact_ratio` | `0.9` (`jev`: `0.6`) | Share of the model's context window used when no threshold is set. |
+| `jev_api_key`, `jev_url`, `jev_model` | `TYPESAFE_API_KEY`, TypeSafe's `https://api.typesafe.ai/v1/systemone`, `jev-latest` | `jev`: where Jev answers. OpenRouter's: `jev_url=https://openrouter.ai/api/alpha/decisions`, `jev_model=~typesafe/jev-latest`, with an OpenRouter key. |
 | `compact_growth` | unset | Instead of a threshold, compact after this many tokens were added since the context window began (Codex's `BodyAfterPrefix` scope); independent of each harness's fixed prompt overhead. |
 | `context_window` | from the model name | Overrides the context window table in `relay/providers.py`. |
 | `retain_user_tokens` | `20000` | Budget for recent user messages kept verbatim. |
