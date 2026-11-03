@@ -28,10 +28,11 @@ from dataclasses import asdict, dataclass, replace
 from itertools import accumulate
 from typing import Any
 
+from .. import private
 from ..harnesses import Harness
 from ..protocols.base import Body, Codec, WireItem
 from ..prompts import SUMMARY_PREFIX
-from ..providers import context_window
+from ..providers import context_window, window_of
 from ..strategies.base import Strategy, Summarizer
 from .ir import CONTEXT_KINDS, LABELS, Context, Item, Kind, Media, Request, note
 from .store import PrefixStore
@@ -193,7 +194,7 @@ class Engine:
             tuple(map(seen, current)),
             frozenset(cut for cut in range(len(current) + 1) if position(cut) in legal),
             tokens,
-            self.window or harness.window(body.get("model")) or context_window(body.get("model")),
+            window_of(body.get("model"), self.window or harness.window(body.get("model")) or context_window(body.get("model"))),
             force,
             state.get("base"),
             state.get("strategy"),
@@ -332,8 +333,7 @@ class Engine:
         if self.event_log:
             record = {"time": time.time(), **event, **state}
             try:
-                with open(self.event_log, "a", encoding="utf-8") as stream:
-                    stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+                private.append(self.event_log, json.dumps(record, ensure_ascii=False) + "\n")
             except OSError:
                 log.warning("could not write the event log %s", self.event_log, exc_info=True)
 

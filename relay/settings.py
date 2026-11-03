@@ -15,6 +15,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from . import private
+
 _lock = Lock()
 _cache: tuple[tuple[int, int] | None, dict[str, Any]] = (None, {})
 
@@ -72,9 +74,7 @@ def save(changes: dict[str, Any], removed: tuple[str, ...] = ()) -> dict[str, An
     for name in (*removed, *(name for name, given in changes.items() if given is None)):
         settings.pop(name, None)
     path().parent.mkdir(parents=True, exist_ok=True)
-    temporary = path().with_suffix(".tmp")
-    temporary.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path())  # (a reader never sees half a file)
+    private.write(path(), json.dumps(settings, indent=2, sort_keys=True) + "\n")  # (API keys may be in it)
     return settings
 
 

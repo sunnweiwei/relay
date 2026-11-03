@@ -24,6 +24,8 @@ relay setup codex --strategy clm   # or: claude, gemini_cli, pi, opencode, kilo,
 codex                              # use the harness exactly as before
 relay strategy folding             # another strategy, for every conversation from its next request
 relay status                       # whether Relay runs, its strategy, the harnesses set up
+relay doctor                       # whether each harness really goes through Relay (a config rewritten
+                                   # by another tool, the shell's variables), and Relay to its provider
 relay uninstall codex              # restore its configuration (--all: every harness set up)
 relay help                         # the guide, for people and for agents setting Relay up
 ```
@@ -705,7 +707,7 @@ starts, and `relay set` restarts the service for them.
 | `compact_threshold` | `compact_ratio` × context window | Prompt tokens that trigger compaction. |
 | `compact_ratio` | `0.9` | Share of the model's context window used when no threshold is set. |
 | `compact_growth` | unset | Instead of a threshold, compact after this many tokens were added since the context window began (Codex's `BodyAfterPrefix` scope); independent of each harness's fixed prompt overhead. |
-| `context_window` | from the model name | Overrides the context window table in `relay/providers.py`. |
+| `context_window` | from the model name | Overrides the context window table in `relay/providers.py`. An upstream that refuses a request as too long and names its limit (`N tokens > M maximum`, `maximum context length is M`) sets the window of that model to M from then on (an account's limit below the model's). |
 | `retain_user_tokens` | `20000` | Budget for recent user messages kept verbatim. |
 | `clm_budget` | context window | CLM: the context budget the model is told about; its limit is this less `clm_reserve` (`2048`). |
 | `clm_dir` | `/tmp/.live_ctx` | CLM: where the context files live; the harness's tools must be able to edit files there (inside the workspace for a sandboxed harness; Relay writes a `.gitignore` there). |
@@ -719,6 +721,7 @@ starts, and `relay set` restarts the service for them.
 | `harness` | detected | Force a harness profile by name, e.g. `codex`, `hermes`, `generic`. |
 | `event_log` | unset | Append one JSON line per compaction (sizes, timing, the new head, and the usage of the summary requests it made). |
 | `host`, `port` | `127.0.0.1`, `8787` | Server address for `relay serve`. |
+| `allow_network` | `false` | `true` lets Relay listen on another address than this machine's (`host`); otherwise it refuses, as anyone who reaches it could use it, and the API keys in its settings. |
 | `cache_max_entries`, `cache_max_bytes`, `cache_ttl_seconds`, `cache_secret` | `4096`, 256 MiB, 6 h, random | Limits of the prefix store. |
 | `cache_path` | `~/.relay/store-<port>.json` | Where the prefix store is kept (one file per Relay process; written in the background, at most once a second, and on shutdown), so a restarted Relay finds its contexts: compactions are not recomputed and CLM edits are not lost (`off`: in memory only). The file holds summaries and strategy state (conversation text), readable by its owner only; without `cache_secret`, a secret is generated once and kept beside it. |
 
@@ -727,6 +730,13 @@ Set `context_window` to the window the harness itself uses where the table in
 (shown as 258k usable), an unknown model falls back to 128k, and the 95% limit uses the same
 window, so setting only a threshold is not enough. Relay's threshold must also stay below the
 harness's own trigger (see [Harness auto-compaction](#harness-auto-compaction)).
+
+Relay's own connections to the providers trust what the harnesses do: the system's certificate store
+(where IT puts the root of a TLS-inspecting proxy such as Zscaler; Claude Code reads it too), the
+public roots and `NODE_EXTRA_CA_CERTS`, or `SSL_CERT_FILE` alone where it is set. They send TCP
+keepalive probes after a minute of silence, so a link that died while the model was still thinking
+(a laptop changing networks) ends in about two minutes instead of waiting forever. Relay's settings
+and the logs that hold conversations (`event_log`, `trace`) are its owner's alone.
 
 Other providers are configured by endpoint, for example
 `relay set openai_base_url=https://api.x.ai/v1` for Grok, or

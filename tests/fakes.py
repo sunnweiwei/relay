@@ -151,9 +151,9 @@ class FakeUpstream:
         body = await request.json()
         self._record(request, body)
         messages = body.get("messages") or []
-        if self.max_prompt_tokens and _prompt_tokens(body) > self.max_prompt_tokens:
-            return JSONResponse({"type": "error", "error": {"type": "invalid_request_error",
-                                                            "message": "prompt is too long"}}, 400)
+        if self.max_prompt_tokens and (tokens := _prompt_tokens(body)) > self.max_prompt_tokens:
+            return JSONResponse({"type": "error", "error": {"type": "invalid_request_error", "message":
+                                 f"prompt is too long: {tokens} tokens > {self.max_prompt_tokens} maximum"}}, 400)
         turns = [_anthropic_turn(message) for message in messages]
         action, text, steps = self._decide(turns)
         if action == "error":
