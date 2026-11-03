@@ -99,6 +99,7 @@ class InstallTests(unittest.TestCase):
         with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.root / "xdg"), "HOME": str(self.root / "home")}):
             for name in ("goose", "nanobot"):
                 install.install(name, "http://127.0.0.1:8787", HARNESSES[name].settings())
+                self.assertEqual(install.drifted(name), [])  # (YAML reads its numbers back as text)
             self.assertIn("GOOSE_AUTO_COMPACT_THRESHOLD: 0.99\nGOOSE_AUTO_COMPACT_TOKEN_LIMIT: 1000000000\n", goose.read_text())
             openai = json.loads(nanobot.read_text())["providers"]["openai"]
             self.assertEqual((openai["apiType"], openai["api"]),
@@ -107,6 +108,32 @@ class InstallTests(unittest.TestCase):
                 install.uninstall(name)
         self.assertEqual(goose.read_text(), "GOOSE_PROVIDER: openai\n")
         self.assertEqual(json.loads(nanobot.read_text()), {"providers": {"openai": {"apiKey": "k"}}})
+
+    def test_a_config_another_tool_rewrote_is_found_and_pointed_back_keeping_its_new_choice(self) -> None:
+        """cc-switch rewrites Claude Code's settings.json whole as the user switches provider."""
+
+        path = self.root / "claude/settings.json"
+        path.parent.mkdir()
+        path.write_text('{"env": {"MINE": "1"}}')
+        hook = {"type": "command", "command": "relay start"}
+        relay, settings = "http://127.0.0.1:8787", [
+            Setting(path, ("env", "ANTHROPIC_BASE_URL"), endpoint="https://api.anthropic.com"),
+            Setting(path, ("env", "DISABLE_AUTO_COMPACT"), "1"), Setting(path, ("hooks", "SessionStart"), [hook])]
+        install.install("h", relay, settings)
+        data = json.loads(path.read_text())
+        data["hooks"]["SessionStart"].append({"type": "command", "command": "mine"})  # (the user's own, beside Relay's)
+        path.write_text(json.dumps(data))
+        self.assertEqual(install.drifted("h"), [])
+        switched = {"env": {"ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic", "ANTHROPIC_AUTH_TOKEN": "t"}}
+        path.write_text(json.dumps(switched))
+        self.assertEqual(sorted(r["key"][-1] for r in install.drifted("h")),
+                         ["ANTHROPIC_BASE_URL", "DISABLE_AUTO_COMPACT", "SessionStart"])
+        install.repair("h", relay, settings)
+        self.assertEqual(json.loads(path.read_text())["env"]["ANTHROPIC_BASE_URL"], f"{relay}/up/h-0/anthropic")
+        self.assertEqual(install.mounts()["/up/h-0"], "https://api.deepseek.com")
+        self.assertEqual(install.drifted("h"), [])
+        install.uninstall("h")
+        self.assertEqual(json.loads(path.read_text()), switched)  # (its new choice, not the one before Relay)
 
     def test_deepseek_harness_routes_declared_in_a_profile_are_wrapped_there(self) -> None:
         # (reported: the Desktop's OpenAI route is in its `desktop` profile's own patch)

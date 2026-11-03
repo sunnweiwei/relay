@@ -8,6 +8,8 @@
   relay uninstall <harness> | --all restore the harness's config (the last one: Relay is no longer
                                     started at login; it runs on for conversations still open)
   relay start                       make sure Relay runs (harness hooks run it as a session starts)
+  relay restart                     restart it (after updating it, say)
+  relay doctor                      whether the harnesses really go through Relay, and Relay to their providers
   relay serve                       run Relay in the foreground (what the service runs)
   relay install <harness> [--via]   only point a harness at Relay (through the proxy, or a hook)
   relay run <harness> [args...]     run a harness through a private proxy
@@ -16,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import logging
 import os
@@ -28,7 +31,7 @@ from pathlib import Path
 
 import uvicorn
 
-from . import install, integrations, intercept, leaving, service, settings
+from . import doctor, install, integrations, intercept, leaving, service, settings
 from .harnesses import HARNESSES, Harness
 from .strategies import STRATEGIES
 from .transfer import HARNESSES as MOVABLE, transfer
@@ -41,7 +44,7 @@ GUIDE = Path(__file__).with_name("HELP.md")
 
 UNREACHABLE = 3  # `relay status`: its process runs but does not answer (0: running, 1: not running)
 # Settings read only as Relay starts: `relay set` restarts the service for them.
-AT_START = {"host", "port", "intercept_port", "harness", "trace", "event_log", "log_level", "openai_base_url", "chatgpt_base_url",
+AT_START = {"host", "port", "allow_network", "intercept_port", "harness", "trace", "event_log", "log_level", "openai_base_url", "chatgpt_base_url",
             "anthropic_base_url", "gemini_base_url", "openai_api_key", "anthropic_api_key", "cache_path",
             "cache_secret", "cache_ttl_seconds", "cache_max_entries", "cache_max_bytes", "cache_max_nodes"}
 
@@ -68,6 +71,8 @@ def main(argv: list[str] | None = None) -> int:
     unset.add_argument("names", nargs="+", metavar="NAME")
     commands.add_parser("status", help="whether Relay runs, its strategy, the harnesses set up")
     commands.add_parser("start", help="make sure Relay runs")
+    commands.add_parser("restart", help="restart Relay (after updating it, say)")
+    commands.add_parser("doctor", help="whether the harnesses set up really go through Relay, and Relay to their providers")
     commands.add_parser("help", help="the guide")
     serve = commands.add_parser("serve", help="run Relay in the foreground")
     serve.add_argument("--host")
@@ -113,6 +118,14 @@ def main(argv: list[str] | None = None) -> int:
             return _status()
         if options.command == "transfer":
             return _transfer(options.source, options.session, options.target, options.cwd)
+        if options.command == "doctor":
+            return doctor.run()
+        if options.command == "restart":
+            service.restart() if service.record() else service.start()
+            now = service.wait(seconds=30)
+            print(f"Relay runs {now['strategy']} at {service.address()}" if now else
+                  f"Relay did not start: see {service.log_file()}", file=sys.stdout if now else sys.stderr)
+            return 0 if now else 1
         if options.command == "start":
             _settle()
             now = service.ensure()
@@ -135,6 +148,11 @@ def main(argv: list[str] | None = None) -> int:
         return _run(config, ALIASES.get(options.harness, options.harness), options.args)
     host = getattr(options, "host", None) or config.host
     port = getattr(options, "port", None) or config.port
+    if not all(map(_loopback, {host, config.host})) and settings.value("allow_network") != "true":
+        print(f"relay serve: on {host} anyone who reaches this machine could use Relay, and with it the API keys in its "
+              "settings; it listens on this machine only (127.0.0.1) unless `relay set allow_network=true`",
+              file=sys.stderr)
+        return 2
     if config.intercept_port:  # (started by a harness that goes through it, Relay inherits its proxy)
         intercept.forget_own(config.intercept_port)
     uvicorn.run(create_app(config=config), host=host, port=port, ws="none", timeout_graceful_shutdown=service.GRACEFUL)
@@ -182,7 +200,9 @@ def _setup(harness: Harness, strategy: str | None, assignments: list[str], via: 
     leaving.stay(harness.name)  # (set up again while leaving: it stays)
     if moved and harness.name in install.installed():
         install.uninstall(harness.name)  # (pointed at the old port)
-    if harness.name not in install.installed() and _install(harness, via, service.address(), starter):
+    if harness.name in install.installed():  # (set up already: what another tool rewrote since, pointed back)
+        _repair(harness, service.address(), starter)
+    elif _install(harness, via, service.address(), starter):
         return 1
     _move(wanted)
     if not starter and service.record().get("manager") == "process":
@@ -274,6 +294,9 @@ def _status() -> int:
     departing = leaving.leaving()
     print("harnesses set up: " + (", ".join(f"{n} ({_path(n)})" for n in install.installed() if n not in departing)
                                   or "none"))
+    for name in install.installed():
+        if install.drifted(name):
+            print(f"  {name}: its config no longer points at Relay (rewritten since): `relay doctor`")
     for name, seen in ((now or {}).get("harnesses") or {}).items():  # (as their requests said it)
         newer = HARNESSES[name].newer(seen["release"])
         print(f"  {name} {seen['release']}: profile checked against {seen['checked'] or 'no release'}"
@@ -287,10 +310,17 @@ def _status() -> int:
             print(f"  · {_described(entry)}")
     for name, when in leaving.restored().items():
         if name not in departing and name not in install.installed():
-            print(f"left Relay: {name}, restored by itself {_ago(when)} (no conversation needed Relay any more); "
+            print(f"left Relay: {name}, restored by itself {doctor.ago(when)} (no conversation needed Relay any more); "
                   "it talks to its provider directly")
     print(f"settings: {settings.path()}")
     return 0 if now else UNREACHABLE if pid else 1
+
+
+def _loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return host == "localhost"
 
 
 def _transfer(source: str, session: str, target: str, cwd: str | None) -> int:
@@ -335,6 +365,14 @@ def _install(harness: Harness, via: str, url: str, extra: list | None = None, qu
     for note in setup.notes:
         print(f"  note: {note}")
     return 0
+
+
+def _repair(harness: Harness, url: str, extra: list) -> None:
+    path = next((p for p in integrations.paths(harness) if p.name == _path(harness.name)), None)
+    if path is not None:
+        for record in install.repair(harness.name, url, [*path.installation(url).settings, *(extra or [])]):
+            print(f"  {record['path']}: {'.'.join(record['key'])} pointed at Relay again (rewritten since; what it held "
+                  "is now what `relay uninstall` restores)")
 
 
 def _uninstall(harness: Harness, now: bool = False) -> int:
@@ -401,15 +439,9 @@ def _path(name: str) -> str:
     return "hook" if ("env", "RELAY_HOOK_URL") in keys else "https" if ("env", "HTTPS_PROXY") in keys else "proxy"
 
 
-def _ago(when: float) -> str:
-    ago = max(0, time.time() - when)
-    return ("just now" if ago < 60 else f"{ago / 60:.0f} minutes ago" if ago < 3600
-            else f"{ago / 3600:.0f} hours ago" if ago < 86400 else f"{ago / 86400:.0f} days ago")
-
-
 def _described(entry: dict) -> str:
     return (f"\"{entry.get('title') or '(no text)'}\" — ~{entry['whole'] / 1000:.0f}k tokens for a "
-            f"{leaving.window(entry) / 1000:.0f}k window, last used {_ago(entry['last'])}")
+            f"{leaving.window(entry) / 1000:.0f}k window, last used {doctor.ago(entry['last'])}")
 
 
 def _settle() -> None:

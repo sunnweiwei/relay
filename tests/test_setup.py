@@ -31,6 +31,10 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             settings.parse("clm_budget")
 
+    def test_the_settings_file_is_its_owners_alone(self) -> None:
+        with relay_settings(openai_api_key="sk-x"):  # (API keys may be in it)
+            self.assertEqual(settings.path().stat().st_mode & 0o777, 0o600)
+
     def test_saved_settings_are_read_as_text_and_unset_with_none(self) -> None:
         with relay_settings(clm_budget=26000, clm_nudges=False):
             self.assertEqual((settings.value("clm_budget"), settings.value("clm_nudges")), ("26000", "false"))
@@ -269,6 +273,29 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("unknown strategy", out)
         self.assertIsNone(settings.value("strategy"))
+
+    def test_relay_listens_on_this_machine_only_unless_told_otherwise(self) -> None:
+        code, out = self.run_cli("serve", "--host", "0.0.0.0")
+        self.assertEqual(code, 2)
+        self.assertIn("allow_network=true", out)
+
+    def test_doctor_finds_a_harness_that_left_relay_without_a_word(self) -> None:
+        with mock.patch.object(service, "status", return_value=None), mock.patch.object(service, "process", return_value=None):
+            code, out = self.run_cli("doctor")
+        self.assertEqual(code, 2)
+        self.assertIn("Relay is not running", out)
+        running = {"strategy": "compaction", "code": "an older one", "last": {"codex": time.time() - 120}}
+        with mock.patch.object(service, "status", return_value=running), \
+                mock.patch("relay.doctor._reach", return_value=(0, "reachable")):
+            install.install("codex", service.address(), cli.HARNESSES["codex"].settings())
+            code, out = self.run_cli("doctor")
+            self.assertEqual(code, 1, out)
+            self.assertIn("older code than is installed", out)
+            self.assertIn("codex points at Relay; its latest request came 2 minutes ago", out)
+            (self.codex / "config.toml").write_text('model = "m"\n')  # (rewritten by another tool)
+            code, out = self.run_cli("doctor")
+        self.assertEqual(code, 2)
+        self.assertIn("codex no longer goes through Relay", out)
 
     def test_help_is_the_guide(self) -> None:
         code, out = self.run_cli("help")

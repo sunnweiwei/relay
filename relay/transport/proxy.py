@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import zlib
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
@@ -29,14 +30,16 @@ from ..core.engine import Engine, Exchange
 from ..core.store import PrefixStore
 from .. import leaving
 from ..harnesses import Harness, detect
-from ..providers import context_window
+from ..providers import context_window, refused, window_of
 from ..protocols import Codec, codec_for
+from ..protocols.base import error_message
 from ..providers import Upstream, route, upstreams_from_settings
 from ..strategies import STRATEGIES
 from ..strategies.base import Strategy
+from . import outbound
 from .hooks import hook_routes
 from .. import intercept
-from .. import settings
+from .. import private, service, settings
 
 log = logging.getLogger("relay")
 
@@ -102,6 +105,8 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
             log.exception("could not apply the changed settings; %s goes on", engine.strategy.name)
     detect({}, config.harness)  # reject an unknown forced harness at startup
     releases: dict[str, str] = {}  # each harness's release, as its latest request said it
+    last: dict[str, float] = {}  # when each harness's latest request came
+    running = service.code()
 
     def release(harness: Harness, headers: Mapping[str, str]) -> None:
         if version := harness.version(headers):
@@ -116,8 +121,8 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
-        app.state.client = httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None))
-        app.state.summary_client = httpx.Client(timeout=httpx.Timeout(60.0, read=600.0))
+        app.state.client = outbound.async_client(timeout=httpx.Timeout(60.0, read=None))
+        app.state.summary_client = outbound.client(timeout=httpx.Timeout(60.0, read=600.0))
         tunnel = await intercept.serve(config.host, config.intercept_port, config.port) if config.intercept_port else None
         yield
         if tunnel is not None:
@@ -133,7 +138,7 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
         follow()
         leaving.flush()  # (`relay status`, `relay uninstall` read what it noted)
         return JSONResponse({"relay": "ok", "strategy": engine.strategy.name, "window": engine.window,
-                             "following": following, "pid": os.getpid(),
+                             "following": following, "pid": os.getpid(), "code": running, "last": last,
                              "harnesses": {name: {"release": version, "checked": detect({}, name).verified}
                                            for name, version in releases.items()}})
 
@@ -164,8 +169,7 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
 
         def trace(**record: Any) -> None:  # test instrumentation, enabled by the `trace` setting
             if config.trace:
-                with open(config.trace, "a", encoding="utf-8") as stream:
-                    stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+                private.append(config.trace, json.dumps(record, ensure_ascii=False) + "\n")
 
         def post(payload: dict[str, Any]) -> tuple[int, Any]:  # Relay's own request (a summary)
             response = summary_client.post(url, headers=plain, json=payload)
@@ -179,9 +183,10 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
 
         harness = detect(request.headers, config.harness, request.url.path)
         release(harness, request.headers)
+        last[harness.name] = time.time()
         # The model's own window (not Relay's threshold): what fits once the harness goes direct.
         window = harness.window(body.get("model")) or context_window(body.get("model")) or engine.window
-        window = max(window or 0, harness.direct_window or 0) or None
+        window = window_of(body.get("model"), max(window or 0, harness.direct_window or 0) or None)
         departing = harness.name in leaving.leaving() and window  # (`relay uninstall`: see relay/leaving.py)
 
         def prepare(force: bool = False) -> Exchange:
@@ -224,7 +229,10 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
                 error = await response.aread()
                 await response.aclose()
                 log.warning("upstream refused %s (%d): %s", request.url.path, response.status_code, error[:400])
-                if not codec.is_overflow(response.status_code, _json(error)) or exchange.compacted:
+                overflow = codec.is_overflow(response.status_code, refusal := _json(error))
+                if overflow and (limit := refused(body.get("model"), error_message(refusal)[1])):
+                    log.info("%s is refused past %d tokens: Relay counts that as its window", body.get("model"), limit)
+                if not overflow or exchange.compacted:
                     return Response(error, response.status_code, _response_headers(response.headers))
                 if exchange.direct:  # sent as going direct would, and too long: it does not fit direct
                     await run_in_threadpool(leaving.refused, harness.name, exchange.lasting or exchange.conversation)
