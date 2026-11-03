@@ -12,12 +12,18 @@ import unittest
 from pathlib import Path
 from typing import Any
 
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+from starlette.routing import Route
+
 from relay import Compaction, Engine, PrefixStore, ProxyConfig, create_app
 from relay import intercept
 from relay.integrations import ClaudeCodeHook
 from relay.prompts import SUMMARY_PREFIX
 from relay.protocols import OpenAIResponses
-from relay.strategies import ContextFolding
+from relay.strategies import ContextFolding, Jev
+from relay.strategies.jev import STATE_CONTEXT
 from tests.fakes import COMPACTION_MARKER, FINAL_TEXT, FakeUpstream, local_upstreams, serve
 
 
@@ -230,6 +236,60 @@ class ClaudeCodeHttpsTests(unittest.TestCase):
         self.assertFalse([r for r in requests if "thread" in r["body"]])  # (no server-side thread: Relay sees it all)
         self.assertNotIn("compact_boundary", transcript)  # (Claude Code never compacted: it saw nothing)
         self.assertNotIn(SUMMARY_PREFIX, transcript)
+
+
+class JevEndToEndTests(unittest.TestCase):
+    """`jev` with each harness: Jev (here a fake that keeps every call and no result in full) is asked
+    about the older calls, and the requests that follow carry their results cut to the library's head
+    and note (where that frees too little, compaction compacts instead)."""
+
+    def run_harness(self, harness: str) -> None:
+        if shutil.which(harness) is None:
+            self.skipTest(f"{harness} is not installed")
+        path, key, _ = HarnessEndToEndTests.cases[harness]
+        # (above the harness's own request with a few calls: with only the newest, pinned, there is
+        # nothing to ask about, and too little to free falls back to compaction)
+        threshold, asked = {"codex": 13_500, "claude": 16_500}[harness], []
+
+        async def answer(request: Request) -> JSONResponse:
+            body = await request.json()
+            asked.append({**body, "authorization": request.headers.get("authorization")})
+            return JSONResponse({"answers": {name: {"noul": 0.9 if name.startswith("call_") else 0.1}
+                                             for name in body["questions"]}})
+
+        fake = FakeUpstream(tool_calls=10, command="seq 1 300")
+        jev_app = Starlette(routes=[Route("/v1/systemone", answer, methods=["POST"])])
+        with serve(fake.app) as upstream, serve(jev_app) as jev, tempfile.TemporaryDirectory() as root:
+            strategy = Jev(trigger=Compaction(threshold=threshold), fallback=Compaction(threshold=threshold),
+                           api_key="jev-key", url=f"{jev}/v1/systemone")
+            home, work = Path(root, "home"), Path(root, "work")
+            home.mkdir(), work.mkdir()
+            env = _env(home)
+            with serve(create_app(Engine(strategy, PrefixStore()), ProxyConfig(upstreams=local_upstreams(upstream)))) as relay:
+                if harness == "codex":
+                    (home / "config.toml").write_text(
+                        'model = "gpt-5.1-codex"\nmodel_provider = "relay"\n[model_providers.relay]\n'
+                        f'name = "Relay"\nbase_url = "{relay}/v1"\nenv_key = "RELAY_TEST_KEY"\n'
+                        'wire_api = "responses"\nsupports_websockets = false\n')
+                    env["RELAY_TEST_KEY"] = "tenant"
+                else:
+                    env.update(ANTHROPIC_BASE_URL=relay, ANTHROPIC_API_KEY="tenant")
+                for command in _commands(harness, work):
+                    result = subprocess.run(command, cwd=work, env=env, stdin=subprocess.DEVNULL,
+                                            capture_output=True, text=True, timeout=180)
+                    self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+                    self.assertIn(FINAL_TEXT, result.stdout)
+        self.assertTrue(asked)
+        self.assertEqual({(a["model"], a["authorization"], a["state"]["context"]) for a in asked},
+                         {("jev-latest", "Bearer jev-key", STATE_CONTEXT)})
+        cut = [body for b in fake.bodies(path) if "[fast-jev-compaction truncated" in (body := json.dumps(b[key]))]
+        self.assertTrue([body for body in cut if SUMMARY_PREFIX not in body])  # (Jev's context, no summary)
+
+    def test_codex(self) -> None:
+        self.run_harness("codex")
+
+    def test_claude_code(self) -> None:
+        self.run_harness("claude")
 
 
 class PiEndToEndTests(unittest.TestCase):

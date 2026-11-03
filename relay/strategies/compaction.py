@@ -73,13 +73,18 @@ class Compaction:
     def limit(self, window: int | None) -> int:
         return self.threshold or int(self.ratio * (window or DEFAULT_WINDOW))
 
-    def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
+    def due(self, request: Request) -> tuple[bool, int]:
+        """Whether the request reaches the threshold (or the window's hard limit), and the budget."""
+
         if self.growth:
             budget, over = self.growth, request.base is not None and request.tokens - request.base >= self.growth
         else:
             budget = self.limit(request.window)
             over = request.tokens >= budget
-        over = over or (request.window is not None and request.tokens >= HARD_LIMIT * request.window)
+        return over or (request.window is not None and request.tokens >= HARD_LIMIT * request.window), budget
+
+    def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
+        over, budget = self.due(request)
         if not request.force and not over:
             return None
         cut = summary_cut(request)

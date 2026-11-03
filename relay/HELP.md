@@ -135,6 +135,7 @@ To change the strategy later, run `relay strategy <name>`. It needs no restart.
 | `acm` | ACM: the model compresses its context when it decides to, and recalls what it compressed | `acm_dir` (/tmp/.acm) |
 | `ace` | ACE: a playbook of lessons from the tasks the agent ended, kept across conversations, with compaction for the window | `ace_playbook` (`ace_playbook.md` in Relay's directory), the `compaction` settings |
 | `mem1` | MEM1: the model carries its memory in a state it rewrites every turn | |
+| `jev` | fast-jev-compaction: past 60% of the window, TypeSafe's Jev decides which tool calls and results stay; the rest stays verbatim (compaction where it cannot) | `jev_api_key` (else `TYPESAFE_API_KEY`), `jev_url`, `jev_model` (OpenRouter's: `https://openrouter.ai/api/alpha/decisions`, `~typesafe/jev-latest`), `compact_ratio` (0.6), the `compaction` settings |
 | `rlm`, `rlm_persistent` | RLM: the conversation becomes a variable in a Python REPL the model works over (runs model-written code) | `rlm_environment` (local), `rlm_max_depth` (1), `rlm_max_iterations` (30) |
 
 The thresholds count the model's context window. Relay knows the windows of common models;
