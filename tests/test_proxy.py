@@ -13,10 +13,10 @@ from typing import Any
 
 import httpx
 
-from relay import Compaction, Engine, PrefixStore, ProxyConfig, create_app
+from relay import Compaction, Engine, PrefixStore, ProxyConfig, create_app, providers
 from relay.prompts import SUMMARY_PREFIX
 from relay.transport import engine_from_settings
-from tests.fakes import COMPACTION_MARKER, FakeUpstream, local_upstreams, relay_settings, serve
+from tests.fakes import COMPACTION_MARKER, FakeUpstream, _prompt_tokens, local_upstreams, relay_settings, serve
 
 NEVER = Compaction(threshold=10**9)
 
@@ -106,6 +106,20 @@ class ProxyTests(unittest.TestCase):
         summaries = [r for r in requests if COMPACTION_MARKER in last_user_text(r["input"])]
         self.assertGreater(len(summaries), 1)  # the summary request itself was trimmed to fit
         self.assertTrue(last_user_text(requests[-1]["input"]).startswith(SUMMARY_PREFIX))
+
+    def test_the_limit_an_upstream_names_as_it_refuses_is_the_window_from_then_on(self) -> None:
+        """(An account's limit below the model's window: one refusal, then compacted before it.)"""
+
+        self.addCleanup(providers.REFUSED.clear)
+        fake, headers = FakeUpstream(max_prompt_tokens=2_000), {"x-api-key": "tenant"}
+        with relay(fake, Compaction()) as (url, _):  # (at 90% of the window: claude-x's 200k, until refused)
+            for task in ("task", "another task"):  # (two conversations of the model)
+                body = messages_body(6)
+                body["messages"][0]["content"] = task
+                response = httpx.post(f"{url}/v1/messages", json={**body, "stream": False}, headers=headers)
+                self.assertEqual(response.status_code, 200)
+        refused = [b for b in fake.bodies("/v1/messages") if _prompt_tokens(b) > 2_000]
+        self.assertEqual([b["messages"][0]["content"] for b in refused], ["task"])
 
     def test_failed_compaction_forwards_the_original_request(self) -> None:
         body = responses_body(3)

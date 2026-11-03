@@ -7,6 +7,7 @@ Anthropic, OpenRouter and many hosted models serve the Messages API.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -45,6 +46,29 @@ def context_window(model: object) -> int | None:
         return None
     name = model.rsplit("/", 1)[-1].lower()
     return next((size for prefix, size in CONTEXT_WINDOWS if name.startswith(prefix)), None)
+
+
+# What an upstream refused a request past, by model: an account's limit can be below the model's
+# window (a 1M model on a 200k account), and only the refusal says so. (Anthropic: `N tokens > M
+# maximum`; OpenAI: `maximum context length is M`; Gemini: `maximum number of tokens allowed (M)`.)
+REFUSED: dict[str, int] = {}
+LIMIT = re.compile(r"tokens? > (\d+) maximum|maximum context length is (\d+)|maximum number of tokens allowed \((\d+)\)")
+
+
+def refused(model: object, message: str) -> int | None:
+    """The limit an upstream's refusal of a request too long names, noted for the model."""
+
+    if not isinstance(model, str) or (found := LIMIT.search(message)) is None:
+        return None
+    REFUSED[model] = limit = int(next(group for group in found.groups() if group))
+    return limit
+
+
+def window_of(model: object, known: int | None) -> int | None:
+    """`known` (a window from the settings or a catalog), but no more than the upstream refused past."""
+
+    limit = REFUSED.get(model) if isinstance(model, str) else None
+    return min(known, limit) if known and limit else known or limit
 
 
 @dataclass(frozen=True)

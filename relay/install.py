@@ -38,24 +38,77 @@ def install(name: str, relay_url: str, settings: list[Setting]) -> None:
     state = _load()
     if name in state:
         raise ValueError(f"{name} is already installed; run `relay uninstall {name}` first")
-    records = []
-    for index, setting in enumerate(settings):
-        record: dict[str, Any] = {"path": str(setting.path), "key": list(setting.key)}
-        if setting.key and not setting.path.exists():
-            record["created"] = True  # (uninstall removes it, once nothing is left in it)
-
-        def value(previous: Any, setting: Setting = setting, record: dict[str, Any] = record) -> Any:
-            if setting.endpoint is None:
-                return setting.value
-            original = urlsplit(previous if isinstance(previous, str) and previous else setting.endpoint)
-            record["mount"] = f"/up/{name}-{index}"
-            record["origin"] = f"{original.scheme}://{original.netloc}"
-            return f"{relay_url.rstrip('/')}{record['mount']}{original.path.rstrip('/')}"
-
-        record["previous"] = _update(setting.path, setting.key, value)
-        records.append(record)
-    state[name] = records
+    state[name] = [_set(name, relay_url, index, setting) for index, setting in enumerate(settings)]
     _save(state)
+    _mount(state[name])
+
+
+def drifted(name: str) -> list[dict[str, Any]]:
+    """The settings of an installed harness that no longer hold what Relay wrote, each with what is
+    there now (`now`): another tool rewrote the file (cc-switch rewrites Claude Code's settings.json
+    whole when the user switches provider), and the harness has left Relay without a word."""
+
+    found = []
+    for record in _load().get(name, []):
+        path, key = Path(record["path"]), tuple(record["key"])
+        if not key or ("value" not in record and "mount" not in record):  # (a whole file; or written before Relay noted it)
+            continue
+        now = read(path, key) if path.exists() else None
+        if not _holds(now, record):
+            found.append({**record, "now": now})
+    return found
+
+
+def _holds(now: Any, record: dict[str, Any]) -> bool:
+    """Whether a setting still holds what Relay wrote: its address (the mount in it), its value, or,
+    of a list it added to, what it added (the user may change the rest)."""
+
+    if "mount" in record:
+        return isinstance(now, str) and record["mount"] in now
+    value, previous = record["value"], record.get("previous")
+    if isinstance(value, list):
+        return isinstance(now, list) and all(v in now for v in value if not isinstance(previous, list) or v not in previous)
+    return now == value or (isinstance(now, str) and not isinstance(value, str) and now == json.dumps(value))  # (YAML reads text)
+
+
+def repair(name: str, relay_url: str, settings: list[Setting]) -> list[dict[str, Any]]:
+    """The settings that drifted written again; what is there now (the user's new provider, say)
+    becomes what `relay uninstall` restores. The drifted records, as they were."""
+
+    off = drifted(name)
+    keys = {(record["path"], tuple(record["key"])) for record in off}
+    if not keys:
+        return []
+    state = _load()
+    kept = [record for record in state[name] if (record["path"], tuple(record["key"])) not in keys]
+    state[name] = kept + [_set(name, relay_url, index, setting) for index, setting in enumerate(settings)
+                          if (str(setting.path), setting.key) in keys]
+    _save(state)
+    _mount(state[name])
+    return off
+
+
+def _set(name: str, relay_url: str, index: int, setting: Setting) -> dict[str, Any]:
+    """One setting written, and its record: what it was before, what Relay wrote."""
+
+    record: dict[str, Any] = {"path": str(setting.path), "key": list(setting.key)}
+    if setting.key and not setting.path.exists():
+        record["created"] = True  # (uninstall removes it, once nothing is left in it)
+
+    def value(previous: Any) -> Any:
+        if setting.endpoint is None:
+            record["value"] = setting.value
+            return setting.value
+        original = urlsplit(previous if isinstance(previous, str) and previous else setting.endpoint)
+        record["mount"] = f"/up/{name}-{index}"
+        record["origin"] = f"{original.scheme}://{original.netloc}"
+        return f"{relay_url.rstrip('/')}{record['mount']}{original.path.rstrip('/')}"
+
+    record["previous"] = _update(setting.path, setting.key, value)
+    return record
+
+
+def _mount(records: list[dict[str, Any]]) -> None:
     kept = home() / "mounts.json"  # (kept through `relay uninstall`)
     known = json.loads(kept.read_text()) if kept.exists() else {}
     kept.write_text(json.dumps({**known, **{r["mount"]: r["origin"] for r in records if "mount" in r}}, indent=2))
@@ -65,6 +118,12 @@ def installed() -> list[str]:
     """The harnesses `relay install` has set up."""
 
     return sorted(_load())
+
+
+def records(name: str) -> list[dict[str, Any]]:
+    """What `relay install` wrote for a harness: a record a setting."""
+
+    return list(_load().get(name, []))
 
 
 def written(name: str) -> set[tuple[str, tuple[Any, ...]]]:

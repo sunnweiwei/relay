@@ -4,7 +4,7 @@
 FROM node:24-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends python3-pip ripgrep \
     && rm -rf /var/lib/apt/lists/* \
-    && pip3 install --break-system-packages --no-cache-dir httpx starlette uvicorn
+    && pip3 install --break-system-packages --no-cache-dir httpx starlette uvicorn truststore
 RUN npm install -g --no-fund --no-audit \
     @earendil-works/pi-coding-agent opencode-ai @google/gemini-cli \
     @charmland/crush @kilocode/cli openclaw

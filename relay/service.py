@@ -48,6 +48,14 @@ def command() -> list[str]:
     return [sys.executable, "-m", "relay.cli", "serve"]
 
 
+def code() -> str:
+    """The Relay code a process runs, by where it is and when its files last changed: a Relay
+    updated since it started still runs the code it started with."""
+
+    package = Path(__file__).parent
+    return f"{package}:{max(path.stat().st_mtime_ns for path in package.rglob('*.py'))}"
+
+
 def log_file() -> Path:
     return settings.home() / "relay.log"
 

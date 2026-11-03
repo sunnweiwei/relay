@@ -18,13 +18,12 @@ from __future__ import annotations
 
 import functools
 import json
-import os
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
-from . import install
+from . import install, private
 from .settings import home
 
 GRACE = 7 * 24 * 3600  # a conversation not used for this long no longer holds its harness on Relay
@@ -51,10 +50,7 @@ def _read(name: str) -> dict[str, Any]:
 def _write(name: str, value: dict[str, Any]) -> None:
     path = _path(name)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, indent=1))
-    os.chmod(temporary, 0o600)
-    temporary.replace(path)
+    private.write(path, json.dumps(value, indent=1))
 
 
 def seen(harness: str, conversation: str, title: str, whole: int, window: int | None, compacting: bool,

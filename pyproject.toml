@@ -11,6 +11,7 @@ dependencies = [
   "cryptography>=42",
   "httpx>=0.28.0",
   "starlette>=0.47.0",
+  "truststore>=0.10",
   "uvicorn>=0.35.0",
   "zstandard>=0.23",
 ]

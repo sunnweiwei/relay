@@ -151,7 +151,8 @@ Values are JSON where they parse as JSON (`26000`, `true`), text otherwise. Most
 from the next request. Some only apply when Relay starts, and `relay set` restarts Relay
 for them:
 
-- where Relay listens: `host` (127.0.0.1), `port` (8787);
+- where Relay listens: `host` (127.0.0.1), `port` (8787); another host than this machine's only with
+  `allow_network=true` (anyone who reaches it could use Relay, and the API keys in its settings);
 - its upstreams: `openai_base_url`, `chatgpt_base_url`, `anthropic_base_url`, `gemini_base_url`,
   and `openai_api_key`, `anthropic_api_key` for requests that carry no key;
 - its store: `cache_path` (off keeps it in memory), `cache_ttl_seconds`, `cache_max_entries`,
@@ -160,7 +161,9 @@ for them:
 ## Checking and undoing
 
     relay status                   # running?, its strategy, what keeps it running, the harnesses set up
+    relay doctor                   # whether each harness really goes through Relay, and Relay to its provider
     relay start                    # make sure Relay runs (what the harnesses' hooks run)
+    relay restart                  # restart it, after updating Relay
     relay uninstall codex          # put the harness's config back as it was (--all: every harness)
 
 While a harness points at Relay, it reaches its model only through Relay. If a model request
@@ -175,6 +178,19 @@ the log (`~/.config/relay/relay.log`), or `relay uninstall` the harness.
   sandbox. If Relay does not answer there either, it is stuck: end the process it names, then run
   `relay start`. `relay start`, `relay setup` and `relay set` never restart an unreachable Relay.
 - **not running**: no Relay process; `relay start` starts it.
+
+A harness that stops going through Relay does so silently: its conversations go on, unmanaged.
+`relay doctor` finds why (and exits with 0, 1 for warnings, 2 for problems):
+
+- **its config was rewritten** by another tool (cc-switch rewrites Claude Code's settings.json whole
+  when you switch provider): `relay setup <harness>` points it at Relay again, and what is there now
+  (the provider you switched to) is what `relay uninstall` restores;
+- **the shell sets what its config sets**: Gemini CLI, Goose and mini-swe-agent take a variable of
+  the shell (`GOOGLE_GEMINI_BASE_URL`, `OPENAI_HOST`, ...) before their config's;
+- **Relay runs older code** than is installed (updated since it started): `relay restart`;
+- **Relay cannot reach the provider**, or does not trust its certificate. Relay trusts what the
+  harness trusts: the system's certificate store (where IT puts the root of a TLS-inspecting proxy),
+  the public roots, and `NODE_EXTRA_CA_CERTS`; or `SSL_CERT_FILE` instead, where it is set for Relay.
 
 Going back to the harness on its own: `relay uninstall <harness>` (there is no stopping Relay by
 hand: a harness still pointed at it would fail), not changing its endpoint by hand (its own
