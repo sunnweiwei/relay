@@ -35,8 +35,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-import httpx
-
 from .. import settings
 from ..core.ir import Context, Item, Kind, Request
 from .base import Summarizer
@@ -261,8 +259,11 @@ class Jev:
     def _post(self, state: dict[str, Any], questions: dict[str, Any]) -> dict[str, Any]:
         if not self.api_key:
             raise ValueError("no Jev key: set jev_api_key (or TYPESAFE_API_KEY)")
-        response = httpx.post(self.url, json={"model": self.model, "state": state, "questions": questions},
-                              headers={"authorization": f"Bearer {self.api_key}"}, timeout=120)
+        from ..transport import outbound  # (Relay's trust and keepalive; here: that package imports the strategies)
+
+        with outbound.client(timeout=120) as client:
+            response = client.post(self.url, json={"model": self.model, "state": state, "questions": questions},
+                                   headers={"authorization": f"Bearer {self.api_key}"})
         if response.status_code >= 300:
             raise ValueError(f"Jev request failed ({response.status_code}): {response.text[:200]}")
         try:
