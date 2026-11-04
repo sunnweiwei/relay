@@ -33,3 +33,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3-venv &&
     && ln -sf /opt/litellm/bin/litellm /usr/local/bin/litellm \
     && python3 -m venv /opt/mini && /opt/mini/bin/pip install --no-cache-dir mini-swe-agent mcp \
     && ln -sf /opt/mini/bin/mini /usr/local/bin/mini
+# Headroom's proxy (`check.py --strategy headroom` calls its POST /v1/compress), in a venv of its own.
+RUN python3 -m venv /opt/headroom && /opt/headroom/bin/pip install --no-cache-dir 'headroom-ai[proxy]==0.42.0' \
+    && ln -sf /opt/headroom/bin/headroom /usr/local/bin/headroom

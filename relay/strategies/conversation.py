@@ -13,6 +13,7 @@ from typing import Any
 from ..core.ir import Item, Kind
 
 RESPONSE = frozenset({Kind.ASSISTANT, Kind.REASONING, Kind.TOOL_CALL})  # what one model response holds
+CALL = re.compile(r"^([\w.:-]+)[( ](?=[{\[])", re.M)  # a call as the codecs write one: `name(input)`, `name input`
 
 
 def responses(items: Sequence[Item]) -> list[int]:
@@ -155,3 +156,27 @@ def _strings(text: str) -> list[str]:
         elif isinstance(value, dict | list):
             stack.extend(value.values() if isinstance(value, dict) else value)
     return strings or [text]
+
+
+def calls(text: str) -> tuple[list[tuple[str, Any]], str]:
+    """The calls a call item's text holds, each its tool and input, and the model's own text
+    around them (where the protocol writes them in one message)."""
+
+    found, spans, end, decoder = [], [], 0, json.JSONDecoder()
+    for match in CALL.finditer(text):
+        if match.start() < end:
+            continue
+        try:
+            value, stop = decoder.raw_decode(text, match.end())
+        except ValueError:
+            continue
+        if text[match.end(1)] == "(" and text[stop:stop + 1] == ")":
+            stop += 1
+        found.append((match.group(1), value))
+        spans.append((match.start(), stop))
+        end = stop
+    if not found:  # (input that is not JSON, as Codex's apply_patch: the tool, then its input)
+        tool, _, rest = text.strip().partition(" ")
+        return [(tool, rest)], ""
+    gaps = zip([0, *(stop for _, stop in spans)], [*(start for start, _ in spans), len(text)])
+    return found, "".join(text[a:b] for a, b in gaps).strip()

@@ -5,6 +5,7 @@ from .base import Strategy, Summarizer
 from .clm import ContextLanguageModel
 from .compaction import Compaction
 from .folding import ContextFolding
+from .headroom import Headroom
 from .jev import Jev
 from .mem1 import MEM1
 from .prolong import ProLong
@@ -13,7 +14,7 @@ from .selfcompact import SelfCompact
 
 STRATEGIES = {"compaction": Compaction, "clm": ContextLanguageModel, "folding": ContextFolding, "prolong": ProLong,
               "selfcompact": SelfCompact, "autocompact": AutoCompact, "acm": ACM, "ace": ACE, "mem1": MEM1, "rlm": RLM,
-              "rlm_persistent": PersistentRLM, "jev": Jev}  # the `strategy` setting
+              "rlm_persistent": PersistentRLM, "jev": Jev, "headroom": Headroom}  # the `strategy` setting
 
-__all__ = ["ACE", "ACM", "MEM1", "RLM", "STRATEGIES", "AutoCompact", "Compaction", "ContextFolding", "ContextLanguageModel", "Jev",
+__all__ = ["ACE", "ACM", "MEM1", "RLM", "STRATEGIES", "AutoCompact", "Compaction", "ContextFolding", "ContextLanguageModel", "Headroom", "Jev",
            "PersistentRLM", "ProLong", "SelfCompact", "Strategy", "Summarizer"]
