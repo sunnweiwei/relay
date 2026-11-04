@@ -7,7 +7,8 @@ compressed and what was forwarded stays byte for byte, so the provider's prompt 
 ContentRouter picks one compressor for each result by what it holds: JSON arrays become tables
 (SmartCrusher), logs keep their errors and the lines around them, search results and diffs their
 hits, a file read stays verbatim (`protect_reads`, `cat` included) and the same output again points
-at the first. Relay asks a running Headroom (`headroom proxy --port 8790`) through the endpoint it
+at the first. The profile compresses the user's messages too: a long one loses function words, the
+instructions in it included. Relay asks a running Headroom (`headroom proxy --port 8790`) through the endpoint it
 offers gateways, `POST /v1/compress`: the conversation as OpenAI Chat messages, with every message
 forwarded before frozen (`frozen_message_count`).
 
@@ -38,6 +39,7 @@ log = logging.getLogger("relay")
 
 URL = "http://127.0.0.1:8790"  # (Headroom's own default, 8787, is Relay's)
 MODEL = "claude-sonnet-4-5-20250929"  # its tokenizer and window, where Relay has none (compress()'s default)
+EDITABLE = frozenset({Kind.USER, Kind.SUMMARY, Kind.ASSISTANT, Kind.TOOL_RESULT})  # (a call goes as it was made)
 
 
 @dataclass(frozen=True)
@@ -79,7 +81,7 @@ class Headroom:
         out = list(items)
         for message, n in zip(compressed, at):
             text = message.get("content")
-            if (n >= sent and n not in joint and items[n].kind is Kind.TOOL_RESULT and isinstance(text, str)
+            if (n >= sent and n not in joint and items[n].kind in EDITABLE and isinstance(text, str)
                     and text != items[n].text):
                 out[n] = replace(items[n], text=text)
         log.info("headroom: %s of %s tokens saved; %s", answer.get("tokens_saved"), answer.get("tokens_before"),

@@ -10,6 +10,7 @@ from typing import Any
 from relay.core.engine import Engine
 from relay.core.ir import Item, Kind, Request
 from relay.harnesses import Harness
+from relay.harnesses.claude_code import ClaudeCode
 from relay.protocols import AnthropicMessages, OpenAIResponses
 from relay.strategies import Headroom
 
@@ -37,9 +38,9 @@ class FakeHeadroom:
         if self.failures:
             self.failures -= 1
             raise ValueError("Headroom answered 503: compression_error")
-        frozen = body["config"]["frozen_message_count"]
-        return {"messages": [m if n < frozen or m["role"] != "tool" else {**m, "content": f"[{len(m['content'])} chars]"}
-                             for n, m in enumerate(body["messages"])],
+        frozen = body["config"]["frozen_message_count"]  # (and a long user message, as its coding profile does)
+        return {"messages": [m if n < frozen or not (m["role"] == "tool" or m["role"] == "user" and len(m["content"]) > 200)
+                             else {**m, "content": f"[{len(m['content'])} chars]"} for n, m in enumerate(body["messages"])],
                 "tokens_before": 300, "tokens_saved": 200, "transforms_applied": ["router:log:0.01"]}
 
 
@@ -48,10 +49,10 @@ class HeadroomTests(unittest.TestCase):
         self.headroom = FakeHeadroom()
         self.engine = Engine(Headroom(post=self.headroom))
 
-    def send(self, items: list[dict[str, Any]], codec: Any = CODEC) -> list[dict[str, Any]]:
+    def send(self, items: list[dict[str, Any]], codec: Any = CODEC, harness: Any = HARNESS) -> list[dict[str, Any]]:
         field = "input" if codec is CODEC else "messages"
         body = {"model": "m", "tools": TOOLS, field: items}
-        return self.engine.prepare(codec, HARNESS, body, tenant="t", post=lambda r: (500, {})).body[field]
+        return self.engine.prepare(codec, harness, body, tenant="t", post=lambda r: (500, {})).body[field]
 
     def test_a_result_goes_compressed_and_headroom_sees_the_conversation_as_chat_messages(self) -> None:
         sent = self.send([msg("user", "fix the bug"), *run(1, "cat app.log", "x" * 500)])
@@ -72,6 +73,22 @@ class HeadroomTests(unittest.TestCase):
         self.assertEqual(body["config"]["frozen_message_count"], 3)
         self.assertEqual(body["messages"][2]["content"], "[500 chars]")  # what the provider has, not the original
         self.assertEqual([item.get("output") for item in sent[1:]], [None, "[500 chars]", None, "[800 chars]"])
+
+    def test_a_long_user_message_goes_as_headroom_compresses_it_too(self) -> None:
+        first = [msg("user", "fix the bug"), *run(1, "cat app.log", "x" * 500)]
+        self.send(first)
+        sent = self.send([*first, msg("assistant", "Done."), msg("user", "notes " * 50), *run(2, "pytest", "y" * 800)])
+        self.assertEqual([sent[0]["content"], sent[4]["content"]], ["fix the bug", [{"type": "input_text", "text": "[300 chars]"}]])
+
+    def test_of_a_user_message_what_the_user_typed_is_compressed_and_the_harnesss_blocks_stay(self) -> None:
+        reminder = "<system-reminder>\ncodename BETA\n</system-reminder>"
+        user = {"role": "user", "content": [{"type": "text", "text": reminder}, {"type": "text", "text": "notes " * 50}]}
+        call = {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "pytest"}}]}
+        results = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x" * 500}]}
+        sent = self.send([user, call, results], AnthropicMessages(), ClaudeCode())
+        self.assertEqual(self.headroom.bodies[-1]["messages"][0], {"role": "user", "content": ("notes " * 50).strip()})
+        (text,) = [block["text"] for block in sent[0]["content"]]
+        self.assertEqual(text.strip(), f"{reminder}\n[299 chars]")
 
     def test_a_request_with_no_new_result_asks_nothing_and_what_came_since_is_frozen_later(self) -> None:
         first = [msg("user", "fix the bug"), *run(1, "cat app.log", "x" * 500)]

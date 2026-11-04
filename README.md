@@ -629,7 +629,9 @@ nothing is dropped, summarized or reordered. Relay asks Headroom itself, as its 
   provider's prompt cache holds;
 - its ContentRouter picks one compressor per result: a JSON array becomes a table (SmartCrusher), a
   log keeps its errors and the lines around them, search results and diffs their hits; a file read
-  stays verbatim (`protect_reads`, `cat` included), and the same output again points at the first.
+  stays verbatim (`protect_reads`, `cat` included), and the same output again points at the first;
+- the profile compresses the user's messages too: a long one loses function words, the instructions
+  in it included ("wait until you have seen its output" becomes "wait until you seen its output").
 
 ```sh
 pip install "headroom-ai[proxy]"   # (in its own environment)
