@@ -1022,7 +1022,7 @@ def evaluate_jev(name: str, home: Path) -> dict:
         problems.append(f"Jev was asked {len(runs)}x, and each freed too little (compaction instead)")
     if failed := re.findall(r"jev: fallback to compaction \((?!below)([^\n]*)\)", log):
         problems.append(f"Jev failed {len(failed)}x: {failed[-1][:120]}")
-    for turn, (answer, codes) in enumerate(zip(answers, (CODES[:4], CODES)), start=1):
+    for turn, (answer, codes) in enumerate(zip(answers, (CODES[:4], CODES) if SPECS[name].resume else (CODES,)), start=1):
         if not re.search(SEPARATOR.join(codes), answer.lower()):
             problems.append(f"turn {turn} answer is wrong: {answer[-120:]!r}")
     rejected = sum(r["status"] >= 400 for r in trace if "status" in r)
@@ -1072,7 +1072,7 @@ def evaluate_headroom(name: str, home: Path) -> dict:
         problems.append(f"Headroom failed {len(failed)}x: {failed[-1][:120]}")
     if rewritten:
         problems.append(f"{rewritten} requests changed what Relay had forwarded (the prompt cache missed)")
-    for turn, (answer, codes) in enumerate(zip(answers, (CODES[:4], CODES)), start=1):
+    for turn, (answer, codes) in enumerate(zip(answers, (CODES[:4], CODES) if SPECS[name].resume else (CODES,)), start=1):
         if not re.search(SEPARATOR.join(codes), answer.lower()):
             problems.append(f"turn {turn} answer is wrong: {answer[-120:]!r}")
     rejected = sum(r["status"] >= 400 for r in trace if "status" in r)
