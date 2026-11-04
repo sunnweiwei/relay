@@ -114,8 +114,11 @@ class Jev:
         except Exception as error:  # (as the plugin: whatever went wrong, the summary instead)
             log.warning("jev: fallback to compaction (%s)", error)
             return self.fallback.plan(replace(request, force=True), summarizer)
-        before = sum(len(item.text) for item in request.current)
-        reduction = (before - sum(len(item.text) for item in items)) / before if before else 0.0
+        # (of the conversation, as the library's messages: not the harness's instructions and tools,
+        # which Codex declares among the items, and nothing compacts)
+        chars = lambda kept: sum(len(item.text) for item in kept if item.kind is not Kind.SYSTEM)  # noqa: E731
+        before = chars(request.current)
+        reduction = (before - chars(items)) / before if before else 0.0
         log.info("jev: %d%% reduction; %s", round(reduction * 100), stats)
         if reduction < self.min_reduction:
             log.info("jev: fallback to compaction (below %d%% minimum)", round(self.min_reduction * 100))
@@ -143,6 +146,9 @@ class Jev:
             keep_call, keep_result = (max(answers[call.id][k] for call in own) for k in (0, 1))
             decided[cut] = "keep" if keep_result >= self.keep else "drop_result" if keep_call >= self.keep else "drop_call"
         actions = [decided.get(call.cut, "keep") for call in calls if not call.pinned]
+        log.info("jev: decisions: %s", " ".join(f"{call.id}:{call.tool}:{decided.get(call.cut, 'keep')}/call="
+                                                 f"{answers[call.id][0]:.2f}/result={answers[call.id][1]:.2f}"
+                                                 for call in calls if not call.pinned) or "(none)")
         stats = (f"{actions.count('keep')} kept, {actions.count('drop_result')} results truncated, "
                  f"{actions.count('drop_call')} call_dropped, {len(calls) - len(actions)} pinned; state ~{tokens} tokens "
                  f"({stage}) in {len(batches)} request(s)")

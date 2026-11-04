@@ -6,6 +6,8 @@
     python tests/docker/check.py --strategy clm codex:gpt     the model edits its own context (CLM)
     python tests/docker/check.py --strategy acm codex:gpt     one of the CLM paper's baselines (selfcompact,
                                                               autocompact, acm, mem1, rlm, rlm_persistent)
+    python tests/docker/check.py --strategy jev codex:gpt-api   fast-jev-compaction with the real Jev: its key in
+                                                              JEV_API_KEY (an OpenRouter key: Jev on OpenRouter)
 
 Each run gets a throwaway HOME: the harness's own config is written there (the "user's
 existing setup"), `relay install <harness>` edits it, Relay runs in the background, and
@@ -52,6 +54,7 @@ from relay.core.ir import AGENT_KINDS, CONTEXT_KINDS, Item, Kind  # noqa: E402
 from relay.harnesses import detect  # noqa: E402
 from relay.prompts import SUMMARIZATION_PROMPT, SUMMARY_PREFIX  # noqa: E402
 from relay.protocols import codec_for  # noqa: E402
+from relay.strategies.jev import MODEL as JEV_MODEL, URL as JEV_URL  # noqa: E402
 from relay.strategies.selfcompact import RUBRIC, SUMMARIZER  # noqa: E402
 
 IMAGE = "relay-harness-test"
@@ -519,6 +522,14 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
         trigger = {"strategy": "folding"}
     if strategy == "prolong":  # compaction inside, as usual, and the log where the harness's tools reach it
         trigger |= {"strategy": "prolong", "prolong_log": "/project/.prolong/log.jsonl"}
+    if strategy == "jev":  # Jev at TypeSafe, or OpenRouter for an OpenRouter key
+        # 60% of the window, past turn 1's reads and one of turn 2's (Codex: ~29k tokens): calls older
+        # than the newest six messages for Jev to judge. (Every few thousand tokens, it would have none.)
+        openrouter = os.environ["JEV_API_KEY"].startswith("sk-or-")
+        trigger = {"context_window": str(window or JEV_WINDOW), "strategy": "jev",
+                   "jev_url": os.getenv("JEV_URL", "https://openrouter.ai/api/alpha/decisions" if openrouter else JEV_URL),
+                   "jev_model": os.getenv("JEV_MODEL", "~typesafe/jev-latest" if openrouter else JEV_MODEL),
+                   "TYPESAFE_API_KEY": os.environ["JEV_API_KEY"]}
     if strategy == "ace":  # compaction for the window, as usual; the playbook in HOME
         trigger |= {"strategy": "ace", "ace_playbook": "/home/agent/ace_playbook.md"}
     if strategy in ("selfcompact", "autocompact", "acm", "mem1", "rlm", "rlm_persistent"):  # (AutoCompact's fallback: 90% of the window)
@@ -567,6 +578,8 @@ def run(name: str, growth: int | None = None, retried: bool = False, probe: bool
         return evaluate_prolong(name, home)
     if strategy == "ace":
         return evaluate_ace(name, home)
+    if strategy == "jev":
+        return evaluate_jev(name, home)
     if strategy in BASELINES:
         return BASELINES[strategy](name, home)
     # Relay's own trigger compacts less often; after the harness compacted itself, turn 2 starts small.
@@ -696,9 +709,9 @@ def container(name: str, root: Path, env: dict[str, str], turns: str, timeout: i
               "-e", "HOME=/home/agent", *(["-e", "PYTHONPATH=/relay"] if importable else [])]
     for mount in mounts:
         docker += ["-v", mount]
-    for var, value in env.items():
-        docker += ["-e", f"{var}={value}"]
-    subprocess.run([*docker, IMAGE, "bash", "-c", script], check=False, timeout=timeout)
+    for var in env:  # (the values from this process's environment: API keys stay out of the command line)
+        docker += ["-e", var]
+    subprocess.run([*docker, IMAGE, "bash", "-c", script], check=False, timeout=timeout, env={**os.environ, **env})
 
 
 
@@ -771,6 +784,7 @@ def name_of(keys: list[bytes]) -> tuple[bytes, ...]:
 
 
 LAYOUT = {Kind.SYSTEM: "S", Kind.CONTEXT: "C", Kind.USER: "U", Kind.SUMMARY: "Y"}
+JEV_WINDOW = 48_000
 MARK = json.dumps(SUMMARY_PREFIX)[1:61]  # how every summary starts inside a JSON body
 
 
@@ -947,6 +961,46 @@ def evaluate(name: str, home: Path, need: tuple[int, int] | None = None, selfcom
         "errors": (text("harness.err")[-300:] + text("harness2.err")[-300:]) if problems else "",
         "home": str(home),
     }
+
+
+def evaluate_jev(name: str, home: Path) -> dict:
+    """`jev` (fast-jev-compaction): Jev was asked about the older calls and some went, cut or dropped
+    (a run freeing too little is compacted instead, and told); the requests after carried the cut
+    results; both answers are right; every model call was accepted. A file read again is told, not a
+    failure: re-running the tool is what the library leaves the model for what it dropped."""
+
+    def text(file: str) -> str:
+        path = home / file
+        return path.read_text(errors="replace") if path.exists() else ""
+
+    trace = [json.loads(line) for line in text("trace.jsonl").splitlines() if line.strip()]
+    requests = [r for r in trace if "body" in r and r["path"].endswith(MODEL_CALLS)]
+    log, answers = text("relay.log"), [text("harness.out").strip(), text("harness2.out").strip()]
+    runs = re.findall(r"jev: (\d+)% reduction; ([^\n]*)", log)
+    applied = [(int(share), how) for share, how in runs if int(share) >= 25]
+    cut = sum("[fast-jev-compaction truncated" in json.dumps(r.get("forwarded") or {}) for r in requests)
+    dropped = sum(r.get("forwarded") is not None and r["sent"] < r["items"] and MARK not in json.dumps(r["forwarded"])
+                  for r in requests)
+    problems = [] if runs else ["Jev was never asked"]
+    if runs and not applied:
+        problems.append(f"Jev was asked {len(runs)}x, and each freed too little (compaction instead)")
+    if failed := re.findall(r"jev: fallback to compaction \((?!below)([^\n]*)\)", log):
+        problems.append(f"Jev failed {len(failed)}x: {failed[-1][:120]}")
+    for turn, (answer, codes) in enumerate(zip(answers, (CODES[:4], CODES)), start=1):
+        if not re.search(SEPARATOR.join(codes), answer.lower()):
+            problems.append(f"turn {turn} answer is wrong: {answer[-120:]!r}")
+    rejected = sum(r["status"] >= 400 for r in trace if "status" in r)
+    if rejected:
+        problems.append(f"{rejected} model calls rejected")
+    read: dict[int, int] = {}
+    for request in requests:
+        codec, harness = codec_for(request["path"]), detect({}, path=request["path"])
+        for n in files_read(codec, harness, codec.items(request["body"])):
+            read[n] = read.get(n, 0) + 1
+    return {"name": name, "passed": not problems, "requests": len(requests), "jev": runs, "fallbacks": len(runs) - len(applied),
+            "requests_with_cut_results": cut, "requests_with_calls_dropped": dropped,
+            "read_again": sorted(n for n, k in read.items() if k > 1), "problems": problems,
+            "answers": [answer[-80:] for answer in answers], "home": str(home)}
 
 
 def evaluate_hook(name: str, home: Path) -> dict:
@@ -1628,7 +1682,7 @@ def main() -> int:
     parser.add_argument("--native-compact", action="store_true", help="the harness compacts itself between the turns")
     parser.add_argument("--file-lines", type=int, default=120, help="lines per file (each ~18 tokens)")
     parser.add_argument("--strategy", default="compaction",
-                        choices=["compaction", "clm", "folding", "prolong", "selfcompact", "autocompact", "acm", "ace",
+                        choices=["compaction", "clm", "folding", "prolong", "selfcompact", "autocompact", "acm", "ace", "jev",
                                  "mem1", "rlm", "rlm_persistent"],
                         help="Relay's strategy (clm: the model edits its own context)")
     parser.add_argument("--steering", help="with --strategy clm: a brief from tests/docker/steering (compaction, "
