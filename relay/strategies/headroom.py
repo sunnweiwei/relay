@@ -64,8 +64,8 @@ class Headroom:
         sent = state.get("sent", 0)
         if sent > len(items) or (sent and state.get("last") != _digest(items[sent - 1])):
             sent = 0  # (not the history forwarded: the harness compacted it, or resumed another)
-        if not any(item.kind is Kind.TOOL_RESULT for item in items[sent:]):
-            return None  # (nothing Headroom compresses; what came since is frozen with the next result)
+        if sent == len(items):
+            return None  # (nothing new: a retry)
         messages, at, joint = _messages(items)
         config = {"frozen_message_count": sum(n < sent for n in at), **({"mode": self.mode} if self.mode else {})}
         body = {"messages": messages, "model": self.model, "config": config,

@@ -166,21 +166,30 @@ class Engine:
             return conversation[cut] if cut < len(conversation) else len(items)
 
         current = tuple(items[n] for n in conversation)
-        # The strategy sees what the user typed of a user message; the harness's blocks in it are
-        # its state (`place`), forwarded as they came unless the strategy changes the message.
-        typed = {item.ref: view for item in originals if (view := harness.typed(item)) not in (item, None)}
+        # The strategy sees what the user typed of a user message (one a strategy changed before
+        # included); the harness's blocks in it are its state (`place`), forwarded as they came
+        # unless the strategy changes the message.
+        shown: list[tuple[Item, Item]] = []  # a user message as the strategy sees it, and as it is
+        typed: dict[int, tuple[Item, Item]] = {}  # the last of them of each wire item
 
         def seen(item: Item) -> Item:
-            return typed[item.ref] if item.ref in typed and item == originals[item.ref] else item
+            if item.kind is not Kind.USER or (view := harness.typed(item)) in (item, None):
+                return item
+            shown.append((view, item))
+            if item.ref is not None:
+                typed[item.ref] = (view, item)
+            return view
 
         def unseen(item: Item) -> Item:
-            if item.kind is not Kind.USER or item.ref not in typed:
+            if item.kind is not Kind.USER:
                 return item
-            original, view = originals[item.ref], typed[item.ref]
-            if (item.text, item.media) == (view.text, view.media):
-                return original
-            text = (original.text.replace(view.text, item.text, 1) if view.text in original.text
-                    else "\n\n".join([*harness.blocks(original.text), item.text]))  # (its blocks kept)
+            if (under := next((under for view, under in shown if view == item), None)) is not None:
+                return under  # (as the strategy saw it)
+            if item.ref not in typed:
+                return item
+            view, under = typed[item.ref]
+            text = (under.text.replace(view.text, item.text, 1) if view.text in under.text
+                    else "\n\n".join([*harness.blocks(under.text), item.text]))  # (its blocks kept)
             return replace(item, text=text)
         accepted = {raw_index for raw_index in codec.orphans(raw)}  # the harness's own history, as the API took it
 

@@ -74,12 +74,6 @@ class HeadroomTests(unittest.TestCase):
         self.assertEqual(body["messages"][2]["content"], "[500 chars]")  # what the provider has, not the original
         self.assertEqual([item.get("output") for item in sent[1:]], [None, "[500 chars]", None, "[800 chars]"])
 
-    def test_a_long_user_message_goes_as_headroom_compresses_it_too(self) -> None:
-        first = [msg("user", "fix the bug"), *run(1, "cat app.log", "x" * 500)]
-        self.send(first)
-        sent = self.send([*first, msg("assistant", "Done."), msg("user", "notes " * 50), *run(2, "pytest", "y" * 800)])
-        self.assertEqual([sent[0]["content"], sent[4]["content"]], ["fix the bug", [{"type": "input_text", "text": "[300 chars]"}]])
-
     def test_of_a_user_message_what_the_user_typed_is_compressed_and_the_harnesss_blocks_stay(self) -> None:
         reminder = "<system-reminder>\ncodename BETA\n</system-reminder>"
         user = {"role": "user", "content": [{"type": "text", "text": reminder}, {"type": "text", "text": "notes " * 50}]}
@@ -89,14 +83,22 @@ class HeadroomTests(unittest.TestCase):
         self.assertEqual(self.headroom.bodies[-1]["messages"][0], {"role": "user", "content": ("notes " * 50).strip()})
         (text,) = [block["text"] for block in sent[0]["content"]]
         self.assertEqual(text.strip(), f"{reminder}\n[299 chars]")
+        call2 = {"role": "assistant", "content": [{"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "ls"}}]}
+        results2 = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t2", "content": "y" * 500}]}
+        later = self.send([user, call, results, call2, results2], AnthropicMessages(), ClaudeCode())
+        self.assertEqual(later[:3], sent)  # (as forwarded: its blocks once)
+        self.assertEqual(self.headroom.bodies[-1]["messages"][0], {"role": "user", "content": "[299 chars]"})
 
-    def test_a_request_with_no_new_result_asks_nothing_and_what_came_since_is_frozen_later(self) -> None:
+    def test_each_message_goes_as_headroom_compresses_it_the_first_time_and_a_retry_asks_nothing(self) -> None:
         first = [msg("user", "fix the bug"), *run(1, "cat app.log", "x" * 500)]
         self.send(first)
-        self.send([*first, msg("assistant", "Done.")])
+        self.send(first)  # (the harness retries)
         self.assertEqual(len(self.headroom.bodies), 1)
-        self.send([*first, msg("assistant", "Done."), msg("user", "and the tests"), *run(2, "pytest", "y" * 800)])
-        self.assertEqual(self.headroom.bodies[-1]["config"]["frozen_message_count"], 3)
+        notes = [*first, msg("assistant", "Done."), msg("user", "notes " * 50)]  # (a new turn, no result yet)
+        self.assertEqual(self.send(notes)[-1]["content"], [{"type": "input_text", "text": "[300 chars]"}])
+        sent = self.send([*notes, *run(2, "pytest", "y" * 800)])
+        self.assertEqual(self.headroom.bodies[-1]["config"]["frozen_message_count"], 5)
+        self.assertEqual(sent[4]["content"], [{"type": "input_text", "text": "[300 chars]"}])
 
     def test_where_headroom_does_not_answer_the_results_go_as_they_are_and_stay_so(self) -> None:
         self.headroom.failures = 1
