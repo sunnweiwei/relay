@@ -648,7 +648,8 @@ is marker-free by default: Headroom's proxy also keeps the originals and gives t
 runs the tool again: Codex with GPT-6 Luna once ran a log's command again with the output wrapped in
 JSON, which Headroom leaves as it is, and fetched every later log that way. Where an Anthropic or Gemini message answers calls
 of several tools at once (Relay sees its results as one), it stays as it is: Headroom treats each
-tool's output by its own rules. Where Headroom does not answer, the results go as they are, and stay
+tool's output by its own rules. On Gemini's API Headroom's own proxy leaves function responses as they
+are; Relay gives it the output in them, as on the other APIs, so the method is the same on every harness. Where Headroom does not answer, the results go as they are, and stay
 so. The conversation goes to that Headroom (local, unless `headroom_url` says otherwise).
 
 ## The CLM paper's baselines
