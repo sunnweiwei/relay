@@ -14,6 +14,7 @@ from ..core.ir import Item, Kind
 
 RESPONSE = frozenset({Kind.ASSISTANT, Kind.REASONING, Kind.TOOL_CALL})  # what one model response holds
 CALL = re.compile(r"^([\w.:-]+)[( ](?=[{\[])", re.M)  # a call as the codecs write one: `name(input)`, `name input`
+OBJECT = re.compile(r"^(?=\{)", re.M)  # or as Gemini's does: `{"name": ..., "args": ...}`
 
 
 def responses(items: Sequence[Item]) -> list[int]:
@@ -163,16 +164,21 @@ def calls(text: str) -> tuple[list[tuple[str, Any]], str]:
     around them (where the protocol writes them in one message)."""
 
     found, spans, end, decoder = [], [], 0, json.JSONDecoder()
-    for match in CALL.finditer(text):
+    for match in sorted([*CALL.finditer(text), *OBJECT.finditer(text)], key=lambda match: match.start()):
         if match.start() < end:
             continue
         try:
-            value, stop = decoder.raw_decode(text, match.end())
+            value, stop = decoder.raw_decode(text, match.end() if match.re is CALL else match.start())
         except ValueError:
             continue
-        if text[match.end(1)] == "(" and text[stop:stop + 1] == ")":
-            stop += 1
-        found.append((match.group(1), value))
+        if match.re is OBJECT:  # (Gemini's: the call as its JSON)
+            if not (isinstance(value, dict) and isinstance(value.get("name"), str) and "args" in value):
+                continue
+            found.append((value["name"], value["args"]))
+        else:
+            if text[match.end(1)] == "(" and text[stop:stop + 1] == ")":
+                stop += 1
+            found.append((match.group(1), value))
         spans.append((match.start(), stop))
         end = stop
     if not found:  # (input that is not JSON, as Codex's apply_patch: the tool, then its input)

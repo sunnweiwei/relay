@@ -11,7 +11,7 @@ from relay.core.engine import Engine
 from relay.core.ir import Item, Kind, Request
 from relay.harnesses import Harness
 from relay.harnesses.claude_code import ClaudeCode
-from relay.protocols import AnthropicMessages, OpenAIResponses
+from relay.protocols import AnthropicMessages, Gemini, OpenAIResponses
 from relay.strategies import Headroom
 
 CODEC, HARNESS = OpenAIResponses(), Harness()
@@ -50,7 +50,7 @@ class HeadroomTests(unittest.TestCase):
         self.engine = Engine(Headroom(post=self.headroom))
 
     def send(self, items: list[dict[str, Any]], codec: Any = CODEC, harness: Any = HARNESS) -> list[dict[str, Any]]:
-        field = "input" if codec is CODEC else "messages"
+        field = {"openai_responses": "input", "gemini": "contents"}.get(codec.name, "messages")
         body = {"model": "m", "tools": TOOLS, field: items}
         return self.engine.prepare(codec, harness, body, tenant="t", post=lambda r: (500, {})).body[field]
 
@@ -121,6 +121,17 @@ class HeadroomTests(unittest.TestCase):
         self.assertEqual([part["content"] for part in sent[-1]["content"]], [[{"type": "text", "text": "[1001 chars]"}], ""])
         sent = self.send(turn("Read", "Bash"), AnthropicMessages())  # (Headroom keeps a Read's output: Relay can't split it)
         self.assertEqual(sent[-1], turn("Read", "Bash")[-1])
+
+    def test_on_gemini_the_output_goes_compressed_where_it_was(self) -> None:
+        call = {"role": "model", "parts": [{"functionCall": {"id": "r1", "name": "run_shell_command", "args": {"command": "pytest"}}}]}
+        result = {"role": "user", "parts": [{"functionResponse": {"id": "r1", "name": "run_shell_command",
+                                                                  "response": {"output": "x" * 500}}}]}
+        sent = self.send([{"role": "user", "parts": [{"text": "fix the bug"}]}, call, result], Gemini())
+        assistant, tool = self.headroom.bodies[-1]["messages"][1:]
+        self.assertEqual(assistant["tool_calls"][0]["function"], {"name": "run_shell_command", "arguments": '{"command": "pytest"}'})
+        self.assertEqual(tool["content"], "x" * 500)
+        self.assertEqual(sent[-1]["parts"][0]["functionResponse"], {"id": "r1", "name": "run_shell_command",
+                                                                    "response": {"output": "[500 chars]"}})
 
     def test_a_history_not_as_forwarded_is_compressed_whole_and_the_settings_go_along(self) -> None:
         items = (Item(Kind.USER, "fix the bug"), Item(Kind.TOOL_CALL, 'sh({"cmd": "cat app.log"})'),

@@ -253,9 +253,11 @@ def listening(port: int, log: str) -> str:
     return f"for _ in $(seq 600); do {up} && break; sleep 0.2; done; {up} || {{ tail -20 {log}; exit 1; }}"
 
 
-# Headroom's proxy beside Relay, for its POST /v1/compress (its telemetry off)
+# Headroom's proxy beside Relay, for its POST /v1/compress (its telemetry off), once its text compressor
+# is in (until then Headroom leaves text as it is: a run would depend on how soon its first request came)
 HEADROOM = ("HEADROOM_TELEMETRY=off HEADROOM_BEACON=off DO_NOT_TRACK=1 headroom proxy --port 8790 > ~/headroom.log 2>&1 &\n"
-            + listening(8790, "~/headroom.log"))
+            + listening(8790, "~/headroom.log") + "\nfor _ in $(seq 900); do grep -qE 'Kompress: warmed|Kompress "
+            "background warm-up failed|Kompress: (DISABLED|not installed|ENABLED)' ~/headroom.log && break; sleep 0.2; done")
 
 RECORDER = f"""UPSTREAM=$(python3 -c 'import json, pathlib; p = pathlib.Path("~/.claude/settings.json").expanduser()
 print((json.loads(p.read_text()) if p.exists() else {{}}).get("env", {{}}).get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"))')
