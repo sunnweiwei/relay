@@ -88,6 +88,13 @@ class JevTests(unittest.TestCase):
         sent = self.send(jev(FakeJev()), [msg("user", "fix the bug"), *steps(6)])
         self.assertTrue(any(SUMMARY_PREFIX in CODEC.classify(item).text for item in sent))
 
+    def test_the_share_freed_is_of_the_conversation_not_of_the_harnesss_instructions(self) -> None:
+        # (Codex's instructions and tools come as items: half of the conversation freed is a seventh of all)
+        ask = FakeJev(**{f"{q}_t{i}": 0.1 for q in ("call", "result") for i in (1, 2, 3)})
+        sent = self.send(jev(ask), [msg("developer", "r" * 30_000), msg("user", "fix the bug"), *steps(6)])
+        self.assertFalse(any(SUMMARY_PREFIX in CODEC.classify(item).text for item in sent))
+        self.assertEqual([i.get("call_id") for i in sent[2:]], ["c4", "c4", "c5", "c5", "c6", "c6"])
+
     def test_whatever_keeps_jev_from_answering_is_compaction_instead(self) -> None:
         def broken(state: Any, questions: Any) -> dict[str, Any]:
             raise RuntimeError("Jev request failed (503)")

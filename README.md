@@ -601,8 +601,9 @@ plugin as they are:
 - a call whose result Jev keeps (0.5 or more) stays as it is; one whose call it keeps keeps the
   first 300 characters of its result and the library's note; the others go, with their results;
 - where Jev cannot answer (no key, an error, a history it cannot fit) or the result frees less than
-  a quarter of the context, `compaction` compacts it then, as the plugin falls back to Claude Code's
-  own summary.
+  a quarter of the conversation (as the library counts it: not the harness's instructions and tools),
+  `compaction` compacts it then, as the plugin falls back to Claude Code's own summary. Relay's log
+  has each run's share freed and Jev's decision on each call, as the plugin's.
 
 Relay sees a model response's calls and their results as one cut of the conversation (an Anthropic
 message holds all of a response's results), so a response's calls are kept or dropped together, as
