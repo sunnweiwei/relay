@@ -395,7 +395,7 @@ class StrategyAdditionsTests(unittest.TestCase):
             call, result = self.CALLS[codec.name]
             edited = codec.edit(result, "short", ())
             self.assertEqual(codec.orphans([codec.user_message("go"), call, edited]), set(), codec.name)
-            self.assertIn("short", codec.classify(edited).text)
+            self.assertEqual(codec.classify(edited).text, "short", codec.name)  # (as it reads back: what was written)
             self.assertNotIn("a long output", json.dumps(edited))
             with self.assertRaises(ValueError):
                 codec.edit(call, "another call", ())
@@ -422,6 +422,12 @@ class StrategyAdditionsTests(unittest.TestCase):
         kept = AnthropicMessages().edit(result, "screen", ())
         self.assertEqual(AnthropicMessages().classify(kept).media, ())
         self.assertEqual(kept["content"][0]["tool_use_id"], "t1")
+
+    def test_a_gemini_result_reads_as_its_output_and_a_response_of_more_as_its_json(self) -> None:
+        _, result = self.CALLS["gemini"]
+        self.assertEqual(Gemini().classify(result).text, "a long output")
+        more = {"role": "user", "parts": [{"functionResponse": {"name": "sh", "response": {"error": "denied"}}}]}
+        self.assertEqual(json.loads(Gemini().classify(more).text), more["parts"][0]["functionResponse"])
 
     def test_a_repeated_gemini_result_reads_once(self) -> None:
         _, result = self.CALLS["gemini"]

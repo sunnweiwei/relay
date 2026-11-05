@@ -39,7 +39,7 @@ from .. import settings
 from ..core.ir import Context, Item, Kind, Request
 from .base import Summarizer
 from .compaction import Compaction
-from .conversation import RESPONSE
+from .conversation import RESPONSE, calls as _parsed
 
 log = logging.getLogger("relay")
 
@@ -60,7 +60,6 @@ TEXT_HEAD, TEXT_TAIL = 400, 150
 OVERHEAD = 20  # tokens the request envelope adds around state and questions
 PIECES = re.compile(r"[A-Za-z]+|[0-9]+|[^\sA-Za-z0-9]")
 SPACES = re.compile(r"\s+")
-CALL = re.compile(r"^([\w.:-]+)[( ](?=[{\[])", re.M)  # a call as the codecs write one: `name(input)`, `name input`
 
 
 @dataclass
@@ -316,30 +315,6 @@ def _cuts(items: tuple[Item, ...], boundaries: frozenset[int]) -> list[tuple[int
 
     points = sorted(b for b in boundaries if b <= len(items))
     return list(zip(points, points[1:]))
-
-
-def _parsed(text: str) -> tuple[list[tuple[str, Any]], str]:
-    """The calls a call item's text holds, each its tool and input, and the model's own text
-    around them (where the protocol writes them in one message)."""
-
-    calls, spans, end, decoder = [], [], 0, json.JSONDecoder()
-    for match in CALL.finditer(text):
-        if match.start() < end:
-            continue
-        try:
-            value, stop = decoder.raw_decode(text, match.end())
-        except ValueError:
-            continue
-        if text[match.end(1)] == "(" and text[stop:stop + 1] == ")":
-            stop += 1
-        calls.append((match.group(1), value))
-        spans.append((match.start(), stop))
-        end = stop
-    if not calls:  # (input that is not JSON, as Codex's apply_patch: the tool, then its input)
-        tool, _, rest = text.strip().partition(" ")
-        return [(tool, rest)], ""
-    gaps = zip([0, *(stop for _, stop in spans)], [*(start for start, _ in spans), len(text)])
-    return calls, "".join(text[a:b] for a, b in gaps).strip()
 
 
 def _role(items: tuple[Item, ...], members: list[int]) -> str:

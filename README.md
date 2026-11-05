@@ -618,6 +618,40 @@ Jev is TypeSafe's API (`relay set jev_api_key=...`, or `TYPESAFE_API_KEY`), or O
 the same requests (`jev_url`, `jev_model`; see [Configuration](#configuration)). What Jev reads (the
 conversation, results by size) goes to that service.
 
+## Headroom
+
+[Headroom](https://github.com/headroomlabs-ai/headroom) (`relay/strategies/headroom.py`, Apache-2.0)
+compresses each tool result in place as it comes in, by what it holds, and leaves the rest alone:
+nothing is dropped, summarized or reordered. Relay asks Headroom itself, as its proxy runs by default
+(the `coding` profile, `cache` mode):
+
+- only the newest delta is compressed; what was forwarded is forwarded again as it was, so the
+  provider's prompt cache holds;
+- its ContentRouter picks one compressor per result: a JSON array becomes a table (SmartCrusher), a
+  log keeps its errors and the lines around them, search results and diffs their hits; a file read
+  stays verbatim (`protect_reads`, `cat` included), and the same output again points at the first;
+- the profile compresses the user's messages too: a long one loses function words, the instructions
+  in it included ("wait until you have seen its output" becomes "wait until you seen its output").
+
+```sh
+pip install "headroom-ai[proxy]"   # (in its own environment)
+headroom proxy --port 8790         # (its own default port, 8787, is Relay's)
+relay strategy headroom
+```
+
+Relay sends the conversation to the endpoint Headroom offers gateways, `POST /v1/compress`, as OpenAI
+Chat messages, with every message it forwarded before frozen (`frozen_message_count`). That endpoint
+is marker-free by default: Headroom's proxy also keeps the originals and gives the model a
+`headroom_retrieve` tool to get them back (CCR), which takes answering the model's own tool calls.
+`relay set headroom_mode=ccr` asks for the markers, for a harness given Headroom's MCP server
+(`headroom mcp`), whose tool reads the same store. Without it, a model that wants what was omitted
+runs the tool again: Codex with GPT-6 Luna once ran a log's command again with the output wrapped in
+JSON, which Headroom leaves as it is, and fetched every later log that way. Where an Anthropic or Gemini message answers calls
+of several tools at once (Relay sees its results as one), it stays as it is: Headroom treats each
+tool's output by its own rules. On Gemini's API Headroom's own proxy leaves function responses as they
+are; Relay gives it the output in them, as on the other APIs, so the method is the same on every harness. Where Headroom does not answer, the results go as they are, and stay
+so. The conversation goes to that Headroom (local, unless `headroom_url` says otherwise).
+
 ## The CLM paper's baselines
 
 The CLM paper compares against methods that manage context through predefined actions or a
@@ -732,7 +766,7 @@ starts, and `relay set` restarts the service for them.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `strategy` | `compaction` | The strategy: `compaction` (Codex's), `clm` (the model edits its own context), `folding` (the agent branches and returns), `prolong` (compaction, and a log the agent searches), `jev` (fast-jev-compaction: Jev deletes the tool calls and results no longer needed), or one of the CLM paper's baselines: `selfcompact`, `autocompact`, `acm`, `ace` (a playbook of lessons across conversations), `mem1`, `rlm`, `rlm_persistent`. |
+| `strategy` | `compaction` | The strategy: `compaction` (Codex's), `clm` (the model edits its own context), `folding` (the agent branches and returns), `prolong` (compaction, and a log the agent searches), `jev` (fast-jev-compaction: Jev deletes the tool calls and results no longer needed), `headroom` (Headroom compresses each tool result in place), or one of the CLM paper's baselines: `selfcompact`, `autocompact`, `acm`, `ace` (a playbook of lessons across conversations), `mem1`, `rlm`, `rlm_persistent`. |
 | `rlm_max_iterations`, `rlm_max_depth` | `30`, `1` | RLM: root turns per step, and recursion depth (1: sub-calls are plain model calls), the authors' defaults. |
 | `rlm_environment` | `local` | RLM: where the model's code runs; `local` is Relay's own process. |
 | `acm_dir` | `/tmp/.acm` | ACM: where the compressed messages are saved, a folder per conversation (Relay reads them back for `query_memory`). |
@@ -741,6 +775,7 @@ starts, and `relay set` restarts the service for them.
 | `compact_threshold` | `compact_ratio` × context window | Prompt tokens that trigger compaction. |
 | `compact_ratio` | `0.9` (`jev`: `0.6`) | Share of the model's context window used when no threshold is set. |
 | `jev_api_key`, `jev_url`, `jev_model` | `TYPESAFE_API_KEY`, TypeSafe's `https://api.typesafe.ai/v1/systemone`, `jev-latest` | `jev`: where Jev answers. OpenRouter's: `jev_url=https://openrouter.ai/api/alpha/decisions`, `jev_model=~typesafe/jev-latest`, with an OpenRouter key. |
+| `headroom_url`, `headroom_mode`, `headroom_model`, `headroom_token` | `http://127.0.0.1:8790`, unset, `claude-sonnet-4-5-20250929`, unset | `headroom`: the Headroom to ask; its `config.mode` (`ccr`: retrieval markers, for a harness with Headroom's MCP tool; `lossy_inline`); the model whose tokenizer it counts with; its `HEADROOM_PROXY_TOKEN`, where it has one. |
 | `compact_growth` | unset | Instead of a threshold, compact after this many tokens were added since the context window began (Codex's `BodyAfterPrefix` scope); independent of each harness's fixed prompt overhead. |
 | `context_window` | from the model name | Overrides the context window table in `relay/providers.py`. An upstream that refuses a request as too long and names its limit (`N tokens > M maximum`, `maximum context length is M`) sets the window of that model to M from then on (an account's limit below the model's). |
 | `retain_user_tokens` | `20000` | Budget for recent user messages kept verbatim. |

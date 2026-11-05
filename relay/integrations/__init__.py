@@ -40,7 +40,7 @@ NEEDS: dict[str, frozenset[str]] = {
     "acm": frozenset({"instructions", "rewrites", "notes"}), "clm": frozenset({"instructions", "rewrites", "notes"}),
     "ace": frozenset({"changing instructions", "completions"}),
     "rlm": frozenset({"completions", "history"}), "rlm_persistent": frozenset({"completions", "history"}),
-    "jev": frozenset({"rewrites"}),
+    "jev": frozenset({"rewrites"}), "headroom": frozenset({"rewrites", "every request"}),
 }
 
 

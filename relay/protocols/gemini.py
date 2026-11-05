@@ -205,8 +205,18 @@ def _part_text(part: dict[str, Any]) -> str:
         return part["text"]
     for key in ("functionCall", "functionResponse", "executableCode", "codeExecutionResult"):
         if _has(part, key):
-            return json.dumps(part.get(key, part.get(_snake(key))), ensure_ascii=False)
+            value = part.get(key, part.get(_snake(key)))
+            if key == "functionResponse" and _output(value) is not None:
+                return _output(value)  # (the output itself, where `edit` writes it)
+            return json.dumps(value, ensure_ascii=False)
     return ""
+
+
+def _output(response: Any) -> str | None:
+    """A function's response that is its output alone (`{"output": "..."}`, Gemini CLI's), else None."""
+
+    inner = response.get("response") if isinstance(response, dict) else None
+    return inner["output"] if isinstance(inner, dict) and list(inner) == ["output"] and isinstance(inner["output"], str) else None
 
 
 def _media(part: dict[str, Any]) -> Media | None:
