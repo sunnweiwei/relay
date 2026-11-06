@@ -19,6 +19,10 @@ for the markers, for a harness given Headroom's MCP server (`headroom mcp`), who
 same store. And the messages are Relay's view of the conversation (a call and its result each a
 message), so where a result points at an earlier one ("same as msg 2"), it counts those. Where
 Headroom does not answer, the results go as they are, and stay so.
+
+Headroom never shrinks a conversation: behind its proxy, the harness's own compaction keeps it within
+the window. Relay turns that off, so `compaction` does the same, at the same point (90% of the window,
+or when the upstream finds the request too long), and Headroom goes on from there.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ from typing import Any
 from .. import settings
 from ..core.ir import Context, Item, Kind, Request
 from .base import Summarizer
+from .compaction import Compaction
 from .conversation import RESPONSE, calls
 
 log = logging.getLogger("relay")
@@ -48,18 +53,22 @@ class Headroom:
     model: str = MODEL
     mode: str = ""  # the endpoint's `config.mode`: "" (marker-free), "ccr" or "lossy_inline"
     token: str = ""  # HEADROOM_PROXY_TOKEN, where Headroom is given one
+    fallback: Compaction = field(default_factory=Compaction)  # what keeps the context within the window
     post: Callable[[dict[str, Any]], dict[str, Any]] | None = field(default=None, compare=False, repr=False)
     name: str = "headroom"
 
     @classmethod
     def from_settings(cls) -> Headroom:
         return cls(url=settings.value("headroom_url", URL) or URL, model=settings.value("headroom_model", MODEL) or MODEL,
-                   mode=settings.value("headroom_mode", ""), token=settings.value("headroom_token", ""))
+                   mode=settings.value("headroom_mode", ""), token=settings.value("headroom_token", ""),
+                   fallback=Compaction.from_settings())
 
     def fingerprint(self) -> dict[str, Any]:
-        return {"name": self.name, "model": self.model, "mode": self.mode}
+        return {"name": self.name, "model": self.model, "mode": self.mode, "fallback": self.fallback.fingerprint()}
 
     def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
+        if (compacted := self.fallback.plan(request, summarizer)) is not None:
+            return replace(compacted, state=_forwarded(compacted.items))
         items, state = request.current, request.state or {}
         sent = state.get("sent", 0)
         if sent > len(items) or (sent and state.get("last") != _digest(items[sent - 1])):
@@ -77,7 +86,7 @@ class Headroom:
                 raise ValueError(f"{len(compressed)} messages back for {len(messages)}")
         except Exception as error:  # (as Headroom fails open: the results as they are, from now on)
             log.warning("headroom: %s; the results go as they are", error)
-            return Context(items, state={"sent": len(items), "last": _digest(items[-1])})
+            return Context(items, state=_forwarded(items))
         out = list(items)
         for message, n in zip(compressed, at):
             text = message.get("content")
@@ -86,7 +95,7 @@ class Headroom:
                 out[n] = replace(items[n], text=text)
         log.info("headroom: %s of %s tokens saved; %s", answer.get("tokens_saved"), answer.get("tokens_before"),
                  ", ".join(answer.get("transforms_applied") or []) or "nothing compressed")
-        return Context(tuple(out), state={"sent": len(out), "last": _digest(out[-1])})
+        return Context(tuple(out), state=_forwarded(out))
 
     def _post(self, body: dict[str, Any]) -> dict[str, Any]:
         from ..transport import outbound  # (Relay's trust and keepalive; here: that package imports the strategies)
@@ -136,6 +145,10 @@ def _messages(items: tuple[Item, ...]) -> tuple[list[dict[str, Any]], list[int],
         at.append(n)
     close()
     return messages, at, {n for n, ids in answered.items() if len({tools.get(id) for id in ids}) > 1}
+
+
+def _forwarded(items: tuple[Item, ...] | list[Item]) -> dict[str, Any]:
+    return {"sent": len(items), "last": _digest(items[-1])}
 
 
 def _digest(item: Item) -> str:
