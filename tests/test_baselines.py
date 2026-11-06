@@ -9,15 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from relay.core.engine import Engine
-from relay.core.ir import Item, Kind, Request
+from relay.core.ir import Item, Kind, Media, Request
 from relay.harnesses import Harness
 from relay.protocols import Gemini, OpenAIChat, OpenAIResponses
 from relay.strategies import ACM, MEM1, AutoCompact, Compaction, SelfCompact
 from relay.strategies.acm import NOTHING, QUERY_MEMORY_PROMPT, SUMMARY_INSTRUCTION
 from relay.strategies.autocompact import PROMPT
 from relay.strategies.conversation import IGNORED
-from relay.prompts import SUMMARY_PREFIX
-from relay.strategies.selfcompact import RUBRIC, SUMMARIZER
+from relay.strategies.selfcompact import CONTINUE, QUESTION, RESEARCH, RUBRIC, SUMMARIZER
 
 FIRE = "C1: Y -- done\nC2: Y -- 1. a \"x\"\nC3: Y -- new fact\nN1: N -- found x"
 
@@ -28,6 +27,10 @@ class Scripted:
 
     def summarize(self, cut: int, prompt: str) -> str:
         self.calls.append((cut, prompt))
+        return self.answers.pop(0)
+
+    def complete(self, items) -> str:
+        self.calls.append(("complete", items))
         return self.answers.pop(0)
 
 
@@ -60,10 +63,13 @@ class SelfCompactTests(unittest.TestCase):
     def test_a_firing_rubric_replaces_the_trajectory_with_the_summary(self) -> None:
         later = Item(Kind.USER, "and then?", 9)
         items = (TASK, *step(1), later, *step(2))
-        summarizer = Scripted("**C1:** Y -- x\n**C2:** Y -- y\n**C3:** Y -- z\n**N1:** N -- w", "SUMMARY")
+        summarizer = Scripted("**C1:** Y -- x\n**C2:** Y -- y\n**C3:** Y -- z\n**N1:** N -- w",
+                              "<think>x</think>\n<summary>\n- Essential Information: c1, c2\n</summary>")
         context = self.strategy.plan(request(*items, tokens=4_000), summarizer)
-        self.assertEqual([prompt for _, prompt in summarizer.calls], [RUBRIC, SUMMARIZER])
-        self.assertEqual(context.items, (TASK, later, Item(Kind.SUMMARY, f"{SUMMARY_PREFIX}\nSUMMARY")))
+        self.assertEqual([prompt for _, prompt in summarizer.calls],
+                         [RUBRIC, SUMMARIZER + QUESTION.format(question="read the files")])
+        self.assertEqual(context.items, (TASK, Item(Kind.ASSISTANT, RESEARCH + "- Essential Information: c1, c2"),
+                                         Item(Kind.USER, CONTINUE)))
         # The count starts again after the summary: one response since, no probe.
         self.assertIsNone(self.strategy.plan(request(*context.items, *step(3), tokens=4_000), Scripted()))
 
@@ -74,8 +80,8 @@ class SelfCompactTests(unittest.TestCase):
     def test_the_backstop_summarizes_without_asking(self) -> None:
         summarizer = Scripted("SUMMARY")
         context = self.strategy.plan(request(TASK, *step(1), tokens=9_600), summarizer)
-        self.assertEqual(summarizer.calls, [(3, SUMMARIZER)])
-        self.assertEqual(context.items, (TASK, Item(Kind.SUMMARY, f"{SUMMARY_PREFIX}\nSUMMARY")))
+        self.assertEqual(summarizer.calls, [(3, SUMMARIZER + QUESTION.format(question="read the files"))])
+        self.assertEqual(context.items, (TASK, Item(Kind.ASSISTANT, RESEARCH + "SUMMARY"), Item(Kind.USER, CONTINUE)))
 
 
 class AutoCompactTests(unittest.TestCase):
@@ -141,6 +147,38 @@ class ACMTests(unittest.TestCase):
         # Nothing between two calls: ACM's error.
         twice = step(6, 'echo "[manage_context]"', "[manage_context]")
         self.assertEqual(self.strategy.plan(request(*later, *twice), Scripted()).items[-1].text, NOTHING)
+
+    def test_the_users_later_messages_are_compressed_too(self) -> None:
+        later = Item(Kind.USER, "file_2 holds CODE c2", 9)
+        manage = step(3, 'echo "[manage_context]"', "[manage_context]")
+        summarizer = Scripted("<memory>The user said file_2 holds CODE c2; file_1 was read.</memory>")
+        context = self.strategy.plan(request(TASK, *step(1), later, *step(2), *manage), summarizer)
+        _, task, *kept = context.items
+        self.assertEqual((task, kept[0]), (TASK, manage[0]))
+        self.assertNotIn(later, kept)
+        self.assertTrue(summarizer.calls[0][1].startswith("Original question: read the files\n"))
+        self.assertIn("[user] file_2 holds CODE c2", summarizer.calls[0][1])
+        saved = json.loads((Path(self.directory) / "c" / "summary_1.json").read_text())
+        self.assertEqual([m["role"] for m in saved], ["tool_call", "tool", "user", "tool_call", "tool"])
+
+    def test_a_ranges_images_go_to_the_summarizer_and_the_saved_originals(self) -> None:
+        screen = Media("image", "image/png", "aGVsbG8=")
+        shot = Item(Kind.TOOL_RESULT, "clicked", 302, media=(screen,))
+        manage = step(3, 'echo "[manage_context]"', "[manage_context]")
+        summarizer = Scripted("<memory>The dialog shows the save button at the bottom right of the window.</memory>")
+        kept = self.strategy.plan(request(TASK, *step(1), *step(2)[:2], shot, *manage), summarizer).items[1:]
+        how, (sent,) = summarizer.calls[0]
+        self.assertEqual((how, sent.kind, sent.media), ("complete", Kind.USER, (screen,)))
+        self.assertIn("[tool] clicked [image 1]", sent.text)
+        saved = json.loads((Path(self.directory) / "c" / "summary_1.json").read_text())
+        self.assertEqual(saved[-1]["images"], [{"mime": "image/png", "data": "aGVsbG8=", "url": ""}])
+
+        query = step(4, 'echo "[query_memory] 1 :: where is the save button"', "[query_memory] 1 :: where is the save button")
+        summarizer = Scripted("bottom right")
+        self.strategy.plan(request(*kept, *query), summarizer)
+        how, (sent,) = summarizer.calls[0]
+        self.assertEqual((how, sent.media), ("complete", (screen,)))
+        self.assertIn("[tool] clicked [image 1]", sent.text)
 
     def test_query_memory_recalls_from_the_saved_originals(self) -> None:
         manage = step(3, 'echo "[manage_context]"', "[manage_context]")

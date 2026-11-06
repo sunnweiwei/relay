@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..core.ir import AGENT_KINDS, Context, Item, Kind, Request
-from ..core.tokens import approx_tokens, truncate_middle
+from ..core.tokens import approx_tokens, item_tokens, truncate_middle
 from ..prompts import SUMMARIZATION_PROMPT, SUMMARY_PREFIX
 from .base import Summarizer
 from .. import settings
@@ -92,7 +92,7 @@ class Compaction:
             return None
         items = request.current[:cut]
         users = self._recent_users(items)
-        freed = sum(approx_tokens(i.text) for i in items) - sum(approx_tokens(i.text) for i in users)
+        freed = sum(map(item_tokens, items)) - sum(map(item_tokens, users))
         if not request.force and freed < self.min_gain * budget:
             return None
         summary = Item(Kind.SUMMARY, f"{SUMMARY_PREFIX}\n{summarizer.summarize(cut, SUMMARIZATION_PROMPT)}")

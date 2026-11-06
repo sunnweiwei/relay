@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import tempfile
 import unittest
@@ -47,6 +48,16 @@ class ProLongTests(unittest.TestCase):
         self.assertEqual([e["type"] for e in self.entries()], ["user_prompt", "tool_call", "tool_result", "assistant_message"])
         self.assertEqual(self.entries()[2]["content"]["text"], "color teal")
         self.assertTrue((self.log.parent / ".gitignore").exists())
+
+    def test_an_events_images_are_saved_beside_the_log_and_named_in_it(self) -> None:
+        screen = {"type": "input_image", "image_url": "data:image/png;base64," + base64.b64encode(b"png bytes").decode()}
+        shot = run(2, "screenshot", "")
+        shot[1]["output"] = [{"type": "input_text", "text": "the page"}, screen]
+        self.send(*self.history, *shot)
+        entry = self.entries()[-1]
+        (saved,) = entry["content"]["images"]
+        self.assertEqual((entry["content"]["text"], Path(saved).read_bytes()), ("the page", b"png bytes"))
+        self.assertEqual(Path(saved).parent, self.log.parent / "images")
 
     def test_reading_the_log_is_not_recorded(self) -> None:
         reading = run(2, f"rg -n teal {self.log}", '{"type": "tool_result", "content": {"text": "color teal"}}')

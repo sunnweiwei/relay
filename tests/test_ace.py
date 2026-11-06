@@ -85,6 +85,18 @@ class AceTests(unittest.TestCase):
         self.send(*task, msg("user", "now the docs"), *call(3), upstream=again)
         self.assertEqual(again.requests, [])  # reflected on once
 
+    def test_a_tasks_images_go_to_the_reflector_and_the_curator(self) -> None:
+        screen = {"type": "input_image", "image_url": "data:image/png;base64,c2NyZWVu"}
+        shot = call(1)
+        shot[1]["output"] = [{"type": "input_text", "text": "the page"}, screen]
+        task = [msg("user", "book the room"), *shot, msg("assistant", "Booked.")]
+        upstream = Upstream(answer(REFLECTION), answer(CURATION))
+        self.send(*task, msg("user", "next"), upstream=upstream)
+        for request in upstream.requests:
+            parts = request["input"][0]["content"]
+            self.assertIn("[2] USER: the page\n[image 1]", parts[0]["text"])
+            self.assertEqual(parts[1:], [screen])
+
     def test_a_failed_reflection_leaves_the_playbook_and_the_request(self) -> None:
         task = [msg("user", "fix the bug"), *call(1), msg("assistant", "Fixed."), msg("user", "next")]
         with self.assertLogs("relay", "WARNING"):
