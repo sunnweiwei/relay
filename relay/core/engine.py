@@ -36,7 +36,9 @@ from ..providers import context_window, window_of
 from ..strategies.base import Strategy, Summarizer
 from .ir import CONTEXT_KINDS, LABELS, Context, Item, Kind, Media, Request, note
 from .store import PrefixStore
-from .tokens import approx_tokens, bytes_per_token, item_tokens
+from .tokens import approx_tokens, bytes_per_token, counting_with, item_tokens
+from .budget import BudgetExceeded, InputBudget
+from .truncation import truncate_request
 
 log = logging.getLogger("relay")
 RATE = (0.5, 4.0)  # how far the upstream's count may scale Relay's estimate of new items
@@ -77,18 +79,47 @@ class Engine:
         window: int | None = None,
         event_log: str | None = None,
         retry_after: float = 60.0,
+        input_budget: InputBudget | None = None,
+        harness_profile: str | None = None,
     ) -> None:
         self.strategy = strategy
         self.store = PrefixStore() if store is None else store  # a store is falsy while it is empty
         self.window = window
         self.event_log = event_log
         self.retry_after = retry_after
+        self.input_budget = input_budget
+        self.harness_profile = harness_profile
         self._retry_at: dict[bytes, float] = {}  # per conversation, after a failure
         # Each conversation's last stored context (items covered, digests of their identities),
         # to tell a request that should have found it but did not, and where it diverged.
         self._compacted: OrderedDict[bytes, tuple[int, list[bytes]]] = OrderedDict()
 
     def prepare(
+        self, codec: Codec, harness: Harness, body: Body, *, tenant: str,
+        post: Post, force: bool = False, direct_within: int | Callable[[str], int | None] | None = None,
+        fallback_limit: int | None = None,
+        on_fallback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> Exchange:
+        """`input_budget` (an opt-in bounded evaluation): every count uses its declared counter,
+        and the request that leaves must fit it. `harness_profile`: an evaluation-only rewrite of
+        known harness boilerplate (relay/harnesses/browse_profile.py), applied before matching."""
+        if self.harness_profile:
+            from ..harnesses.browse_profile import apply_profile
+
+            body = apply_profile(body, self.harness_profile)
+        with counting_with(self.input_budget.text_tokens if self.input_budget else None,
+                           self.input_budget.opaque_tokens if self.input_budget else None,
+                           self.input_budget.media_item_tokens
+                           if self.input_budget and self.input_budget.name in self.input_budget.MEDIA_COUNTER_NAMES
+                           else None):
+            exchange = self._prepare(codec, harness, body, tenant=tenant, post=post,
+                                     force=force, direct_within=direct_within,
+                                     fallback_limit=fallback_limit, on_fallback=on_fallback)
+            if self.input_budget:
+                self.input_budget.check(harness.codec(codec), exchange.body, "main")
+            return exchange
+
+    def _prepare(
         self,
         codec: Codec,
         harness: Harness,
@@ -98,6 +129,8 @@ class Engine:
         post: Post,
         force: bool = False,
         direct_within: int | Callable[[str], int | None] | None = None,
+        fallback_limit: int | None = None,
+        on_fallback: Callable[[dict[str, Any]], None] | None = None,
     ) -> Exchange:
         """`direct_within`: a harness leaving Relay. A request whose own history (as the harness sent
         it) is estimated within this many tokens goes as it came, without the stored context or the
@@ -116,7 +149,12 @@ class Engine:
         # (the stored context still applies), but the strategy is not asked, nor the usage kept.
         compacting = harness.compacting(codec, raw)
         keys = harness.identity(codec, raw)
-        fingerprint = json.dumps(self.strategy.fingerprint(), sort_keys=True)
+        fingerprint_data = self.strategy.fingerprint()
+        if self.harness_profile:
+            fingerprint_data = {**fingerprint_data, "harness_profile": self.harness_profile}
+        if self.input_budget:
+            fingerprint_data = {**fingerprint_data, "input_budget": self.input_budget.fingerprint()}
+        fingerprint = json.dumps(fingerprint_data, sort_keys=True)
         partition = self.store.partition(tenant, codec.name, harness.name, fingerprint)
         depth, state = self.store.match(partition, keys) or (0, {})
         named = [key for key in keys if key not in (b"\0system", b"\0context")][:3]
@@ -145,13 +183,19 @@ class Engine:
         name = hashlib.sha256(thread).hexdigest()[:16]
         title = next((typed.text[:80] for item in originals if item.kind is Kind.USER
                       and (typed := harness.typed(item)) is not None and typed.text.strip()), "")
-        whole = math.ceil(size([*originals, *volatile_items]) * state.get("rate", 1.0))
+        whole = (self.input_budget.count(codec, body) if self.input_budget else
+                 math.ceil(size([*originals, *volatile_items]) * state.get("rate", 1.0)))
         if callable(direct_within):
             direct_within = direct_within(lasting)
         if direct_within is not None and not compacting and whole <= direct_within:
             return Exchange(body, partition, [], state, estimate=whole, conversation=name, title=title, whole=whole,
                             direct=True, lasting=lasting)
-        if isinstance(state.get("tokens"), int):  # the upstream's count for the stored prefix, then new items,
+        if self.input_budget:
+            counted_body = codec.with_items(body, [*wire, *volatile])
+            if state.get("instructions"):
+                counted_body = codec.with_instructions(counted_body, "\n\n".join(state["instructions"]))
+            tokens = self.input_budget.count(codec, counted_body)
+        elif isinstance(state.get("tokens"), int):  # the upstream's count for the stored prefix, then new items,
             # estimated at the rate the upstream's count of this conversation has shown (the text's own
             # density: code, another language, numbers)
             new = sum(item_tokens(originals[i], per_token) for i in range(depth, len(raw)))
@@ -203,7 +247,9 @@ class Engine:
             tuple(map(seen, current)),
             frozenset(cut for cut in range(len(current) + 1) if position(cut) in legal),
             tokens,
-            window_of(body.get("model"), self.window or harness.window(body.get("model")) or context_window(body.get("model"))),
+            (self.input_budget.input_limit if self.input_budget else
+             window_of(body.get("model"), self.window or harness.window(body.get("model"))
+                       or context_window(body.get("model")))),
             force,
             state.get("base"),
             state.get("strategy"),
@@ -223,7 +269,8 @@ class Engine:
                 # then the history goes in one summary request, and an overflow splits it.
                 window = None if request.window and state.get("tokens", 0) > request.window else request.window
                 summarizer = _Summarizer(codec, body, lambda cut: wire[: position(cut)], leading, post,
-                                         window and window / scale, per_token, "\n\n".join(instructions))
+                                         window and window / scale, per_token, "\n\n".join(instructions),
+                                         input_budget=self.input_budget, on_fallback=on_fallback)
                 if (context := self.strategy.plan(request, summarizer)) is not None:
                     answer = sendable(tuple(item for item in context.items if not _instruction(item)))
                     answered = [item.text for item in context.items if _instruction(item)]
@@ -261,7 +308,17 @@ class Engine:
                         self.store.put(latest, [lasting.encode()], {"partition": partition.hex()})
                         state = stored
                     notes, instructions = context.notes, answered
+            except BudgetExceeded as error:
+                # Local rejection must reach the same recovery path as an
+                # upstream context error. Never forward the old context here.
+                if not (force and self.input_budget and self.input_budget.overflow_fallback == "truncate"):
+                    raise
+                if on_fallback:
+                    on_fallback({"scope": error.scope, "action": "method_recovery_exhausted",
+                                 "input_tokens": error.tokens, "input_limit": error.limit})
             except Exception:
+                if self.input_budget:
+                    raise  # A bounded evaluation cannot silently bypass a failed manager.
                 log.warning("%s failed; forwarding the last context", self.strategy.name, exc_info=True)
                 self._retry_at[thread] = time.monotonic() + self.retry_after
 
@@ -285,6 +342,37 @@ class Engine:
         if instructions:
             forwarded = codec.with_instructions(forwarded, "\n\n".join(instructions))
         estimate = size([*items, *volatile_items]) + approx_tokens(" ".join([*notes, *instructions]), per_token)
+        if self.input_budget:
+            estimate = self.input_budget.count(codec, forwarded)
+            target = self.input_budget.limit_for(forwarded)
+            if fallback_limit is not None:
+                target = min(target, fallback_limit)
+            if force and self.input_budget.overflow_fallback == "truncate" and estimate > target:
+                # Preserve rendered instructions, volatile harness context, and user tasks.
+                # Persist only the history portion: per-request notes/instructions are rendered
+                # afresh, so storing them in head would duplicate them on the next request.
+                positions = {id(value): n for n, value in enumerate(wire)}
+                outgoing = codec.items(forwarded)
+                protected = {n for n, value in enumerate(outgoing)
+                             if id(value) not in positions or items[positions[id(value)]].kind in
+                             (*CONTEXT_KINDS, Kind.USER)}
+                trimmed, report = truncate_request(codec, forwarded, self.input_budget,
+                    scope="main", protected=protected, target_limit=target)
+                retained = []
+                for source_index, value in zip(report["kept_indices"], codec.items(trimmed)):
+                    if (index := positions.get(id(outgoing[source_index]))) is not None:
+                        original = items[index]
+                        typed_item = codec.classify(value)
+                        retained.append(replace(original, text=typed_item.text, media=typed_item.media))
+                stored = {k: v for k, v in state.items()
+                          if k not in {"head", "covered", "tokens", "budget_tokens", "provider_tokens", "base"}}
+                stored.update(covered=len(raw), head=[_entry(item, originals) for item in retained])
+                self.store.put(partition, keys, stored)
+                self.store.put(latest, [lasting.encode()], {"partition": partition.hex()})
+                self._remember(thread, len(raw), keys)
+                state, forwarded, estimate, changed = stored, trimmed, report["after_tokens"], True
+                if on_fallback:
+                    on_fallback({"scope": "main", **report})
         return Exchange(forwarded, partition, [] if compacting else keys, state, changed, estimate, depth, diverged,
                         name, title, whole, compacting, lasting=lasting)
 
@@ -310,6 +398,14 @@ class Engine:
         if not exchange.keys:
             return  # the harness compacting itself: its usage says nothing about the conversation
         state = {k: v for k, v in exchange.state.items() if k != "tokens"}
+        if self.input_budget:
+            # Keep costs, but never feed provider counts back into local-budget
+            # planning or change the declared tokenizer using an observed ratio.
+            state.setdefault("base", exchange.estimate)
+            state["budget_tokens"] = exchange.estimate
+            state["provider_tokens"] = input_tokens
+            self.store.put(exchange.partition, exchange.keys, state)
+            return
         if "base" not in state or (input_tokens and state.get("estimated")):
             state["base"], state["estimated"] = input_tokens or exchange.estimate, not input_tokens
         if input_tokens:
@@ -448,20 +544,27 @@ class _Summarizer:
     A history too long for one request (Relay joined a long session late, or lost its state,
     while the harness kept every item) is summarized in order, a piece at a time, each piece
     after the summary of what came before it: the compactions that were skipped, caught up.
-    Codex instead drops the oldest items until the request fits; nothing is dropped here."""
+    The opt-in overflow fallback can discard old groups or shorten a large output
+    when splitting alone cannot fit it; every such change is reported separately."""
 
     def __init__(self, codec: Codec, body: Body, history: Callable[[int], list[WireItem]], keep: int,
-                 post: Post, window: float | None, per_token: float, instructions: str = "") -> None:
+                 post: Post, window: float | None, per_token: float, instructions: str = "", *,
+                 input_budget: InputBudget | None = None,
+                 on_fallback: Callable[[dict[str, Any]], None] | None = None) -> None:
         # `history(cut)`: the wire items a conversation cut replaces, the harness's own included;
         # `keep`: the leading ones every piece carries (Codex keeps the initial context);
         # `window`: in the per-item estimates' terms; `instructions`: the strategy's, as the
         # requests the model saw carry them (a summary request is then their prefix, cached).
         self.codec, self.body, self.history, self.keep, self.post = codec, body, history, keep, post
         self.instructions = instructions
+        self.input_budget = input_budget
+        self.on_fallback = on_fallback
         self.budget = int(window * SUMMARY_SHARE) if window else None
         self.per_token, self.requests, self.usage = per_token, 0, []  # (each request's usage, as the upstream reported it)
 
     def summarize(self, cut: int, prompt: str) -> str:
+        if self.input_budget:
+            return self._summarize_bounded(cut, prompt)
         items = self.history(cut)
         lead, rest, budget, summary = items[: self.keep], items[self.keep :], self.budget, ""
         while True:
@@ -490,21 +593,143 @@ class _Summarizer:
     def complete(self, items: Sequence[Item]) -> str:
         system = "\n\n".join(item.text for item in items if item.kind is Kind.SYSTEM)
         wire = [self.codec.write(item) for item in items if item.kind is not Kind.SYSTEM]
-        status, payload = self._post(self.codec.request(self.body, system, wire))
+        request = self.codec.request(self.body, system, wire)
+        # The completion's first user prompt defines the RLM task; later iteration
+        # outputs are expendable history. Never shorten that initial instruction.
+        first_user = next((n for n, value in enumerate(wire) if self.codec.classify(value).kind is Kind.USER), None)
+        protected = {first_user} if first_user is not None else set()
+        status, payload = self._post(request, scope="completion", protected=protected,
+                                     provider_fallback=True)
         if status >= 300 or not (isinstance(payload, dict) and self.codec.finished(payload)):
             raise RuntimeError(f"the model request failed with HTTP {status}: {payload!r:.300}")
         return self.codec.output_text(payload)
 
-    def _post(self, request: Body) -> tuple[int, Any]:
+    def _summarize_bounded(self, cut: int, prompt: str) -> str:
+        """Fit complete requests, including prompts, instructions and carryover.
+
+        Legal call/result groups stay intact. The optional common fallback trims
+        an oversized group only after the normal splitting path cannot fit it.
+        """
+        assert self.input_budget is not None
+        items = self.history(cut)
+        truncating = self.input_budget.overflow_fallback == "truncate"
+        keep = self.keep
+        if truncating:
+            first_user = next((n for n, value in enumerate(items) if self.codec.classify(value).kind is Kind.USER), None)
+            if first_user is not None:
+                keep = max(keep, first_user + 1)
+        lead, rest, summary = items[:keep], items[keep:], ""
+
+        def request_for(selected: list[WireItem]) -> Body:
+            request = self.codec.summary_request(self.body, selected, prompt)
+            return self.codec.with_instructions(request, self.instructions) if self.instructions else request
+
+        # Do not spend on summarizing an easy prefix when a later indivisible
+        # group is already known not to fit, even without a carried summary.
+        boundaries = sorted(self.codec.boundaries(rest))
+        if rest and (not boundaries or boundaries[-1] != len(rest)):
+            raise BudgetExceeded(self.input_budget.count(self.codec, request_for(items)),
+                                 self.input_budget.limit_for(self.body), "summary",
+                                 "The history has no complete final tool group.")
+        for start, end in zip(boundaries, boundaries[1:]):
+            minimal = request_for([*lead, *rest[start:end]])
+            try:
+                self.input_budget.check(self.codec, minimal, "summary")
+            except BudgetExceeded as exc:
+                if truncating:
+                    continue  # The smallest group will be trimmed just before dispatch.
+                raise BudgetExceeded(exc.tokens, exc.limit, "summary",
+                                     "The smallest legal history group or fixed prompt cannot fit.") from exc
+        maximum: int | None = None
+        while True:
+            fixed = [*lead, self.codec.user_message(f"{SUMMARY_PREFIX}\n{summary}")] if summary else lead
+
+            def build(piece: int) -> Body:
+                return request_for([*fixed, *rest[:piece]])
+
+            legal = sorted(n for n in self.codec.boundaries(rest)
+                           if n > 0 and (maximum is None or n <= maximum)) if rest else [0]
+            low, high, chosen = 0, len(legal) - 1, None
+            while low <= high:
+                middle = (low + high) // 2
+                candidate = build(legal[middle])
+                try:
+                    self.input_budget.check(self.codec, candidate, "summary")
+                except BudgetExceeded:
+                    high = middle - 1
+                else:
+                    chosen, low = legal[middle], middle + 1
+            if chosen is None:
+                if truncating and legal:
+                    chosen = legal[0]
+                else:
+                    smallest = build(legal[0] if legal else len(rest))
+                    raise BudgetExceeded(self.input_budget.count(self.codec, smallest),
+                                         self.input_budget.limit_for(smallest), "summary",
+                                         "The smallest legal history group or fixed prompt cannot fit.")
+            selected = build(chosen)
+            # with_instructions may insert developer items. Pin by identity, plus
+            # the final summarization prompt; carryover summaries remain editable.
+            lead_ids = {id(value) for value in lead}
+            selected_items = self.codec.items(selected)
+            protected = {n for n, value in enumerate(selected_items) if id(value) in lead_ids}
+            protected.add(len(selected_items) - 1)
+            status, payload = self._post(selected, protected=protected,
+                                         provider_fallback=chosen == legal[0])
+            if self.codec.is_overflow(status, payload):
+                # The provider can still disagree with the local convention.
+                # Retry a strictly shorter prefix, without repeating inference
+                # on the same input and without falling back to another method.
+                if chosen == legal[0]:
+                    raise BudgetExceeded(self.input_budget.count(self.codec, build(chosen)),
+                                         self.input_budget.limit_for(build(chosen)), "summary",
+                                         "The provider rejected the smallest legal history group.")
+                maximum = chosen - 1
+                continue
+            if status >= 300 or not (isinstance(payload, dict) and self.codec.finished(payload)):
+                raise RuntimeError(f"the summary response failed: HTTP {status}: {payload!r:.300}")
+            summary = self.codec.output_text(payload)
+            if not summary:
+                raise RuntimeError("the summary response contained no text")
+            rest, maximum = rest[chosen:], None
+            if not rest:
+                return summary
+
+    def _post(self, request: Body, *, scope: str = "summary", protected: set[int] | None = None,
+              provider_fallback: bool = False) -> tuple[int, Any]:
         """One request of Relay's own, retried while rate limited, overloaded, cut short or empty
         (a model may end its turn at once, without a word)."""
 
         attempt = 0
+        provider_trimmed = False
         while True:
+            if self.input_budget:
+                try:
+                    self.input_budget.check(self.codec, request, scope)
+                except BudgetExceeded:
+                    if self.input_budget.overflow_fallback != "truncate":
+                        raise
+                    request, report = truncate_request(self.codec, request, self.input_budget,
+                        scope=scope, protected=protected)
+                    if protected is not None:
+                        protected = {n for n, old in enumerate(report["kept_indices"]) if old in protected}
+                    if self.on_fallback:
+                        self.on_fallback({"scope": scope, **report})
             self.requests += 1
             status, payload = self.post(request)
             if isinstance(payload, dict) and (usage := payload.get("usage") or payload.get("usageMetadata")):
                 self.usage.append(usage)
+            if (self.input_budget and self.input_budget.overflow_fallback == "truncate"
+                    and provider_fallback and not provider_trimmed and self.codec.is_overflow(status, payload)):
+                request, report = truncate_request(self.codec, request, self.input_budget,
+                    scope=scope, protected=protected,
+                    target_limit=int(self.input_budget.count(self.codec, request) * 0.9))
+                if protected is not None:
+                    protected = {n for n, old in enumerate(report["kept_indices"]) if old in protected}
+                provider_trimmed = True
+                if self.on_fallback:
+                    self.on_fallback({"scope": scope, "provider_rejected": True, **report})
+                continue
             answered = isinstance(payload, dict) and self.codec.finished(payload) and self.codec.output_text(payload)
             incomplete = status < 300 and not answered
             if not (incomplete or status in TRANSIENT) or attempt == RETRIES:

@@ -2,19 +2,24 @@
 strategy: the conversation becomes a variable in a Python REPL, and the model works out the agent's
 next step by writing code over it and calling itself on parts of it.
 
-Each request runs the authors' package (`rlms`, `pip install 'relay[rlm]'`): the conversation (the
-user's messages, the agent's, its tool calls and their results, as `{"role", "content"}` dicts) is
+Each new conversation input runs the authors' package (`rlms`, `pip install 'relay[rlm]'`): the
+conversation (the user's messages, the agent's, its tool calls and their results, as `{"role", "content"}` dicts) is
 the REPL's `context`, and the root prompt asks for the agent's next step. The RLM cannot run the
 harness's tools, so its answer is all the task's model sees of the conversation, after the
 harness's own instructions and context: that model, with the harness's tools, takes the step. Every
 model call, the root's and the sub-calls', goes to the task's own model through the harness's
 upstream and credentials.
 
+A transport retry with unchanged conversation input reuses the last successful handoff from
+the strategy state. It does not add an empty persistent context or repeat auxiliary inference.
+
 `persistent` is the authors' multi-turn mode: a conversation's REPL stays across its requests, each
 request adds only what is new as the next `context_k`, and the work on earlier ones stays in
 `history_k` and in the variables the model kept, so a request reads what changed rather than the
-whole conversation again. Without it (`rlm`), as the authors run a fresh query, every request
-works over the whole conversation. The `local` environment runs the model's code in Relay's
+whole conversation again. Its session key travels with the stored handoff, even when the engine's
+conversation identifier changes as the first agent messages arrive. Without it (`rlm`), as the
+authors run a fresh query, every request works over the whole conversation. The `local`
+environment runs the model's code in Relay's
 process; the `rlm_environment` setting `docker` uses the authors' Docker environment instead.
 """
 
@@ -61,19 +66,31 @@ class RLM:
     def fingerprint(self) -> dict[str, Any]:
         return {"name": self.name, "persistent": self.persistent, "max_depth": self.max_depth,
                 "max_iterations": self.max_iterations, "environment": self.environment, "prompt": PROMPT,
-                "handoff": HANDOFF}
+                "handoff": HANDOFF, "handoff_cache": 1,
+                **({"persistent_session_key": 1} if self.persistent else {})}
 
     def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
         if not request.tools:
             return None
         conversation = [{"role": LABELS.get(item.kind, item.kind.value), "content": item.text}
                         for item in request.history if item.text]
-        runtime, context = self._session(request.conversation, conversation) if self.persistent else (self._new(), conversation)
+        digest = _digest(conversation)
+        saved = request.state
+        if (not request.force and isinstance(saved, dict) and saved.get("rlm_history_digest") == digest
+                and isinstance(saved.get("rlm_handoff"), str) and saved["rlm_handoff"].strip()):
+            return Context((Item(Kind.SUMMARY, saved["rlm_handoff"]),), state=saved)
+        key = saved.get("rlm_session_key") if isinstance(saved, dict) else None
+        key = key if isinstance(key, str) and key else request.conversation
+        runtime, context = self._session(key, conversation) if self.persistent else (self._new(), conversation)
         runtime.backend_kwargs = {"client": _TaskModel(summarizer)}  # this request's upstream, root and sub-calls alike
         answer = runtime.completion(context, root_prompt=PROMPT + (PERSISTENT if self.persistent else "")).response
         if not answer or not answer.strip():
             raise RuntimeError("the RLM gave no answer")
-        return Context((Item(Kind.SUMMARY, HANDOFF.format(answer=answer.strip())),))
+        handoff = HANDOFF.format(answer=answer.strip())
+        state = {"rlm_history_digest": digest, "rlm_handoff": handoff}
+        if self.persistent:
+            state["rlm_session_key"] = key
+        return Context((Item(Kind.SUMMARY, handoff),), state=state)
 
     def _new(self) -> Any:
         return _official().RLM(backend="relay", backend_kwargs={}, environment=self.environment, max_depth=self.max_depth,

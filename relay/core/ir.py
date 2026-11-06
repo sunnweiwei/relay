@@ -42,6 +42,7 @@ class Media:
     mime: str = ""  # e.g. "image/png", when known
     data: str = ""  # base64 content, when inline
     url: str = ""  # or where it is: a URL, a provider's file id
+    detail: str | None = None  # provider image detail, when the protocol exposes it
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,8 @@ class Item:
     media: tuple[Media, ...] = ()
     wire: str | None = None  # JSON of a wire item Relay writes, when not a plain message
     opaque: int = 0  # bytes of opaque content the model reads (encrypted reasoning, ...), decoded
+    opaque_key: str = ""  # digest only; links reasoning to previously observed provider usage
+    token_structure: str | None = None  # structured declarations; count decoded fields, not JSON escaping
 
 
 @dataclass(frozen=True)

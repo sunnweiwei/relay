@@ -235,6 +235,19 @@ class ClmTests(unittest.TestCase):
         later = self.send(*history, *call(5)).body["input"]  # and it holds for later requests
         self.assertTrue(any("SUMMARY" in json.dumps(item) for item in later))
 
+    def test_overflow_guard_does_not_grow_a_short_tool_result(self) -> None:
+        self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory)))
+        tiny = call(1)
+        tiny[-1]["output"] = "done"
+        sent = self.send(msg("user", "task"), msg("assistant", "x" * 16_000), *tiny)
+        output = next(item["output"] for item in sent.body["input"]
+                      if item.get("type") == "function_call_output")
+        self.assertEqual(output, "done")
+        self.assertFalse((self.directory / "withheld").exists())
+        # Assistant text remains the model's responsibility; the guard must not
+        # claim that withholding a tiny result could make this request fit.
+        self.assertGreater(sent.estimate, 4_000)
+
     def test_what_an_edit_kept_is_never_withheld(self) -> None:
         self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory)))
         history = [msg("user", "read the files"), *call(1), *call(2)]
