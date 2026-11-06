@@ -222,4 +222,7 @@ python -m evals.pilot.context_report --browse rows-browse.json --arc rows-arc.js
 ```
 
 The raw trajectories are not in this repository. They contain benchmark content, including
-hidden test data and answers, that should not be republished.
+hidden test data and answers, that should not be republished. They are kept in the private
+Hugging Face dataset `Corning/relay-context-eval-trajectories`, one archive per benchmark and
+method, with a `runs.csv` that maps each row of `cells.csv` to its files. Ask the authors for
+access.
