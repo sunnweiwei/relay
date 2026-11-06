@@ -1057,6 +1057,27 @@ Relay runs inside each task container. The driver collects scores and Codex toke
 usage, prints a comparison table, and exports CSV curves. See the module docstring for setup,
 a short smoke run, pricing assumptions, and compatibility limits.
 
+## ContextBench evaluation
+
+[The ContextBench eval](evals/context_bench.py) runs the CLM paper's ContextBench (RulinShao/ContextBench:
+kv_store, log_triage, needle_retention, sudoku_sketchpad) at the paper's 32K budget. Each method runs twice: once
+as the paper ran it (the authors' base loop, Codex's own compaction, their CLM, and the paper's ACM / Self-Compact /
+folding modes rebuilt on ContextBench's loop), and once with Relay's strategy in front of the same loop. It also
+has Relay-only arms (Codex-style summary with and without the kept user messages, AutoCompact, MEM1) and Codex
+through Relay. `--tasks figure2` runs the paper's Figure 2 ladder. The Harbor agents, and the paper modes'
+prompts and tools, are in `evals/context_bench_agent.py`. The model is reached at an OpenAI-compatible endpoint
+(`--base-url`), with `OPENAI_API_KEY` from the file `RELAY_TEST_KEYS` names; the module docstring covers setup,
+arms and output layout.
+
+## OSWorld evaluation
+
+[The OSWorld eval](evals/osworld.py) runs OSWorld 2.1's CarryOn subset (the 24 tasks that need no website by
+default) with OSWorld's Qwen scaffold over native function calling, in Docker VMs. Each method runs both through
+Relay (`relay_<strategy>`) and in a harness of its own (`native_<mode>`, [osworld_agent.py](evals/osworld_agent.py)),
+under one budget wall. The agent, the grader and the user simulator reach the model at an OpenAI-compatible
+endpoint (`--base-url`), with `OPENAI_API_KEY` from the file `RELAY_TEST_KEYS` names; the module docstring covers
+setup, arms and output layout.
+
 ## Development
 
 ```bash
