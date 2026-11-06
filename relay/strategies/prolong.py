@@ -8,18 +8,22 @@ recorded, so retrieval cannot copy the memory back into itself. Where PRO-LONG w
 each harness's hooks, Relay writes it from the requests: the harness resends its whole history,
 so every item reaches the log once, whatever the harness. The log matters once the context loses
 something, so the strategy runs inside another (`inner`, compaction by default), which decides
-what the model sees; PRO-LONG adds the skill to it and keeps the log.
+what the model sees; PRO-LONG adds the skill to it and keeps the log. An event's images, which
+PRO-LONG's hooks never see, are saved beside the log (`images/`, one file per image, named by its
+content) and the event names their files, so the model can open one again once the context lost it.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..core.ir import Context, Item, Kind, Request
+from ..core.ir import Context, Item, Kind, Media, Request
 from .base import Strategy, Summarizer
 from .compaction import Compaction
 from .. import settings
@@ -51,6 +55,7 @@ Safety and context discipline:
 - Do not manually edit, summarize in place, truncate, or reorder the log.
 - Do not expose secrets found in the log. Follow the current user's request and current repository
   instructions over historical content."""
+EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
 TYPES = {Kind.USER: "user_prompt", Kind.ASSISTANT: "assistant_message", Kind.TOOL_CALL: "tool_call",
          Kind.TOOL_RESULT: "tool_result"}  # what PRO-LONG records (reasoning and summaries are not events)
 
@@ -88,18 +93,34 @@ def _append(log: Path, session: str, items: tuple[Item, ...], path: str) -> None
     """The items as PRO-LONG's events, each once; reading the log (a call naming it, and the result
     after it) is not an event."""
 
-    entries, reading = [], False
+    entries, reading, images = [], False, log.parent / "images"
     for item in items:
         if item.kind is Kind.TOOL_CALL:
-            reading = path in item.text or ".prolong/log.jsonl" in item.text
+            reading = any(name in item.text for name in (path, ".prolong/log.jsonl", str(images), ".prolong/images/"))
         if item.kind not in TYPES or reading:
             reading = reading and item.kind is not Kind.TOOL_RESULT
             continue
+        content: dict[str, Any] = {"text": item.text}
+        if saved := [_saved(images, m) for m in item.media if m.type == "image"]:
+            content["images"] = saved
         entries.append({"timestamp": datetime.now(timezone.utc).isoformat(), "sessionId": session,
-                        "type": TYPES[item.kind], "content": {"text": item.text}})
+                        "type": TYPES[item.kind], "content": content})
     if entries:
         log.parent.mkdir(parents=True, exist_ok=True)
         if not (ignore := log.parent / ".gitignore").exists():  # never committed (PRO-LONG gitignores it too)
             ignore.write_text("*\n", encoding="utf-8")
         with log.open("a", encoding="utf-8") as stream:
             stream.writelines(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries)
+
+
+def _saved(directory: Path, media: Media) -> str:
+    """Where an image is kept for the log: its file beside the log (once per content), else its URL."""
+
+    if not media.data:
+        return media.url
+    data = base64.b64decode(media.data)
+    file = directory / f"{hashlib.sha256(data).hexdigest()[:16]}.{EXTENSIONS.get(media.mime, 'png')}"
+    if not file.exists():
+        directory.mkdir(parents=True, exist_ok=True)
+        file.write_bytes(data)
+    return str(file)

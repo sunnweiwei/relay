@@ -58,7 +58,7 @@ def login(out: Path) -> Path:
 
 
 def relay(arm: str, port: int, home: Path, window: int, **extra: object) -> subprocess.Popen:
-    settings = {"host": HOST, "port": port, "strategy": arm, "context_window": window,
+    settings = {"host": HOST, "allow_network": "true", "port": port, "strategy": arm, "context_window": window,
                 "event_log": str(home / "events.jsonl"), "cache_path": str(home / "store.json"), **extra}
     if arm == "clm":
         (home / "live_ctx").mkdir(mode=0o777, exist_ok=True)

@@ -9,7 +9,7 @@ from typing import Any
 from unittest import mock
 
 from relay.core.engine import Engine, Exchange
-from relay.core.ir import Item, Kind, Request
+from relay.core.ir import Item, Kind, Media, Request
 from relay.harnesses import Harness
 from relay.protocols import OpenAIResponses
 from relay.strategies import RLM, PersistentRLM
@@ -75,6 +75,19 @@ class RLMTests(unittest.TestCase):
         self.assertIn("Run `cat file_2.txt`.", handoff.text)
         RLM().plan(request(TASK, CALL, RESULT), model)
         self.assertEqual(len(Runtime.made), 2)  # a fresh query every request
+
+    def test_images_are_marked_for_the_repl_and_the_current_turns_go_with_the_root_call_and_handoff(self) -> None:
+        old, new = Media("image", "image/png", "b2xk"), Media("image", "image/png", "bmV3")
+        first = Item(Kind.TOOL_RESULT, "opened", 3, media=(old,))
+        second = Item(Kind.TOOL_RESULT, "", 5, media=(new,))
+        model = Model()
+        context = RLM().plan(request(TASK, CALL, first, Item(Kind.TOOL_CALL, "click", 4), second), model)
+        runtime, = Runtime.made
+        self.assertEqual(runtime.contexts[0][2], {"role": "tool", "content": "opened\n[image, not shown here]"})
+        self.assertEqual(runtime.contexts[0][4], {"role": "tool", "content": "[image, not shown here]"})
+        self.assertEqual(model.asked[0][1], Item(Kind.USER, "go", media=(new,)))
+        handoff, = context.items
+        self.assertEqual(handoff.media, (new,))
 
     def test_persistent_adds_only_what_is_new_and_starts_over_when_the_history_changes(self) -> None:
         strategy, model = PersistentRLM(), Model()
