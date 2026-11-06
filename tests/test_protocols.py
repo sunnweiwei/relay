@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import struct
 import unittest
 from pathlib import Path
 
@@ -328,6 +330,14 @@ class OpaqueContentTests(unittest.TestCase):
         self.assertEqual((bytes_per_token("gpt-6-luna"), bytes_per_token("anthropic/claude-sonnet-5-5")), (4, 2.5))
         self.assertEqual(item_tokens(Item(Kind.REASONING, "abcd", opaque=300)), 76)
         self.assertEqual(item_tokens(Item(Kind.USER, "x" * 250), bytes_per_token("claude-x")), 100)
+
+    def test_an_image_counts_by_its_pixels_not_its_base64(self) -> None:
+        png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + struct.pack(">II", 1920, 1080)
+                               + b"\x08\x02\x00\x00\x00" + b"\x00" * 4000).decode()
+        image = OpenAIChat().classify({"role": "tool", "tool_call_id": "c", "content": [
+            {"type": "text", "text": "done"}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png}"}}]})
+        self.assertEqual(item_tokens(image), 1 + 2765)
+        self.assertEqual(item_tokens(Item(Kind.USER, media=(Media("image", url="https://x/y.png"),))), 1600)
 
 
 class CompletionTests(unittest.TestCase):

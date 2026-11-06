@@ -4,11 +4,16 @@ strategy: the model compresses its context when it decides to, and recalls what 
 As in ACM, `manage_context` compresses everything since the previous call (or since the start) up
 to the message that issued it: the original messages are saved to disk as `summary_<N>.json`, and
 the call's result becomes the summary, "[summary_id: N] ..."; `query_memory(N, query)` asks for
-what a summary's original messages say about the query. The system prompt and the user's messages
-always stay. After each tool result the model reads its context size, "[CURRENT CONTEXT TOKEN: N]"
-(a note at the end of the request). The harness's shell stands in for the tools: the agent runs
+what a summary's original messages say about the query. The system prompt and the original question
+(the first user message) always stay; as in ACM's runner, whose compression boundary starts right
+after them, everything later is compressed alike, the user's later messages included. After each
+tool result the model reads its context size, "[CURRENT CONTEXT TOKEN: N]" (a note at the end of the
+request). The harness's shell stands in for the tools: the agent runs
 `echo "[manage_context]"` and `echo "[query_memory] N :: query"`, and the echo's result is rewritten
 in place. ACM's prompts are used as released (`src/prompts.py`), its guidance worded for a shell.
+Unlike the release, which serializes messages as text only, a compressed range's images go with it:
+each is marked `[image N]` where it was, attached to the summary request, and saved with the originals,
+so query_memory sees them too.
 """
 
 from __future__ import annotations
@@ -19,8 +24,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from ..core.ir import LABELS, Context, Item, Kind, Request
-from ..core.tokens import approx_tokens
+from ..core.ir import LABELS, Context, Item, Kind, Media, Request
+from ..core.tokens import approx_tokens, item_tokens
 from .base import Summarizer
 from .conversation import ignored, signalled, step
 from .. import settings
@@ -31,7 +36,7 @@ Your in-context information serves as short-term memory; previously compressed s
 
 After each tool result, the system appends "[CURRENT CONTEXT TOKEN: N]" at the end of the conversation — this tells you your current context usage. Read it; do NOT emit it yourself.
 
-To manage your context, run the shell command `echo "[manage_context]"`, alone (no other tool call beside it). The system then compresses everything in your conversation since your previous manage_context call (or since the start of the conversation if this is your first call) up to (but not including) the message that issued the call. The system prompt and the user's messages are always preserved. The original messages in the compressed range are saved to disk; the command's result becomes a summary of paths explored, reasoning, and conclusions, prefixed with "[summary_id: N]".
+To manage your context, run the shell command `echo "[manage_context]"`, alone (no other tool call beside it). The system then compresses everything in your conversation since your previous manage_context call (or since the start of the conversation if this is your first call) up to (but not including) the message that issued the call. The system prompt and the original question are always preserved. The original messages in the compressed range are saved to disk; the command's result becomes a summary of paths explored, reasoning, and conclusions, prefixed with "[summary_id: N]".
 
 To retrieve detailed information from any prior summary's original messages, run `echo "[query_memory] <summary_id> :: <query>"`, alone (no other tool call beside it); its result becomes the information retrieved.
 
@@ -137,16 +142,17 @@ class ACM:
                 continue
             if name == "query_memory":
                 text = self._recall(request, said, summarizer)
-            else:  # compress from the last summary on, up to the response that called
-                since = max((m + 1 for m in range(start) if _summary(items[m])), default=0)
-                dropped = [item for item in items[since:start] if item.kind is not Kind.USER]
+            else:  # compress from the last summary on (at first, from after the question), up to the response that called
+                question = next((m + 1 for m, item in enumerate(items) if item.kind is Kind.USER), 0)
+                since = max([question, *(m + 1 for m in range(start) if _summary(items[m]))])
+                dropped = items[since:start]
                 text = NOTHING
                 if dropped:
                     number = sum(map(_summary, items[:since])) + 1
                     text = f"{SUMMARY_ID}{number}] {self._compress(request, items[:start], dropped, number, summarizer)}"
-                    items[since:start] = [item for item in items[since:start] if item.kind is Kind.USER]
+                    del items[since:start]
                     first, end = first - len(dropped), end - len(dropped)
-                    tokens -= sum(approx_tokens(item.text) for item in dropped)
+                    tokens -= sum(map(item_tokens, dropped))
             tokens += approx_tokens(text) - approx_tokens(items[first].text)  # (its only call: the one result)
             items[first] = replace(items[first], text=text)
             n = end
@@ -158,14 +164,21 @@ class ACM:
                   summarizer: Summarizer) -> str:
         """ACM's summary of `dropped`, whose original messages it saves first."""
 
-        messages = [{"role": LABELS.get(item.kind, item.kind.value), "content": item.text} for item in dropped]
+        messages, images = [], []
+        for item in dropped:
+            message = {"role": LABELS.get(item.kind, item.kind.value), "content": item.text}
+            if shown := [m for m in item.media if m.type == "image"]:
+                message["content"] += "".join(f" [image {len(images) + k}]" for k in range(1, len(shown) + 1))
+                message["images"] = [{"mime": m.mime, "data": m.data, "url": m.url} for m in shown]
+                images += shown
+            messages.append(message)
         path = Path(self.directory) / request.conversation / f"summary_{number}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8")
-        question = "\n\n".join(item.text for item in before if item.kind is Kind.USER)
+        question = next((item.text for item in before if item.kind is Kind.USER), "")
         conversation = "\n\n".join(f"[{m['role']}] {m['content']}" for m in messages)
-        text = THINK.sub("", summarizer.summarize(0, SUMMARY_INSTRUCTION.format(question=question,
-                                                                                conversation=conversation))).strip()
+        prompt = SUMMARY_INSTRUCTION.format(question=question, conversation=conversation)
+        text = THINK.sub("", _ask(summarizer, prompt, images)).strip()
         memory = MEMORY.search(text)  # ACM's parse: the <memory> block, else the whole answer
         return memory.group(1).strip() if memory and len(memory.group(1).strip()) >= 50 else text
 
@@ -177,9 +190,18 @@ class ACM:
         path = Path(self.directory) / request.conversation / f"summary_{number}.json"
         if not path.exists():
             return f"Error: summary_id {number} not found."
-        history = "\n".join(f"[{m['role']}] {m['content']}" for m in json.loads(path.read_text(encoding="utf-8")))
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        history = "\n".join(f"[{m['role']}] {m['content']}" for m in saved)
+        images = [Media("image", **image) for m in saved for image in m.get("images", ())]
         prompt = QUERY_MEMORY_PROMPT.format(summary_id=number, history=history, query=query.strip())
-        return f"[query_memory: summary_id={number}]\n\n{THINK.sub('', summarizer.summarize(0, prompt)).strip()}"
+        return f"[query_memory: summary_id={number}]\n\n{THINK.sub('', _ask(summarizer, prompt, images)).strip()}"
+
+
+def _ask(summarizer: Summarizer, prompt: str, images: list[Media]) -> str:
+    """ACM's prompt, answered as the harness's own summary request; with images, as one message carrying them
+    (a summary request's prompt is text only)."""
+
+    return summarizer.complete([Item(Kind.USER, prompt, media=tuple(images))]) if images else summarizer.summarize(0, prompt)
 
 
 def _summary(item: Item) -> bool:

@@ -17,6 +17,9 @@ next request comes, so a task is reflected on then (that request waits for it), 
 conversation's last turn is never. And ACE does not bound a task's context (AppWorld's agent
 trims old outputs itself): past the compaction threshold, the conversation is compacted as
 `compaction` compacts it, which leaves the playbook as it is.
+
+Unlike ACE, whose trajectories are text, a task's images go with its history: each is marked
+`[image N]` where it was, and the reflector and the curator get them attached.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import settings
-from ..core.ir import Context, Item, Kind, Request
+from ..core.ir import Context, Item, Kind, Media, Request
 from .base import Summarizer
 from .compaction import Compaction
 
@@ -115,27 +118,33 @@ def _digest(task: tuple[Item, ...]) -> str:
     return hashlib.sha256("\0".join(f"{i.kind.value}:{i.text}" for i in task).encode()).hexdigest()[:16]
 
 
-def _history(task: tuple[Item, ...]) -> str:
-    """ACE's "FULL CONVERSATION HISTORY" of a task."""
+def _history(task: tuple[Item, ...]) -> tuple[str, tuple[Media, ...]]:
+    """ACE's "FULL CONVERSATION HISTORY" of a task, and its images, each marked where it was."""
 
-    lines = [f"[{n}] {ROLES.get(item.kind, 'user').upper()}: {item.text}\n" for n, item in enumerate(task)
-             if item.kind in ROLES]
-    return "\n\n=== FULL CONVERSATION HISTORY ===\n" + "\n".join(lines)
+    lines, images = [], []
+    for n, item in enumerate(task):
+        if item.kind not in ROLES:
+            continue
+        shown = [m for m in item.media if m.type == "image"]
+        marks = "".join(f"\n[image {len(images) + k}]" for k in range(1, len(shown) + 1))
+        images += shown
+        lines.append(f"[{n}] {ROLES[item.kind].upper()}: {item.text}{marks}\n")
+    return "\n\n=== FULL CONVERSATION HISTORY ===\n" + "\n".join(lines), tuple(images)
 
 
 def _learn(path: Path, task: tuple[Item, ...], summarizer: Summarizer) -> None:
     """ACE's curator_call: the reflector on the task, then the curator's additions merged."""
 
-    history, playbook = _history(task), _read(path)
+    (history, images), playbook = _history(task), _read(path)
     reflector = (REFLECTOR.replace("{{ground_truth_code}}", "").replace("{{test_report}}", "")
                  .replace("{{generated_code}}", SEEN).replace("{{generated_rationale}}", SEEN)
                  .replace("{{spec_or_api_docs}}", SEEN).replace("{{execution_error}}", SEEN)
                  .replace("{{playbook}}", playbook or "N/A").replace("{{previous_reflection}}", "N/A"))
-    reflection = summarizer.complete([Item(Kind.USER, reflector + history)])
+    reflection = summarizer.complete([Item(Kind.USER, reflector + history, media=images)])
     question = next((item.text for item in task if item.kind is Kind.USER), "")
     curator = CURATOR.format(initial_generated_code=SEEN, final_generated_code=SEEN, guidebook=reflection,
                              current_playbook=playbook, question_context=question, gt=None)
-    answer = summarizer.complete([Item(Kind.USER, curator + history)])
+    answer = summarizer.complete([Item(Kind.USER, curator + history, media=images)])
     operations = _operations(answer)
     with _locked(path):
         current = _read(path)  # (another conversation may have added to it meanwhile)

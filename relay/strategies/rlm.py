@@ -16,6 +16,10 @@ request adds only what is new as the next `context_k`, and the work on earlier o
 whole conversation again. Without it (`rlm`), as the authors run a fresh query, every request
 works over the whole conversation. The `local` environment runs the model's code in Relay's
 process; the `rlm_environment` setting `docker` uses the authors' Docker environment instead.
+
+The REPL holds text only: each image stands in its message as `[image, not shown here]`. The images
+of the current turn (what came in since the model's last response) are not left at that: they go with
+the RLM's own root calls, and with its answer to the model that takes the step.
 """
 
 from __future__ import annotations
@@ -39,8 +43,10 @@ HANDOFF = """Result from the Recursive Language Model:
 {answer}
 
 Produce the next assistant response now. Follow the original instructions and available tool schemas. If the result calls for a tool, emit the corresponding native tool call. Do not mention the Recursive Language Model or this handoff."""
+IMAGE = "[image, not shown here]"
 SESSIONS = 32  # persistent REPLs kept, the least recently used dropped first
 ROLES = {"system": Kind.SYSTEM, "assistant": Kind.ASSISTANT}
+RESPONSE = (Kind.ASSISTANT, Kind.TOOL_CALL, Kind.REASONING)
 
 
 @dataclass(frozen=True)
@@ -66,14 +72,15 @@ class RLM:
     def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
         if not request.tools:
             return None
-        conversation = [{"role": LABELS.get(item.kind, item.kind.value), "content": item.text}
-                        for item in request.history if item.text]
+        conversation = [{"role": LABELS.get(item.kind, item.kind.value), "content": _content(item)}
+                        for item in request.history if _content(item)]
         runtime, context = self._session(request.conversation, conversation) if self.persistent else (self._new(), conversation)
-        runtime.backend_kwargs = {"client": _TaskModel(summarizer)}  # this request's upstream, root and sub-calls alike
+        images = _turn_images(request.history)
+        runtime.backend_kwargs = {"client": _TaskModel(summarizer, images)}  # this request's upstream, root and sub-calls alike
         answer = runtime.completion(context, root_prompt=PROMPT + (PERSISTENT if self.persistent else "")).response
         if not answer or not answer.strip():
             raise RuntimeError("the RLM gave no answer")
-        return Context((Item(Kind.SUMMARY, HANDOFF.format(answer=answer.strip())),))
+        return Context((Item(Kind.SUMMARY, HANDOFF.format(answer=answer.strip()), media=images),))
 
     def _new(self) -> Any:
         return _official().RLM(backend="relay", backend_kwargs={}, environment=self.environment, max_depth=self.max_depth,
@@ -106,13 +113,20 @@ class _TaskModel:
 
     model_name = "task"
 
-    def __init__(self, lm: Summarizer) -> None:
-        self.lm, self.calls = lm, 0
+    def __init__(self, lm: Summarizer, images: tuple[Any, ...] = ()) -> None:
+        self.lm, self.images, self.calls = lm, images, 0
 
     def completion(self, prompt: str | list[dict[str, Any]], model: str | None = None) -> str:
+        """A root call (a message list) carries the current turn's images on its first user message; a
+        sub-call (a prompt the model's code wrote) does not."""
+
         self.calls += 1
         messages = [{"role": "user", "content": prompt}] if isinstance(prompt, str) else prompt
-        return self.lm.complete([Item(ROLES.get(m["role"], Kind.USER), str(m["content"])) for m in messages])
+        items = [Item(ROLES.get(m["role"], Kind.USER), str(m["content"])) for m in messages]
+        if isinstance(prompt, list) and self.images:
+            first = next(n for n, item in enumerate(items) if item.kind is Kind.USER)
+            items[first] = Item(Kind.USER, items[first].text, media=self.images)
+        return self.lm.complete(items)
 
     async def acompletion(self, prompt: str | list[dict[str, Any]], model: str | None = None) -> str:
         return await asyncio.to_thread(self.completion, prompt, model)
@@ -144,6 +158,23 @@ def _official() -> Any:
         get_client.relay = True  # type: ignore[attr-defined]
         core.get_client = get_client
     return core
+
+
+def _images(item: Item) -> tuple[Any, ...]:
+    return tuple(m for m in item.media if m.type == "image")
+
+
+def _turn_images(history: tuple[Item, ...]) -> tuple[Any, ...]:
+    """The images that came in since the model's last response."""
+
+    last = max((n for n, item in enumerate(history) if item.kind in RESPONSE), default=-1)
+    return tuple(m for item in history[last + 1:] for m in _images(item))
+
+
+def _content(item: Item) -> str:
+    """A message's text for the REPL, a marker where each of its images was."""
+
+    return "\n".join(filter(None, (item.text, *(IMAGE for _ in _images(item)))))
 
 
 def _digest(items: list[dict[str, str]]) -> str:

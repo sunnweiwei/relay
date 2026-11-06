@@ -37,6 +37,7 @@ from typing import Any
 
 from .. import settings
 from ..core.ir import Context, Item, Kind, Request
+from ..core.tokens import item_tokens
 from .base import Summarizer
 from .compaction import Compaction
 from .conversation import RESPONSE, calls as _parsed
@@ -54,7 +55,7 @@ KEEP_CALL = ("Tool call {id} ({tool}) should stay in the history: knowing this c
              "matters for what the assistant does next")
 KEEP_RESULT = ("The full output of tool call {id} ({tool}, {chars} chars) should stay in the history verbatim: the "
                "assistant still needs its contents and re-running the tool would not do")
-TRUNCATED = "[fast-jev-compaction truncated {chars} chars of this tool result; re-run the tool if needed]"
+TRUNCATED = "[fast-jev-compaction truncated {what} of this tool result; re-run the tool if needed]"
 INPUT_CHARS = (1000, 200, 60)  # successive caps on a call's input in the state
 TEXT_HEAD, TEXT_TAIL = 400, 150
 OVERHEAD = 20  # tokens the request envelope adds around state and questions
@@ -74,6 +75,7 @@ class _Call:
     chars: int  # its result's size
     pinned: bool
     cut: int  # the cut of the conversation (a model response and its results) it goes with
+    images: int  # its result's images
 
 
 @dataclass(frozen=True)
@@ -115,9 +117,9 @@ class Jev:
             return self.fallback.plan(replace(request, force=True), summarizer)
         # (of the conversation, as the library's messages: not the harness's instructions and tools,
         # which Codex declares among the items, and nothing compacts)
-        chars = lambda kept: sum(len(item.text) for item in kept if item.kind is not Kind.SYSTEM)  # noqa: E731
-        before = chars(request.current)
-        reduction = (before - chars(items)) / before if before else 0.0
+        size = lambda kept: sum(item_tokens(item) for item in kept if item.kind is not Kind.SYSTEM)  # noqa: E731
+        before = size(request.current)
+        reduction = (before - size(items)) / before if before else 0.0
         log.info("jev: %d%% reduction; %s", round(reduction * 100), stats)
         if reduction < self.min_reduction:
             log.info("jev: fallback to compaction (below %d%% minimum)", round(self.min_reduction * 100))
@@ -166,7 +168,8 @@ class Jev:
             for k, (n, tool, value) in enumerate(made):
                 answered = [results[k]] if len(results) == len(made) else results  # (one message of all: together)
                 calls.append(_Call(f"t{len(calls) + 1}", tool, value, at[n], at[answered[-1]],
-                                   sum(len(items[r].text) for r in answered), False, cut))
+                                   sum(len(items[r].text) for r in answered), False, cut,
+                                   sum(_images(items[r]) for r in answered)))
         for call in calls:  # (a cut is pinned where one of its calls is)
             call.pinned = any(pinned(c.message) or pinned(c.result) for c in calls if c.cut == call.cut)
         return calls
@@ -189,7 +192,7 @@ class Jev:
             history = []
             for i, members in enumerate(messages):
                 own = [{"id": c.id, "tool": c.tool, "input": _truncate(_input(c.input), limit),
-                        "result": f"{c.chars} chars (omitted)"} for c in by_message.get(i, [])]
+                        "result": f"{_described(c.chars, c.images)} (omitted)"} for c in by_message.get(i, [])]
                 if texts[i].strip() or own:
                     history.append({"i": i, "role": _role(items, members), "text": texts[i], **({"tool_calls": own} if own else {})})
             return history
@@ -285,15 +288,28 @@ class Jev:
         for n, item in enumerate(items):
             action = decided.get(cuts.get(n, -1), "keep")
             if action == "drop_result" and item.kind is Kind.TOOL_RESULT:
-                out.append(replace(item, text=self._truncated(item.text)))
+                out.append(replace(item, text=self._truncated(item.text, _images(item)),
+                                   media=tuple(m for m in item.media if m.type != "image")))
             elif not (action == "drop_call" and item.kind in (Kind.TOOL_CALL, Kind.TOOL_RESULT, Kind.REASONING)):
                 out.append(item)
         return tuple(out)
 
-    def _truncated(self, text: str) -> str:
+    def _truncated(self, text: str, images: int) -> str:
         if len(text) <= self.head + 120:
-            return text
-        return (f"{text[: self.head]}\n" if self.head > 0 else "") + TRUNCATED.format(chars=len(text) - self.head)
+            return f"{text}\n{TRUNCATED.format(what=_described(0, images))}".strip() if images else text
+        return (f"{text[: self.head]}\n" if self.head > 0 else "") + TRUNCATED.format(
+            what=_described(len(text) - self.head, images))
+
+
+def _images(item: Item) -> int:
+    return sum(m.type == "image" for m in item.media)
+
+
+def _described(chars: int, images: int) -> str:
+    """A result's size as Jev and the model are told it: "N chars", and its images."""
+
+    shown = [f"{chars} chars"] if chars or not images else []
+    return " and ".join([*shown, *([f"{images} image{'s' if images > 1 else ''}"] if images else [])])
 
 
 def _messages(items: tuple[Item, ...]) -> list[list[int]]:

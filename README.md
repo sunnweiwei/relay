@@ -430,7 +430,8 @@ original task are protected, as there: they stay out of the file. The file's for
 the authors' adaptation of CLM to a coding harness: a metadata line, then one
 `[[CTX_TURN ... id=...]]` block per turn. Untouched blocks stay the original items, byte for byte
 (tool calls, reasoning and images intact); an edited user, assistant or tool-result turn keeps its
-place with the new text (a result still answers its call, and keeps its images); an edited tool
+place with the new text (a result still answers its call), and the images whose `[image N of this
+turn, ~T tokens]` lines it kept; an edited tool
 call or reasoning item, and every block the model adds (`id=new-*`, any role label), becomes a
 user-role note labelled with the role; a tool call left without its result (or the reverse), or
 reasoning away from the item it preceded, is told as a note when the request is sent, and nothing
@@ -542,7 +543,8 @@ to search only what it needs there with `rg`, `grep`, `jq` or a script. The log 
 prompt, and reading it is not recorded. PRO-LONG writes the log from each harness's hooks; Relay
 writes it from the requests, so it works in every harness. It matters once the context loses
 something, so it runs around compaction (the `compact_*` settings apply): compaction decides
-what the model sees, the log keeps everything.
+what the model sees, the log keeps everything. An event's images are saved beside the log
+(`images/`, one file per image) and the event names their files, so the agent can open one again.
 
 Checked in Docker with `check.py --strategy prolong`: each file also names an animal, which turn 1
 does not ask for and turn 2 does, after a compaction, without the files. In all 18 two-turn
@@ -567,7 +569,9 @@ without ground truth, `ACE_online_no_GT`):
 - the playbook is in every request, in the words of ACE's generator prompt (`### PLAYBOOK BEGIN`);
 - a task ends when the agent ends it (AppWorld's `complete_task()`; here, a turn the agent closes
   with a reply and no tool call). Then ACE's reflector diagnoses the task's whole trajectory, and
-  ACE's curator turns the reflection into `ADD` operations, the only ones ACE's agent setup takes;
+  ACE's curator turns the reflection into `ADD` operations, the only ones ACE's agent setup takes.
+  Both get the task's images, each marked `[image N]` in the history where it was (ACE's own
+  trajectories are text);
 - additions are merged by ACE's rules (`playbook.py`): a fresh id (`[vc-00012]`), at the end of
   its section (ACE's eight), else of OTHERS; operations outside ACE's sections are skipped, and an
   answer that is not ACE's JSON, or holds an operation other than `ADD`, adds nothing. The file
@@ -599,7 +603,9 @@ plugin as they are:
   abridged, shrunk in the library's stages to 25k tokens; the questions go in as many requests as fit
   30k beside it, at once;
 - a call whose result Jev keeps (0.5 or more) stays as it is; one whose call it keeps keeps the
-  first 300 characters of its result and the library's note; the others go, with their results;
+  first 300 characters of its result and the library's note (its images go too, and the note says
+  so); the others go, with their results. A result's images are part of its size as Jev is told it,
+  and of the share freed, which is counted in tokens;
 - where Jev cannot answer (no key, an error, a history it cannot fit) or the result frees less than
   a quarter of the conversation (as the library counts it: not the harness's instructions and tools),
   `compaction` compacts it then, as the plugin falls back to Claude Code's own summary. Relay's log
@@ -662,11 +668,11 @@ guidance asks the agent to `echo` a signal, and the echo's result is rewritten i
 | Baseline | `strategy` | What Relay does | Prompts |
 | --- | --- | --- | --- |
 | Summary | `compaction` with `relay set compact_ratio=0.75` | Codex's compaction at 75% of the budget (the paper's summary harness) | Codex's |
-| Self-Compact ([arXiv 2606.23525](https://arxiv.org/abs/2606.23525)) | `selfcompact` | every two model responses once the prompt passes 37% of the window, appends the rubric to the conversation (prompt cache reused); C1 = C2 = C3 = Y and N1 = N fires the summarizer, and the summary replaces the trajectory (the user's messages stay); past 95% it summarizes without asking | the paper's rubric and summarizer, verbatim |
+| Self-Compact ([arXiv 2606.23525](https://arxiv.org/abs/2606.23525)) | `selfcompact` | every two model responses once the prompt passes 37% of the window, appends the rubric to the conversation (prompt cache reused); C1 = C2 = C3 = Y and N1 = N fires the summarizer, and, as Self-Compact's agent resets it, the context becomes the original question, the summary as the assistant's ("Here is my research so far:") and the user's "continue" (the user's later messages go with the rest); past 95% it summarizes without asking | its released code's rubric, summarizer (the `<summary>` block taken) and continue message, verbatim |
 | AutoCompact ([autocompact.github.io](https://autocompact.github.io/)) | `autocompact` | the agent runs `echo "[compact]"` at a phase transition; the same model writes an "# Auto Context Summary", which answers the call, and the context becomes the user's messages, the turn before the call and the summary; Codex's compaction stays as the fallback (`compact_*`) | none released; written from its description |
-| ACM ([github](https://github.com/lixiaochuan2020/agentic-context-management)) | `acm` | `echo "[manage_context]"` compresses everything since the previous call into "[summary_id: N] ...", the originals saved to `acm_dir/<conversation>/summary_N.json`; `echo "[query_memory] N :: query"` answers from them; every request after a tool result ends with "[CURRENT CONTEXT TOKEN: N]" | ACM's summarizer and recall prompts, verbatim; its guidance worded for a shell |
+| ACM ([github](https://github.com/lixiaochuan2020/agentic-context-management)) | `acm` | `echo "[manage_context]"` compresses everything since the previous call (at first, since the original question, which stays, as in ACM's runner; the user's later messages are compressed too) into "[summary_id: N] ...", the originals saved to `acm_dir/<conversation>/summary_N.json`; `echo "[query_memory] N :: query"` answers from them; every request after a tool result ends with "[CURRENT CONTEXT TOKEN: N]" | ACM's summarizer and recall prompts, verbatim; its guidance worded for a shell; a compressed range's images go to the summarizer and are saved with the originals (the release serializes text only) |
 | MEM1 ([github](https://github.com/MIT-MI/MEM1)) | `mem1` | the model writes its internal state in `<IS>` every response; the context is cut back to the newest response holding one (the user's messages stay) | MEM1's, for an agent's tools |
-| RLM ([github](https://github.com/alexzhang13/rlm)) | `rlm`, `rlm_persistent` | before every step the authors' RLM works out the agent's next step, the conversation held as `context` in its REPL; its answer is all the task's model sees of the conversation, and that model, with the harness's tools, takes the step. `rlm` is a fresh query every request (the whole conversation again, nothing cached); `rlm_persistent` is the authors' multi-turn mode: the conversation's REPL stays, each request adds only what is new as `context_k`, and earlier work stays in `history_k` and in the model's variables | the authors' (`rlms` 0.1.3); the root prompt asks for the next step |
+| RLM ([github](https://github.com/alexzhang13/rlm)) | `rlm`, `rlm_persistent` | before every step the authors' RLM works out the agent's next step, the conversation held as `context` in its REPL; its answer is all the task's model sees of the conversation, and that model, with the harness's tools, takes the step. `rlm` is a fresh query every request (the whole conversation again, nothing cached); `rlm_persistent` is the authors' multi-turn mode: the conversation's REPL stays, each request adds only what is new as `context_k`, and earlier work stays in `history_k` and in the model's variables. The REPL holds text, each image marked where it was; the conversation's newest images go with the answer to the model that takes the step | the authors' (`rlms` 0.1.3); the root prompt asks for the next step |
 | Context Folding | `folding` | see above | FoldAgent's |
 
 Base is Relay without a strategy that changes anything. AutoCompact and MEM1 train their models to

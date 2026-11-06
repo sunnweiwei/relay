@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import struct
 import unittest
 
 from relay.core.ir import Item, Kind, Media, Request
@@ -77,6 +79,13 @@ class CompactionTests(unittest.TestCase):
         small = item(Kind.TOOL_RESULT, "x" * 100, 4)
         self.assertIsNone(strategy.plan(request(TASK, CALL, small), FakeSummarizer()))
         self.assertIsNotNone(strategy.plan(request(TASK, CALL, small, force=True), FakeSummarizer()))
+
+    def test_images_count_toward_what_compaction_frees(self) -> None:
+        png = base64.b64encode(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">II", 1920, 1080)).decode()
+        shot = item(Kind.TOOL_RESULT, "", 4, media=(Media("image", "image/png", png),))
+        history = [TASK, *[x for _ in range(10) for x in (CALL, shot)]]
+        context = Compaction(threshold=20_000, min_gain=0.5).plan(request(*history, tokens=30_000), FakeSummarizer())
+        self.assertIsNotNone(context)
 
     def test_nothing_to_compact_without_agent_items(self) -> None:
         self.assertIsNone(self.strategy.plan(request(TASK, force=True), FakeSummarizer()))

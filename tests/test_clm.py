@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -89,6 +91,15 @@ class ClmTests(unittest.TestCase):
         self.assertNotIn("output 1 x", json.dumps(sent.body))
         self.assertEqual(sent.body["input"][-3:-1], call(4))
 
+    def test_an_edit_on_the_first_turn_holds_though_the_conversation_is_named_later(self) -> None:
+        first = [msg("developer", "rules"), msg("user", "read the files"), msg("user", "batch " + "y" * 400)]
+        self.send(*first)
+        self.edit(lambda s: s.replace("batch " + "y" * 400, "[batch offloaded]"))
+        sent = self.send(*first, *call(1, "python3 edit.py"))
+        self.assertTrue(sent.compacted)
+        self.assertNotIn("y" * 400, json.dumps(sent.body))
+        self.assertIn("[context file: edit applied", sent.body["input"][-1]["content"][0]["text"])
+
     def test_a_broken_file_is_refused_and_says_why(self) -> None:
         self.send(*self.history)
         self.edit(lambda s: s.replace("revision=0", "revision=7"))
@@ -129,6 +140,26 @@ class ClmTests(unittest.TestCase):
         self.assertIn(self.history[2], sent)  # the call, as it was
         self.assertIn({**self.history[3], "output": "output 1: nothing found"}, sent)
         self.assertNotIn("[context role=", json.dumps(sent[:-1]))  # nothing lowered to a note
+
+    def test_a_turns_images_are_lines_the_model_keeps_or_deletes(self) -> None:
+        self.engine = Engine(ContextLanguageModel(budget=20_000, directory=str(self.directory)))
+        head = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">II", 1920, 1080) + b"\x08\x02\x00\x00\x00"
+        screen = {"type": "input_image", "image_url": "data:image/png;base64," + base64.b64encode(head).decode()}
+        shot = [{"type": "function_call", "call_id": "c5", "name": "sh", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c5",
+                 "output": [{"type": "input_text", "text": "the dialog opened"}, screen]}]
+        self.send(*self.history, *shot)
+        text = self.mirror().read_text()
+        self.assertIn("the dialog opened\n[image 1 of this turn, ~2,765 tokens]", text)
+        self.assertIn("keep a line to keep its image", text)
+        self.edit(lambda s: s.replace("the dialog opened", "the save dialog opened"))
+        sent = json.dumps(self.send(*self.history, *shot, *call(6)).body["input"])
+        self.assertIn("the save dialog opened", sent)
+        self.assertIn(screen["image_url"], sent)
+        self.edit(lambda s: s.replace("\n[image 1 of this turn, ~2,765 tokens]", ""))
+        sent = json.dumps(self.send(*self.history, *shot, *call(6), *call(7)).body["input"])
+        self.assertIn("the save dialog opened", sent)
+        self.assertNotIn(screen["image_url"], sent)
 
     def test_the_harnesss_context_stays_where_it_was_sent(self) -> None:
         codex = HARNESSES["codex"]

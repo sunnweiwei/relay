@@ -3,7 +3,9 @@ its decisions applied to each protocol's requests, and the fallback to compactio
 
 from __future__ import annotations
 
+import base64
 import json
+import struct
 import unittest
 from typing import Any
 
@@ -83,6 +85,20 @@ class JevTests(unittest.TestCase):
                                             "re-run the tool if needed]")
         self.assertEqual([i["call_id"] for i in sent[6:]], ["c4", "c4", "c5", "c5", "c6", "c6"])  # c3 gone, with its result
         self.assertEqual(sent[6:], history[8:])
+
+    def test_images_count_and_go_with_a_truncated_result(self) -> None:
+        head = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">II", 1920, 1080) + b"\x08\x02\x00\x00\x00"
+        screen = {"type": "input_image", "image_url": "data:image/png;base64," + base64.b64encode(head).decode()}
+        shots = [item for i in range(1, 7) for item in run(i, "click", "")]
+        for item in shots[1::2]:
+            item["output"] = [{"type": "input_text", "text": "clicked"}, screen]
+        ask = FakeJev(result_t2=0.1, result_t3=0.1)
+        sent = self.send(jev(ask), [msg("user", "save the file"), *shots])
+        self.assertFalse(any(SUMMARY_PREFIX in CODEC.classify(item).text for item in sent))
+        (truncated,) = [item for item in sent if item.get("call_id") == "c2" and item["type"] == "function_call_output"]
+        self.assertNotIn(screen["image_url"], json.dumps(truncated))
+        self.assertIn("truncated 1 image of this tool result", json.dumps(truncated))
+        self.assertIn("7 chars and 1 image (omitted)", json.dumps(ask.asked[0][0]))
 
     def test_freeing_less_than_a_quarter_is_compaction_instead(self) -> None:
         sent = self.send(jev(FakeJev()), [msg("user", "fix the bug"), *steps(6)])

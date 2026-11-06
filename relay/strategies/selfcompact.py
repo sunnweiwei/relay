@@ -3,13 +3,17 @@ summarizes its own trajectory.
 
 As in Self-Compact's Algorithm 1, at a probe the rubric is appended to the conversation (its
 prompt cache reused) and the model answers C1 CLOSED-UNIT, C2 SUMMARIZABLE, C3 PROGRESS and N1
-STUCK; only C1 = C2 = C3 = Y and N1 = N fires the summarizer, also appended to the conversation,
-and the summary then replaces the trajectory: the model goes on from the user's messages and its
-summary (introduced as every Relay summary is, where the paper follows it with "continue"). A
-CONTINUE verdict leaves the conversation as it was. Probes come every `period` model responses
-once the prompt passes `gate` of the budget, as the CLM paper runs Self-Compact (every two turns
-past 37%); past `backstop` the summary is made without asking, Self-Compact's token backstop. Both
-prompts are the paper's (Appendix B, the search agent's), verbatim.
+STUCK; only C1 = C2 = C3 = Y and N1 = N fires the summarizer, also appended to the conversation
+with the question, and the summary then replaces the trajectory as Self-Compact's agent replaces it
+(`agent.py`, `summarize`): what is left is the original question (the first user message), the
+summary as the assistant's ("Here is my research so far:"), and the user's "continue", so the
+user's later messages go with the rest. A CONTINUE verdict leaves the conversation as it was.
+Probes come every `period` model responses once the prompt passes `gate` of the budget, as the CLM
+paper runs Self-Compact (every two turns past 37%, the release's 40K of its 108K budget); past
+`backstop` the summary is made without asking, a backstop of Relay's own (at its budget the release
+forces a final answer instead). The prompts are those of Self-Compact's released code (`prompts.py`:
+SELFCHECK_PROMPT, SUMMARIZE_PROMPT, CONTINUE_AFTER_SUMMARY), verbatim, and the summary is the answer's
+`<summary>` block, as it parses it.
 """
 
 from __future__ import annotations
@@ -19,7 +23,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..core.ir import Context, Item, Kind, Request
-from ..prompts import SUMMARY_PREFIX
 from .base import Summarizer
 from .compaction import DEFAULT_WINDOW, HARD_LIMIT, summary_cut
 from .conversation import responses
@@ -28,39 +31,61 @@ RUBRIC = """You are about to decide whether to compress your conversation histor
 
 Compression is safe ONLY when ALL FOUR of the following hold:
 (C1) the trajectory has reached a closed unit (not mid-thought),
-(C2) the essential information is reducible to 3–5 cite-able facts without loss,
+(C2) the essential information is reducible to 3-5 cite-able facts without loss,
 (C3) something has progressed since the last compression,
+AND
 (N1) you are NOT currently stuck in a way summarization would mask.
 
 Answer C1, C2, C3, N1 honestly. Each Y answer requires verbatim evidence quoted from the trajectory above; answers without evidence default to N.
 
-C1 CLOSED-UNIT: The most recent assistant message is a closed unit — a completed tool call whose result is now visible, or a completed sub-analysis with a clear stopping point. It is NOT mid-sentence reasoning ("Let me now check...", "I should next look at..."), and not a half-formulated query. If Y, quote the closing fragment of the last assistant message. If N, quote the open fragment that shows the trajectory is mid-thought.
+C1 CLOSED-UNIT: The most recent assistant message is a closed unit -- a completed tool call whose result is now visible, or a completed sub-analysis with a clear stopping point. It is NOT mid-sentence reasoning ("Let me now check...", "I should next look at..."), and not a half-formulated query.
+  If Y, quote the closing fragment of the last assistant message.
+  If N, quote the open fragment that shows the trajectory is mid-thought.
 
-C2 SUMMARIZABLE: You can write 3–5 essential facts (with verbatim citations from the trajectory) that future-you needs to continue research after compression. Each fact must be a single concrete statement: a name, date, URL, quoted claim, or resolved sub-question. Answer N if the trajectory's value is dispersed across many small inferences (e.g., a list of dead-end queries needed to avoid retries, negative results that constrain hypothesis space) that would be lost without the dispersal. If Y, list the 3–5 facts numbered, each with a verbatim citation in quotes, separated by "|". If N, name in one sentence the class of information that would be lost.
+C2 SUMMARIZABLE: You can write 3-5 essential facts (with verbatim citations from the trajectory) that future-you needs to continue research after compression. Each fact must be a single concrete statement: a name, date, URL, quoted claim, or resolved sub-question. Answer N if the trajectory's value is dispersed across many small inferences (e.g., a list of dead-end queries needed to avoid retries, negative results that constrain hypothesis space) that would be lost without the dispersal.
+  If Y, list the 3-5 facts numbered, each with a verbatim citation in quotes, separated by " | ".
+  If N, name in one sentence the class of information that would be lost.
 
-C3 PROGRESS: Since the most recent compression (or since the start of the conversation if none), you have either obtained a new concrete fact (name, date, URL, or quoted claim) OR refined the sub-question being pursued. If Y, name the new fact or refined sub-question. If N, state that you are returning the same state you compressed from.
+C3 PROGRESS: Since the most recent compression (or since the start of the conversation if none), you have either obtained a new concrete fact (name, date, URL, or quoted claim) OR refined the sub-question being pursued.
+  If Y, name the new fact or refined sub-question.
+  If N, state that you are returning the same state you compressed from.
 
-N1 STUCK: At least 3 of your last 4 search queries returned no new URL or fact (i.e., were duplicates or returned already-known content). If you have made fewer than 4 searches total, answer N. If Y, name 1 distinct strategy you have NOT yet tried (different tool, different query type, different angle on the question). If N, name one new URL or fact obtained recently.
+N1 STUCK: At least 3 of your last 4 search queries returned no new URL or fact (i.e., were duplicates or returned already-known content). If you have made fewer than 4 searches total, answer N.
+  If Y, name 1 distinct strategy you have NOT yet tried (different tool, different query type, different angle on the question).
+  If N, name one new URL or fact obtained recently.
 
 Output: exactly 4 lines, no preamble or trailing text.
 C1: Y/N -- <evidence>
-C2: Y/N -- <if Y: 1. fact "citation" | 2. fact "citation" | 3. fact "citation"; if N: <class of info lost>>
+C2: Y/N -- <if Y: 1. fact "citation" | 2. fact "citation" | 3. fact "citation"; if N: <class of info that would be lost>>
 C3: Y/N -- <evidence>
 N1: Y/N -- <evidence>"""
 # The webresummer summarizer of Wu et al., as Self-Compact uses it.
 SUMMARIZER = """You are an expert at analyzing conversation history and extracting relevant information. Your task is to thoroughly evaluate the conversation history above and the user's original question to provide a summary that will REPLACE the full conversation history when you continue.
 
 Task Guidelines
+
 1. Information Analysis:
-• Carefully analyze the conversation history to identify truly useful information.
-• Focus on information that directly contributes to answering the question.
-• Do NOT make assumptions, guesses, or inferences beyond what is explicitly stated in the conversation.
-• If information is missing or unclear, do NOT include it in your summary.
+   - Carefully analyze the conversation history to identify truly useful information.
+   - Focus on information that directly contributes to answering the question.
+   - Do NOT make assumptions, guesses, or inferences beyond what is explicitly stated in the conversation.
+   - If information is missing or unclear, do NOT include it in your summary.
+
 2. Summary Requirements:
-• Extract only the most relevant information that is explicitly present in the conversation.
-• Synthesize information from multiple exchanges when relevant.
-• Only include information that is certain and clearly stated in the conversation.
-• Do NOT output or mention any information that is uncertain, insufficient, or cannot be confirmed from the conversation."""
+   - Extract only the most relevant information that is explicitly present in the conversation.
+   - Synthesize information from multiple exchanges when relevant.
+   - Only include information that is certain and clearly stated in the conversation.
+   - Do NOT output or mention any information that is uncertain, insufficient, or cannot be confirmed from the conversation.
+
+3. Output Format: Your response should be structured as follows:
+<summary>
+- Essential Information: [Organize the relevant and certain information from the conversation history that helps address the question.]
+</summary>
+
+Strictly avoid fabricating, inferring, or exaggerating any information not present in the conversation. Only output information that is certain and explicitly stated."""
+QUESTION = "\n\nQuestion being researched: {question}"
+RESEARCH = "Here is my research so far:\n"
+CONTINUE = "Continue your research. Use your tools to find the answer, or provide your final answer if you have enough information."
+SUMMARY = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.S | re.I)
 VERDICT = re.compile(r"\b(C1|C2|C3|N1)\b(?:\s+[A-Z-]+)?[^A-Za-z0-9\n]*([YN])\b")  # "C1: Y -- ...", "**C1**: Y"
 
 
@@ -84,7 +109,8 @@ class SelfCompact:
         if not request.tools:
             return None
         budget, items = self.budget or request.window or DEFAULT_WINDOW, request.current
-        last = max((n for n, item in enumerate(items) if item.kind is Kind.SUMMARY), default=-1)
+        question = next(n for n, item in enumerate(items) if item.kind is Kind.USER)
+        last = max((n for n, item in enumerate(items) if _summary(item)), default=-1)
         rounds = sum(start > last for start in responses(items))
         forced = request.force or request.tokens >= self.backstop * budget
         due = request.tokens >= self.gate * budget and rounds and rounds % self.period == 0
@@ -92,8 +118,15 @@ class SelfCompact:
             return None
         if not forced and not _fires(summarizer.summarize(cut, RUBRIC)):
             return None
-        summary = Item(Kind.SUMMARY, f"{SUMMARY_PREFIX}\n{summarizer.summarize(cut, SUMMARIZER)}")
-        return Context((*(item for item in items[:cut] if item.kind is Kind.USER), summary, *items[cut:]))
+        answer = summarizer.summarize(cut, SUMMARIZER + QUESTION.format(question=items[question].text))
+        summary = (found.group(1) if (found := SUMMARY.search(answer)) else answer).strip()
+        if not summary:
+            return None
+        return Context((items[question], Item(Kind.ASSISTANT, RESEARCH + summary), Item(Kind.USER, CONTINUE), *items[cut:]))
+
+
+def _summary(item: Item) -> bool:
+    return item.kind is Kind.ASSISTANT and item.text.startswith(RESEARCH)
 
 
 def _fires(answer: str) -> bool:
