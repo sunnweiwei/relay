@@ -4,8 +4,9 @@ Inputs are the tables written by browse_context_collect (Browse) and
 context_collect (ARC, Science). Context length is the unmanaged length: the
 token count of Codex's own full history at the end of a run, before any
 method rewrites it. A task's context demand is the median unmanaged length
-over the five working methods on that task. RLM is shown for reference only:
-its main agent often does not receive the task in these runs.
+over the five core methods on that task. Two methods were added on 2026-11-06 where
+they have runs: a truncation-only baseline and ACM with a forced compression. RLM is
+shown for reference only: its main agent often does not receive the task in these runs.
 
 Every benchmark uses the outcome policy of outcomes.py: a task failure scores 0 and an
 infrastructure failure has no score. Method comparisons use the tasks on which every
@@ -26,13 +27,20 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-WORKING = ["compaction", "folding", "clm", "acm", "selfcompact"]
-ALL_METHODS = WORKING + ["rlm"]
+WORKING = ["compaction", "folding", "clm", "acm", "selfcompact"]  # the core methods; they define context demand
+# Run on 2026-11-06 on part of Browse and Science (an account limit stopped the queues). A
+# same-day rerun of released ACM ("acm_control", 24 questions) is too small to report.
+ADDED = ["acm_forced", "truncation"]
+ALL_METHODS = WORKING + ADDED + ["rlm"]
 LABEL = {"compaction": "Compaction", "folding": "Folding", "clm": "CLM", "acm": "ACM",
-         "selfcompact": "Self-Compact", "rlm": "RLM"}
-# Reference categorical palette, slots 1-6 in fixed order (validated: scripts/validate_palette.js).
+         "selfcompact": "Self-Compact", "rlm": "RLM", "acm_forced": "ACM (forced)",
+         "truncation": "Truncation only", "acm_control": "ACM (rerun 11-06)"}
+# Reference categorical palette, slots 1-6 in fixed order (validated: scripts/validate_palette.js). The
+# added methods reuse a related hue: ACM (forced) a darker ACM amber, the truncation baseline neutral grey.
 COLOR = {"compaction": "#2a78d6", "folding": "#eb6834", "clm": "#1baf7a", "acm": "#eda100",
-         "selfcompact": "#e87ba4", "rlm": "#008300"}
+         "selfcompact": "#e87ba4", "rlm": "#008300", "acm_forced": "#9a6400", "truncation": "#7d7c76",
+         "acm_control": "#eda100"}
+DASH = {"rlm": "5 4", "acm_forced": "2 3", "acm_control": "8 3"}
 
 BENCH = {
     "browse": {"name": "BrowseComp-Plus", "metric": "score", "binary": True, "window": 23560,
@@ -104,9 +112,12 @@ def analyse(rows: list[dict[str, Any]], spec: dict[str, Any]) -> dict[str, Any]:
     by_task: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     for r in rows:
         by_task[r["task_id"]][r["method"]] = r
+    present = {r["method"] for r in rows}
+    methods = [m for m in ALL_METHODS if m in present]
+    compared = [m for m in WORKING if m in present]  # the core methods, run on every task
 
     overall = {}
-    for m in ALL_METHODS:
+    for m in methods:
         rs = [r for r in rows if r["method"] == m]
         scored = [r for r in rs if r["outcome"] == "scored"]
         counted = [r for r in rs if r["outcome"] != "infrastructure"]
@@ -131,9 +142,9 @@ def analyse(rows: list[dict[str, Any]], spec: dict[str, Any]) -> dict[str, Any]:
             "mean_input_tokens": sum(input_tokens(r) for r in rs) / len(rs),
         }
 
-    # Comparison population: tasks where every working method has a score.
+    # Comparison population: tasks where every core method has a score.
     tasks = sorted(t for t, cells in by_task.items()
-                   if all(m in cells and cells[m].get(key) is not None for m in WORKING))
+                   if all(m in cells and cells[m].get(key) is not None for m in compared))
 
     def demand(t: str, methods: list[str]) -> float:
         return statistics.median(by_task[t][m]["unmanaged_tokens"] for m in methods if by_task[t][m]["unmanaged_tokens"])
@@ -153,21 +164,31 @@ def analyse(rows: list[dict[str, Any]], spec: dict[str, Any]) -> dict[str, Any]:
     def cells(m: str, ts: list[str]) -> list[dict[str, Any]]:
         return [by_task[t][m] for t in ts if m in by_task[t]]
 
-    by_bin = {m: [summary(cells(m, in_bin(b)), key, binary) for b in range(n_bins)] for m in ALL_METHODS}
-    cap_by_bin = {m: [share(cells(m, in_bin(b)), "model_request_limit") for b in range(n_bins)] for m in ALL_METHODS}
+    by_bin = {m: [summary(cells(m, in_bin(b)), key, binary) for b in range(n_bins)] for m in methods}
+    cap_by_bin = {m: [share(cells(m, in_bin(b)), "model_request_limit") for b in range(n_bins)] for m in methods}
     tokens_by_bin = {m: [statistics.mean([input_tokens(r) for r in cells(m, in_bin(b))] or [math.nan])
-                         for b in range(n_bins)] for m in ALL_METHODS}
+                         for b in range(n_bins)] for m in methods}
 
-    # Paired differences: the best working method minus each other working method, on the same tasks.
-    ref = max(WORKING, key=lambda m: overall[m]["mean"])
-    paired = {}
-    for m in WORKING:
-        if m == ref:
-            continue
-        paired[m] = {"all": paired_diff([by_task[t][ref][key] for t in tasks], [by_task[t][m][key] for t in tasks])}
-        for b in range(n_bins):
-            ts = in_bin(b)
-            paired[m][b] = paired_diff([by_task[t][ref][key] for t in ts], [by_task[t][m][key] for t in ts], seed=b + 1)
+    def contrast(a: str, b: str) -> dict[Any, dict[str, float]]:
+        """a minus b on the comparison tasks where both have a score (the added methods ran on part)."""
+        both = lambda t: all(m in by_task[t] and by_task[t][m].get(key) is not None for m in (a, b))
+        ts_all = [t for t in tasks if both(t)]
+        out: dict[Any, dict[str, float]] = {"all": paired_diff([by_task[t][a][key] for t in ts_all],
+                                                               [by_task[t][b][key] for t in ts_all])}
+        for k in range(n_bins):
+            ts = [t for t in in_bin(k) if both(t)]
+            out[k] = paired_diff([by_task[t][a][key] for t in ts], [by_task[t][b][key] for t in ts], seed=k + 1)
+        return out
+
+    # Paired differences: the best compared method minus each other compared method, on the same tasks.
+    ref = max(compared, key=lambda m: overall[m]["mean"])
+    paired = {m: contrast(ref, m) for m in compared if m != ref}
+    # Fixed contrasts, chosen before the runs: each method against the truncation baseline, and the
+    # forced compression against released ACM.
+    pairs = ([(m, "truncation") for m in [*compared, "acm_forced"] if m in present]
+             if "truncation" in present else [])
+    pairs += [("acm_forced", "acm")] if {"acm_forced", "acm"} <= present else []
+    baseline = {f"{a_}|{b_}": contrast(a_, b_) for a_, b_ in pairs}
 
     # Robustness: bin each method's cell by the other working methods' median only.
     loo = {}
@@ -180,9 +201,10 @@ def analyse(rows: list[dict[str, Any]], spec: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "window": window, "metric": key, "overall": overall, "tasks": len(tasks), "ref": ref,
+        "methods": methods, "compared": compared, "baseline": baseline,
         "bins": {"labels": labels, "edges": edges, "counts": [len(in_bin(b)) for b in range(n_bins)]},
         "by_bin": by_bin, "cap_by_bin": cap_by_bin, "tokens_by_bin": tokens_by_bin, "paired": paired, "loo": loo,
-        "solved_by_none": sum(1 for t in tasks if all(not by_task[t][m][key] for m in WORKING)),
+        "solved_by_none": sum(1 for t in tasks if all(not by_task[t][m][key] for m in compared)),
     }
 
 
@@ -226,7 +248,7 @@ def line_chart(series: dict[str, list[Any]], labels: list[str], *, ytitle: str, 
         pts = [(i, value(v)) for i, v in enumerate(values)]
         pts = [(i, v) for i, v in pts if not math.isnan(v)]
         path = " ".join(f'{"M" if j == 0 else "L"}{x(i):.1f},{y(v):.1f}' for j, (i, v) in enumerate(pts))
-        dash = ' stroke-dasharray="5 4"' if m == "rlm" else ""
+        dash = f' stroke-dasharray="{DASH[m]}"' if m in DASH else ""
         out.append(f'<path d="{path}" fill="none" stroke="{COLOR[m]}" stroke-width="2" stroke-linejoin="round"{dash}/>')
         for i, v in pts:
             cell = values[i]
@@ -241,7 +263,7 @@ def line_chart(series: dict[str, list[Any]], labels: list[str], *, ytitle: str, 
 
 def dot_chart(overall: dict[str, Any], metric_name: str) -> str:
     """Overall score per method with 95% intervals."""
-    order = sorted(ALL_METHODS, key=lambda m: -overall[m]["mean"])
+    order = sorted(overall, key=lambda m: -overall[m]["mean"])
     xmax = nice_max([overall[m]["hi"] for m in order])
     width, row_h, left, right, top = 720, 30, 110, 150, 8
     height = top + row_h * len(order) + 30
@@ -282,7 +304,7 @@ def bin_table(source: dict[str, list[dict[str, Any]]], labels: list[str], method
 def section(bench: str, a: dict[str, Any], meta: dict[str, Any], number: int) -> str:
     spec, o = BENCH[bench], a["overall"]
     labels, counts = a["bins"]["labels"], a["bins"]["counts"]
-    order = sorted(ALL_METHODS, key=lambda m: -o[m]["mean"])
+    order = sorted(a["methods"], key=lambda m: -o[m]["mean"])
     extra_head = {"browse": "<th>Answer contains gold (lenient)</th><th>Profile not applied</th>",
                   "arc": "<th>Official score (0–100)</th><th>Runs with score &gt; 0</th>",
                   "science": "<th>Official reward = 1</th>"}[bench]
@@ -306,13 +328,28 @@ def section(bench: str, a: dict[str, Any], meta: dict[str, Any], number: int) ->
             f"<td>{100 * p['diff']:+.1f}%<br><span class=muted>{100 * p['lo']:+.1f} to {100 * p['hi']:+.1f}</span></td>"
             for p in [a["paired"][m]["all"]] + [a["paired"][m][b] for b in range(len(labels))]) + "</tr>"
         for m in a["paired"])
+    contrast_rows = "".join(
+        f"<tr><td>{esc(LABEL[k.split('|')[0]])} − {esc(LABEL[k.split('|')[1]])}<br><span class=muted>{c['all']['n']} tasks</span></td>" + "".join(
+            f"<td>{100 * p['diff']:+.1f}%<br><span class=muted>{100 * p['lo']:+.1f} to {100 * p['hi']:+.1f}</span></td>"
+            for p in [c["all"]] + [c[b] for b in range(len(labels))]) + "</tr>"
+        for k, c in a["baseline"].items())
+    contrast_table = (f"<p>Fixed contrasts, each on the comparison tasks where both methods have a score: each method minus "
+                      f"the truncation-only baseline, and ACM (forced) minus released ACM (95% bootstrap interval). The added "
+                      f"methods ran a week after the others and on part of the tasks; differences can include drift between "
+                      f"the two dates.</p>"
+                      f"<div class=\"scroll\"><table><thead><tr><th>Difference</th><th>All tasks</th>"
+                      f"{''.join(f'<th>{esc(l)}</th>' for l in labels)}</tr></thead><tbody>{contrast_rows}</tbody></table></div>"
+                      if contrast_rows else "")
     cap_rows = "".join(
         f"<tr><td>{esc(LABEL[m])}</td>" + "".join(f"<td>{pct(v, 0)}</td>" for v in a["cap_by_bin"][m])
-        + "".join(f"<td>{v / 1000:.0f}K</td>" for v in a["tokens_by_bin"][m]) + "</tr>" for m in ALL_METHODS)
+        + "".join(f"<td>{v / 1000:.0f}K</td>" for v in a["tokens_by_bin"][m]) + "</tr>" for m in a["methods"])
     note = [f"{c} tasks" for c in counts]
     bin_rule = (f"multiples of the window W = {a['window']:,} ({', '.join(str(e) for e in spec['edges'])} W)"
                 if spec["edges"] else "tertiles of demand, so the groups have about equal numbers of tasks")
     best = lambda src, b: LABEL[max(WORKING, key=lambda m: src[m][b]["mean"])]
+    added = [m for m in ADDED if m in a["methods"]]
+    added_note = (f" The methods added on 2026-11-06 ({', '.join(LABEL[m] for m in added)}) ran on part of these tasks; "
+                  f"their figures and contrasts use the tasks they have." if added else "")
     return f"""
 <h2 id="{bench}">{number}. {esc(spec['name'])}</h2>
 <p class="muted">Budget: {esc(spec['budget'])}. Metric: {esc(spec['metric_name'])}. {esc(spec['metric_note'])}</p>
@@ -322,14 +359,15 @@ def section(bench: str, a: dict[str, Any], meta: dict[str, Any], number: int) ->
 <div class="scroll"><table><thead><tr><th>Method</th><th>Ended</th><th>Task failures (0)</th><th>Infrastructure (excluded)</th><th>{esc(spec['metric_name'])}</th><th>95% CI</th><th>Scored runs only</th>{extra_head}<th>Runs with truncation fallback</th><th>Hit request cap</th><th>Hit time cap</th><th>Median requests</th><th>Median minutes</th><th>Median context length</th><th>Mean input tokens / run</th></tr></thead><tbody>{overall_rows}</tbody></table></div>
 
 <h3>{number}.2 By task context length</h3>
-<p>Comparisons use the {a['tasks']} tasks on which all five working methods have a score; on {a['solved_by_none']} of them every method scores 0. Groups: {bin_rule}.</p>
-{legend(ALL_METHODS)}
+<p>Comparisons use the {a['tasks']} tasks on which every core method has a score; on {a['solved_by_none']} of them every core method scores 0.{added_note} Groups: {bin_rule}.</p>
+{legend(a['methods'])}
 <figure>{line_chart(a['by_bin'], labels, ytitle=spec['metric_name'], note=note, ci=True)}
 <figcaption>Figure {number}b. {esc(spec['metric_name'])} by the task's context demand. Hover for sample sizes and 95% intervals. RLM (dashed) is for reference only.</figcaption></figure>
-{bin_table(a['by_bin'], labels, ALL_METHODS)}
-<p>Paired differences on the same tasks: the best overall method, {esc(LABEL[a['ref']])}, minus each other working method (95% bootstrap interval, 2,000 resamples of tasks). The reference method is chosen after seeing the data.</p>
+{bin_table(a['by_bin'], labels, a['methods'])}
+<p>Paired differences on the same tasks: the best overall method, {esc(LABEL[a['ref']])}, minus each other compared method (95% bootstrap interval, 2,000 resamples of tasks). The reference method is chosen after seeing the data.</p>
 <div class="scroll"><table><thead><tr><th>Difference</th><th>All tasks</th>{''.join(f'<th>{esc(l)}</th>' for l in labels)}</tr></thead><tbody>{paired_rows}</tbody></table></div>
-<p><b>Leave-one-out check.</b> The demand above includes the method's own run. Grouping each method's runs by the other four methods' median instead, the best method per group is {', '.join(best(a['loo'], b) for b in range(len(labels)))} (above: {', '.join(best(a['by_bin'], b) for b in range(len(labels)))}).</p>
+{contrast_table}
+<p><b>Leave-one-out check.</b> The demand above includes the method's own run. Grouping each core method's runs by the other four core methods' median instead, the best core method per group is {', '.join(best(a['loo'], b) for b in range(len(labels)))} (above: {', '.join(best(a['by_bin'], b) for b in range(len(labels)))}).</p>
 
 <h3>{number}.3 Caps and cost</h3>
 <div class="scroll"><table><thead><tr><th rowspan=2>Method</th><th colspan={len(labels)}>Share of runs that hit the request cap</th><th colspan={len(labels)}>Mean input tokens / run</th></tr>
@@ -342,10 +380,10 @@ def render(results: dict[str, Any], metas: dict[str, Any], generated: str) -> st
     status = []
     for bench, label in (("browse", "BrowseComp-Plus"), ("arc", "ARC-AGI-3"), ("science", "Terminal-Bench-Science")):
         rows = results[bench]["overall"]
-        ended = sum(rows[m]["ended"] for m in ALL_METHODS)
-        infra = sum(rows[m]["infrastructure"] for m in ALL_METHODS)
-        failures = sum(rows[m]["task_failures"] for m in ALL_METHODS)
-        status.append(f"{label}: {ended:,} ended runs of six methods; {failures} task failures scored 0; "
+        ended = sum(rows[m]["ended"] for m in rows)
+        infra = sum(rows[m]["infrastructure"] for m in rows)
+        failures = sum(rows[m]["task_failures"] for m in rows)
+        status.append(f"{label}: {ended:,} ended runs of {len(rows)} methods; {failures} task failures scored 0; "
                       f"{infra} infrastructure failures excluded.")
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -383,8 +421,8 @@ th {{ font-weight:600; color:var(--ink2); border-bottom:1px solid var(--axis); }
 
 <h2>1. Runs</h2>
 <ul>{''.join(f'<li>{esc(line)}</li>' for line in status)}</ul>
-<div class="callout"><b>Context length.</b> A run's unmanaged context length is the token count of Codex's own full history at the end of the run, before any method rewrites it: how long the context would be without context management. A task's context demand is the median unmanaged length of the five working methods on that task. Longer tasks also tend to be harder, so a falling curve mixes longer context with harder tasks; comparisons between methods on the same tasks are less affected.</div>
-<div class="callout"><b>Truncation fallback.</b> All runs used Relay's common overflow fallback: when a method's own forced recovery still left a request over the window, Relay dropped the oldest tool call groups. ACM needed it in most runs, the other methods almost never (column "Runs with truncation fallback"). ACM's results therefore describe ACM together with this fallback.</div>
+<div class="callout"><b>Context length.</b> A run's unmanaged context length is the token count of Codex's own full history at the end of the run, before any method rewrites it: how long the context would be without context management. A task's context demand is the median unmanaged length of the five core methods (Compaction, Folding, CLM, ACM, Self-Compact) on that task. Longer tasks also tend to be harder, so a falling curve mixes longer context with harder tasks; comparisons between methods on the same tasks are less affected.</div>
+<div class="callout"><b>Truncation fallback.</b> All runs used Relay's common overflow fallback: when a method's own forced recovery still left a request over the window, Relay dropped the oldest tool call groups. Released ACM has no forced recovery and the model rarely asked it to compress, so ACM needed the fallback in most runs, the other methods almost never (column "Runs with truncation fallback"). Two methods added on 2026-11-06 separate the two parts on Browse and Science: <i>Truncation only</i> leaves the context unchanged, so the fallback alone manages it, and <i>ACM (forced)</i> compresses, as manage_context does, the oldest history since its last summary when a request is over the window. They ran on 2026-11-06, a week after the other methods, until the account's weekly usage limit stopped them: on 404 and 403 of the 825 Browse questions (the first in the fixed random order) and on 23 Science tasks. A same-day rerun of released ACM, meant to measure drift between the two dates, stopped after 24 questions and is not reported.</div>
 <div class="callout"><b>RLM is not a measurement of the RLM method.</b> Relay replaces the conversation with the RLM's handoff, and in many runs the main agent never sees the task (its final answer asks for the question). RLM is drawn for reference and is left out of the paired comparisons.</div>
 {sections}
 </main>
@@ -449,7 +487,7 @@ def main() -> None:
         print("cells:", write_cells(args.cells, tables))
     for bench, a in results.items():
         print(bench, a["tasks"], a["bins"]["labels"], a["bins"]["counts"],
-              {m: round(a["overall"][m]["mean"], 3) for m in ALL_METHODS})
+              {m: round(a["overall"][m]["mean"], 3) for m in a["methods"]})
 
 
 if __name__ == "__main__":

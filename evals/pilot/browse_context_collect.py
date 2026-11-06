@@ -2,7 +2,11 @@
 
 The full run is the 429-exempt queue plus the prior cells its plan carried over.
 Prior cells that the plan selected for a pure-429 retry are replaced by the
-retry. Each row also records the unmanaged context length: the largest token
+retry. The rerun queue of 2026-11-06 (``browse_queue.py``) adds two methods and
+reruns two kinds of earlier cells: those excluded as infrastructure failures and
+those in which the Browse profile was not applied. A rerun row replaces the
+earlier row of its cell and names it in ``replaces``. A same-day control reran
+released ACM on every question; its rows are the method ``acm_control``. Each row also records the unmanaged context length: the largest token
 count of Codex's own history that Relay saw (``relay/conversations.json``).
 """
 
@@ -20,6 +24,8 @@ from typing import Any
 # The evaluation's working tree (data, runtimes and run outputs); see evals/pilot/README.md.
 ROOT = Path(os.environ.get("RELAY_PILOT_ROOT", "relay-pilot"))
 RUN = ROOT / "full-browse-429-exempt-20261030"
+RERUN = ROOT / "reruns-20261106/browse/queue-state.json"
+CONTROL = ROOT / "reruns-20261106/browse-acm-control/queue-state.json"
 GOLD = ROOT / "full-browse-20261030/private"  # one {query_id, answer, qrels} file per question
 
 
@@ -109,9 +115,33 @@ def collect() -> dict[str, Any]:
     keys = [(r["task_id"], r["method"]) for r in rows]
     if len(keys) != len(set(keys)):
         raise ValueError("A task/method cell appears twice")
+    reruns = {"finished": 0, "replaced": 0, "pending": 0}
+    if RERUN.is_file():
+        index = {key: n for n, key in enumerate(keys)}
+        for cell in json.loads(RERUN.read_text())["cells"]:
+            if cell["status"] != "finished":
+                reruns["pending"] += 1
+                continue
+            new = row(cell, "reruns-20261106", cell.get("raw_score"), "task_result")
+            key = (new["task_id"], new["method"])
+            reruns["finished"] += 1
+            if key in index:
+                old = rows[index[key]]
+                new["replaces"] = f"{old['batch']}:{old['outcome']}"
+                rows[index[key]] = new
+                reruns["replaced"] += 1
+            else:
+                index[key] = len(rows)
+                rows.append(new)
+    if CONTROL.is_file():
+        for cell in json.loads(CONTROL.read_text())["cells"]:
+            if cell["status"] == "finished":
+                rows.append(row({**cell, "method": "acm_control"}, "reruns-20261106-acm-control",
+                                cell.get("raw_score"), "task_result"))
+                reruns["control"] = reruns.get("control", 0) + 1
     return {"run": str(RUN), "target_cells": plan["target_cells"], "window": 23560,
             "queue_status": state.get("status"), "queue_counts": counts,
-            "carried_cells": len(carried), "rows": rows}
+            "carried_cells": len(carried), "reruns": reruns, "rows": rows}
 
 
 def main() -> None:
