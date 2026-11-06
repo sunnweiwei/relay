@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from typing import Any
 
 from ..core.ir import Item, Kind, Media
@@ -40,12 +41,15 @@ class OpenAIResponses:
         if (kind != "message" and item.get("role") in {"system", "developer"}) or kind == "configuration_update":
             # Declarations: Codex's and pi's `additional_tools`, and the reasoning that applies from
             # a `configuration_update` on (until the next one).
-            return Item(Kind.SYSTEM, _string(item))
+            return Item(Kind.SYSTEM, _string(item),
+                        token_structure=_string(item) if kind == "additional_tools" else None)
         if kind == "message":
             text, media = _content_text(item.get("content"))
             return Item(_ROLES.get(item.get("role"), Kind.OTHER), text, media=media)
         if kind == "reasoning":
-            return Item(Kind.REASONING, _content_text(item.get("summary"))[0], opaque=decoded(item.get("encrypted_content")))
+            encrypted = item.get("encrypted_content") or ""
+            return Item(Kind.REASONING, _content_text(item.get("summary"))[0], opaque=decoded(encrypted),
+                        opaque_key=hashlib.sha256(encrypted.encode()).hexdigest() if encrypted else "")
         if kind == "compaction":  # opaque server-side compaction
             return Item(Kind.SUMMARY, opaque=decoded(item.get("encrypted_content")))
         if kind.endswith("_output"):
@@ -208,7 +212,8 @@ def _content_text(content: Any) -> tuple[str, tuple[Media, ...]]:
         if kind in _TEXT_PARTS and isinstance(part.get("text"), str):
             texts.append(part["text"])
         elif kind == "input_image":
-            media.append(data_media("image", part.get("image_url") or part.get("file_id") or ""))
+            image = data_media("image", part.get("image_url") or part.get("file_id") or "")
+            media.append(Media(image.type, image.mime, image.data, image.url, part.get("detail")))
         elif kind == "input_file":
             media.append(data_media("file", part.get("file_data") or part.get("file_url") or part.get("file_id") or ""))
         elif kind == "input_audio" and isinstance(part.get("input_audio"), dict):

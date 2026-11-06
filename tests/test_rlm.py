@@ -8,7 +8,7 @@ import unittest
 from typing import Any
 from unittest import mock
 
-from relay.core.engine import Engine
+from relay.core.engine import Engine, Exchange
 from relay.core.ir import Item, Kind, Request
 from relay.harnesses import Harness
 from relay.protocols import OpenAIResponses
@@ -110,6 +110,148 @@ class RLMTests(unittest.TestCase):
         self.assertEqual(forwarded["tools"], body["tools"])  # the step itself is the harness's model's, with its tools
         self.assertIn("Run `cat file_2.txt`.", json.dumps(forwarded["input"]))
         self.assertNotIn("read the files", json.dumps(forwarded["input"]))
+
+    def test_native_transport_retry_reuses_successful_handoff_without_advancing_runtime(self) -> None:
+        for strategy_type in (RLM, PersistentRLM):
+            with self.subTest(strategy=strategy_type.__name__):
+                Runtime.made = []
+                sent = []
+
+                def upstream(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+                    sent.append(body)
+                    return 200, {"status": "completed", "output": [{
+                        "type": "message", "role": "assistant", "content": [{
+                            "type": "output_text", "text": f"Run command {len(sent)}."}]}]}
+
+                engine = Engine(strategy_type())
+                body = {"model": "m", "tools": [{"type": "function", "name": "sh"}],
+                        "input": [{"type": "message", "role": "user", "content": "read the files"}]}
+
+                def prepare(value: dict[str, Any], **kwargs: Any) -> Exchange:
+                    return engine.prepare(OpenAIResponses(), Harness(), value, tenant="t", post=upstream, **kwargs)
+
+                first = prepare(body)
+                # The native send receives HTTP 429, so no response usage is recorded.
+                retried = prepare(body)
+                self.assertEqual(len(sent), 1)
+                self.assertEqual(retried.body, first.body)
+                self.assertEqual(len(Runtime.made), 1)
+                self.assertEqual(Runtime.made[0].contexts, [[{"role": "user", "content": "read the files"}]])
+
+                changed = {**body, "input": [*body["input"],
+                           {"type": "message", "role": "user", "content": "also inspect the second file"}]}
+                prepare(changed)
+                self.assertEqual(len(sent), 2)
+                prepare(changed, force=True)
+                self.assertEqual(len(sent), 3)  # Forced replanning keeps the existing behavior.
+
+    def test_failed_or_empty_completion_does_not_cache_a_handoff(self) -> None:
+        for strategy_type in (RLM, PersistentRLM):
+            for failure in (RuntimeError("synthetic failure"), types.SimpleNamespace(response="  ")):
+                with self.subTest(strategy=strategy_type.__name__, failure=str(failure)):
+                    engine = Engine(strategy_type(), retry_after=0)
+                    body = {"model": "m", "tools": [{"type": "function", "name": "sh"}],
+                            "input": [{"type": "message", "role": "user", "content": "read the files"}]}
+
+                    def prepare() -> Exchange:
+                        return engine.prepare(OpenAIResponses(), Harness(), body, tenant="t",
+                                              post=lambda _: self.fail("The stand-in runtime needs no upstream"))
+
+                    with mock.patch.object(Runtime, "completion", side_effect=[
+                        failure, types.SimpleNamespace(response="Run `cat file_2.txt`.")
+                    ]) as completion:
+                        with self.assertLogs("relay", level="WARNING"):
+                            failed = prepare()
+                        self.assertEqual(failed.body, body)
+                        successful = prepare()
+                        retried = prepare()
+                    self.assertEqual(completion.call_count, 2)
+                    self.assertEqual(retried.body, successful.body)
+                    self.assertNotEqual(successful.body, body)
+
+    def test_invalid_saved_handoff_is_recomputed(self) -> None:
+        from dataclasses import replace
+
+        for invalid in (None, 42, "", "  "):
+            with self.subTest(invalid=invalid):
+                strategy, model = PersistentRLM(), Model()
+                initial = request(TASK)
+                successful = strategy.plan(initial, model)
+                saved = {**successful.state, "rlm_handoff": invalid}
+                strategy.plan(replace(initial, state=saved), model)
+                self.assertEqual(len(model.asked), 2)
+
+    def test_direct_plan_only_reuses_a_handoff_when_the_caller_passes_state(self) -> None:
+        from dataclasses import replace
+
+        for strategy_type in (RLM, PersistentRLM):
+            with self.subTest(strategy=strategy_type.__name__):
+                strategy, model = strategy_type(), Model()
+                initial = request(TASK)
+                first = strategy.plan(initial, model)
+                strategy.plan(initial, model)
+                self.assertEqual(len(model.asked), 2)
+                cached = strategy.plan(replace(initial, state=first.state), model)
+                self.assertEqual(cached, first)
+                self.assertEqual(len(model.asked), 2)
+
+    def test_engine_keeps_persistent_session_across_first_tool_step_and_divergence(self) -> None:
+        engine = Engine(PersistentRLM())
+        sent: list[dict[str, Any]] = []
+
+        def upstream(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            sent.append(body)
+            return 200, {"status": "completed", "output": [{
+                "type": "message", "role": "assistant", "content": [{
+                    "type": "output_text", "text": "Run the next command."}]}]}
+
+        def step(index: int, output: str) -> list[dict[str, Any]]:
+            return [{"type": "function_call", "call_id": f"call-{index}", "name": "sh", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": f"call-{index}", "output": output}]
+
+        def prepare(items: list[dict[str, Any]], **kwargs: Any) -> Exchange:
+            body = {"model": "m", "tools": [{"type": "function", "name": "sh"}], "input": items}
+            return engine.prepare(OpenAIResponses(), Harness(), body, tenant="t", post=upstream, **kwargs)
+
+        initial = [{"type": "message", "role": "user", "content": "read the files"}]
+        first = prepare(initial)
+        after_tool = [*initial, *step(1, "first result")]
+        second = prepare(after_tool)
+        self.assertNotEqual(first.conversation, second.conversation)
+        runtime, = Runtime.made
+        self.assertEqual([len(context) for context in runtime.contexts], [1, 2])
+        self.assertEqual(second.state["strategy"]["rlm_session_key"], first.conversation)
+        self.assertEqual([item["role"] for item in runtime.contexts[1]], ["tool_call", "tool"])
+
+        prepare(after_tool)  # Transport retry must also keep this session untouched.
+        self.assertEqual(len(sent), 2)
+        after_second_tool = [*after_tool, *step(2, "second result")]
+        prepare(after_second_tool)
+        self.assertEqual([len(context) for context in runtime.contexts], [1, 2, 2])
+        prepare(after_second_tool, force=True)
+        self.assertEqual(runtime.contexts[-1], [])
+
+        prepare([*initial, *step(1, "edited result")])
+        self.assertTrue(runtime.closed)
+        self.assertEqual(len(Runtime.made), 2)
+        self.assertEqual([len(context) for context in Runtime.made[-1].contexts], [3])
+
+    def test_stable_persistent_keys_keep_the_existing_session_limit(self) -> None:
+        strategy = PersistentRLM()
+        engine = Engine(strategy)
+
+        def upstream(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            return 200, {"status": "completed", "output": [{
+                "type": "message", "role": "assistant", "content": [{
+                    "type": "output_text", "text": "Run the next command."}]}]}
+
+        for number in range(module.SESSIONS + 1):
+            body = {"model": "m", "tools": [{"type": "function", "name": "sh"}],
+                    "input": [{"type": "message", "role": "user", "content": f"Task {number}"}]}
+            engine.prepare(OpenAIResponses(), Harness(), body, tenant="t", post=upstream)
+        self.assertEqual(len(strategy.sessions), module.SESSIONS)
+        self.assertTrue(Runtime.made[0].closed)
+        self.assertFalse(Runtime.made[-1].closed)
 
 
 if __name__ == "__main__":

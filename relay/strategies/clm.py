@@ -294,10 +294,14 @@ def _guard(items: list[Item], tokens: int, limit: int, anchor: int, path: Path) 
         if item.kind is not Kind.TOOL_RESULT or item.text.startswith(WITHHELD) or not item.text.strip():
             continue
         size, file = item_tokens(item), path.parent / "withheld" / f"{path.stem}.{_digest(item.text)[:12]}.txt"
+        replacement = replace(item, text=f"{WITHHELD} tool result (~{size:,} tokens) withheld over budget. Full text: {file}",
+                              media=())
+        saved = size - item_tokens(replacement)
+        if saved <= 0:
+            continue  # A short result must not grow into a longer file-path note.
         _write(file, item.text)
-        items[n] = replace(item, text=f"{WITHHELD} tool result (~{size:,} tokens) withheld over budget. Full text: {file}",
-                           media=())
-        tokens += item_tokens(items[n]) - size
+        items[n] = replacement
+        tokens -= saved
         withheld += 1
     if not withheld:
         return items, tokens, None
