@@ -90,8 +90,11 @@ class OpenAIResponsesTests(unittest.TestCase):
 
     def test_classify_marks_media_and_tool_items(self) -> None:
         image = {"type": "message", "role": "user",
-                 "content": [{"type": "input_text", "text": "look"}, {"type": "input_image", "image_url": "u"}]}
-        self.assertTrue(self.codec.classify(image).media)
+                 "content": [{"type": "input_text", "text": "look"},
+                             {"type": "input_image", "image_url": "u", "detail": "high"}]}
+        classified = self.codec.classify(image)
+        self.assertTrue(classified.media)
+        self.assertEqual(classified.media[0].detail, "high")
         self.assertEqual(self.codec.classify({"type": "local_shell_call", "call_id": "c"}).kind, Kind.TOOL_CALL)
         self.assertEqual(self.codec.classify({"type": "shell_call_output", "call_id": "c"}).kind, Kind.TOOL_RESULT)
         self.assertEqual(self.codec.classify({"type": "compaction", "encrypted_content": "x"}).kind, Kind.SUMMARY)
