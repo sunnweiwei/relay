@@ -12,10 +12,13 @@ from relay.core.ir import Item, Kind, Request
 from relay.harnesses import Harness
 from relay.harnesses.claude_code import ClaudeCode
 from relay.protocols import AnthropicMessages, Gemini, OpenAIResponses
-from relay.strategies import Headroom
+from relay.prompts import SUMMARY_PREFIX
+from relay.strategies import Compaction, Headroom
 
 CODEC, HARNESS = OpenAIResponses(), Harness()
 TOOLS = [{"type": "function", "name": "sh", "parameters": {}}]
+SUMMARY = (200, {"status": "completed", "output": [{"type": "message", "role": "assistant",
+                                                     "content": [{"type": "output_text", "text": "S"}]}]})
 
 
 def msg(role: str, text: str) -> dict[str, Any]:
@@ -52,7 +55,7 @@ class HeadroomTests(unittest.TestCase):
     def send(self, items: list[dict[str, Any]], codec: Any = CODEC, harness: Any = HARNESS) -> list[dict[str, Any]]:
         field = {"openai_responses": "input", "gemini": "contents"}.get(codec.name, "messages")
         body = {"model": "m", "tools": TOOLS, field: items}
-        return self.engine.prepare(codec, harness, body, tenant="t", post=lambda r: (500, {})).body[field]
+        return self.engine.prepare(codec, harness, body, tenant="t", post=lambda r: SUMMARY).body[field]
 
     def test_a_result_goes_compressed_and_headroom_sees_the_conversation_as_chat_messages(self) -> None:
         sent = self.send([msg("user", "fix the bug"), *run(1, "cat app.log", "x" * 500)])
@@ -132,6 +135,34 @@ class HeadroomTests(unittest.TestCase):
         self.assertEqual(tool["content"], "x" * 500)
         self.assertEqual(sent[-1]["parts"][0]["functionResponse"], {"id": "r1", "name": "run_shell_command",
                                                                     "response": {"output": "[500 chars]"}})
+
+    def test_past_the_window_compaction_keeps_it_within_and_headroom_goes_on_from_there(self) -> None:
+        self.engine = Engine(Headroom(fallback=Compaction(threshold=300, min_gain=0), post=self.headroom))
+        first = [msg("user", "fix the bug"), *run(1, "cat app.log", "x" * 100)]
+        self.send(first)
+        over = [*first, *run(2, "cat test.log", "y" * 3000)]
+        asked = len(self.headroom.bodies)
+        sent = self.send(over)
+        self.assertEqual(len(self.headroom.bodies), asked)  # (compacted, not compressed)
+        self.assertTrue(any(SUMMARY_PREFIX in CODEC.classify(item).text for item in sent))
+        later = self.send([*over, *run(3, "ls", "z" * 500)])
+        body = self.headroom.bodies[-1]
+        self.assertEqual(body["config"]["frozen_message_count"], 2)  # (the task and the summary)
+        self.assertEqual(later[:len(sent)], sent)
+        self.assertEqual(later[-1]["output"], "[500 chars]")
+
+    def test_a_request_the_upstream_finds_too_long_is_compacted_too(self) -> None:
+        strategy = Headroom(fallback=Compaction(threshold=10**9), post=self.headroom)
+        items = (Item(Kind.USER, "fix the bug"), Item(Kind.TOOL_CALL, 'sh({"cmd": "ls"})'), Item(Kind.TOOL_RESULT, "x" * 500))
+        request = Request(items, items, frozenset({0, 1, 3}), 1000, 200_000, force=True)
+
+        class Summarizer:
+            def summarize(self, cut: int, prompt: str) -> str:
+                return "S"
+
+        context = strategy.plan(request, Summarizer())
+        self.assertEqual([item.kind for item in context.items], [Kind.USER, Kind.SUMMARY])
+        self.assertEqual(self.headroom.bodies, [])
 
     def test_a_history_not_as_forwarded_is_compressed_whole_and_the_settings_go_along(self) -> None:
         items = (Item(Kind.USER, "fix the bug"), Item(Kind.TOOL_CALL, 'sh({"cmd": "cat app.log"})'),
