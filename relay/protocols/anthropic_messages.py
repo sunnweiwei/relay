@@ -10,7 +10,7 @@ import json
 from typing import Any
 
 from ..core.ir import Item, Kind, Media
-from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, decoded, error_message
+from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, decoded, error_message, extra, extras
 
 SUMMARY_MAX_TOKENS = 32_000
 
@@ -283,31 +283,37 @@ def _block_text(block: dict[str, Any]) -> str:
         content = block.get("content")
         if isinstance(content, str):
             return content
-        return "\n".join(_block_text(inner) for inner in _blocks(content))
+        return "\n".join(filter(None, map(_block_text, _blocks(content))))
     return ""
 
 
 def _media(block: dict[str, Any]) -> list[Media]:
-    """The images and documents of a block, a tool result's included."""
+    """The non-text content of a block of a user message, a tool result's included: its images and
+    documents, and any other block as it came."""
 
     kind = block.get("type")
     if kind == "tool_result":
         content = block.get("content")
         return [m for inner in _blocks(content) for m in _media(inner)] if isinstance(content, list) else []
-    if kind not in {"image", "document"}:
+    if kind == "text":
         return []
     source = block.get("source") or {}
+    if kind not in {"image", "document"} or source.get("type") not in {"base64", "url", "file"}:
+        return [Media(str(kind), extra=extra(block, "cache_control"))]
     media_type = "image" if kind == "image" else "file"
     return [Media(media_type, source.get("media_type", ""), source.get("data", "") if source.get("type") == "base64" else "",
-                  source.get("url") or source.get("file_id") or "")]
+                  source.get("url") or source.get("file_id") or "", extra=extra(block, "type", "source", "cache_control"))]
 
 
 def _content(text: str, media: tuple[Media, ...]) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = [{"type": "text", "text": text}] if text or not media else []
     for m in media:
+        if m.type not in ("image", "file"):
+            blocks.append(extras(m))
+            continue
         source = ({"type": "base64", "media_type": m.mime, "data": m.data} if m.data
                   else {"type": "url", "url": m.url} if "://" in m.url else {"type": "file", "file_id": m.url})
-        blocks.append({"type": "image" if m.type == "image" else "document", "source": source})
+        blocks.append({**extras(m), "type": "image" if m.type == "image" else "document", "source": source})
     return blocks
 
 

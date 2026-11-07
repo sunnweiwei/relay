@@ -7,6 +7,7 @@ from typing import Any
 from ..protocols.base import Body, Codec, WireItem
 from .budget import InputBudget
 from .ir import Kind
+from .media import removed
 
 MARKER = "[harness truncated {removed} characters]"
 
@@ -23,7 +24,9 @@ def truncate_request(
     """Return a budget-fitting request and source-index metadata, or raise ``BudgetExceeded``.
 
     System/developer items and tool schemas are fixed by construction. Tool call/result groups
-    are atomic. ``kept_indices`` maps each returned input item to its original input index.
+    are atomic. Media go first, oldest first, a pinned item's too: of an item only its media, and
+    the newest stay, what the model is looking at. ``kept_indices`` maps each returned input item
+    to its original input index.
     """
     from .budget import BudgetExceeded
 
@@ -64,26 +67,38 @@ def truncate_request(
     before = budget.count(codec, body)
     if before <= limit:
         return body, {"before_tokens": before, "after_tokens": before, "dropped_groups": 0,
-                      "dropped_items": 0, "truncated_text_items": 0, "kept_indices": kept}
+                      "dropped_items": 0, "truncated_text_items": 0, "stripped_media_items": 0, "kept_indices": kept}
+
+    edits: dict[int, WireItem] = {}
+    with_media = [i for i, wire in enumerate(source)
+                  if (item := codec.classify(wire)).media and item.kind in (Kind.USER, Kind.TOOL_RESULT)]
+    for index in with_media[:-1]:
+        if count(kept, edits) <= limit:
+            break
+        item = codec.classify(source[index])
+        try:
+            edits[index] = codec.edit(source[index], f"{item.text}\n{removed(item.media)}".strip(), ())
+        except (TypeError, ValueError):
+            continue
+    stripped = set(edits)
 
     dropped_groups = dropped_items = 0
     # Remove oldest removable groups, retaining the newest one while any other removable group
     # remains. Pinned groups are never removed, even when they contain uneditable tool calls.
     active_groups = list(groups)
-    while count(kept) > limit:
+    while count(kept, edits) > limit:
         removable = [g for g in active_groups if not any(i in pins for i in range(*g))]
         if len(removable) <= 1:
             break
         left, right = removable[0]
-        removed = set(range(left, right))
-        kept = [i for i in kept if i not in removed]
+        group = set(range(left, right))
+        kept = [i for i in kept if i not in group]
         active_groups.remove((left, right))
         dropped_groups += 1
         dropped_items += right - left
 
     # Shrink plain message/output text in oldest-to-newest order. Binary search retains the
     # largest prefix/suffix payload that makes the complete request fit.
-    edits: dict[int, WireItem] = {}
     for original_index in kept:
         if count(kept, edits) <= limit:
             break
@@ -151,8 +166,8 @@ def truncate_request(
             other_task = any(codec.classify(source[i]).kind is Kind.USER for i in outside)
             if not other_task:
                 break
-        removed = set(range(left, right))
-        kept = [i for i in kept if i not in removed]
+        group = set(range(left, right))
+        kept = [i for i in kept if i not in group]
         edits = {i: value for i, value in edits.items() if i in kept}
         active_groups.remove((left, right))
         dropped_groups += 1
@@ -165,5 +180,6 @@ def truncate_request(
     if codec.orphans(codec.items(result)):
         raise ValueError("truncation produced unpaired tool calls or results")
     return result, {"before_tokens": before, "after_tokens": after, "dropped_groups": dropped_groups,
-                    "dropped_items": dropped_items, "truncated_text_items": len(edits),
+                    "dropped_items": dropped_items, "truncated_text_items": len(set(edits) - stripped),
+                    "stripped_media_items": len(stripped & set(kept)),
                     "kept_indices": kept}

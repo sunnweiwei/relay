@@ -35,6 +35,7 @@ from ..prompts import SUMMARY_PREFIX
 from ..providers import context_window, window_of
 from ..strategies.base import Strategy, Summarizer
 from .ir import CONTEXT_KINDS, LABELS, Context, Item, Kind, Media, Request, note
+from .media import removed
 from .store import PrefixStore
 from .tokens import approx_tokens, bytes_per_token, counting_with, item_tokens
 from .budget import BudgetExceeded, InputBudget
@@ -533,8 +534,11 @@ def _item(entry: dict[str, Any], originals: list[Item]) -> Item:
 def _wire(codec: Codec, raw: list[WireItem], originals: list[Item], item: Item) -> WireItem:
     if item.ref is not None:
         original = originals[item.ref]
-        unchanged = (item.text, item.media) == (original.text, original.media)
-        return raw[item.ref] if unchanged else codec.edit(raw[item.ref], item.text, item.media)
+        if (item.text, item.media) == (original.text, original.media):
+            return raw[item.ref]
+        gone = [m for m in original.media if m not in item.media]
+        silent = gone and item.text.strip() == original.text.strip()  # (new text speaks for itself)
+        return codec.edit(raw[item.ref], f"{item.text}\n{removed(gone)}".strip() if silent else item.text, item.media)
     return json.loads(item.wire) if item.wire else codec.write(item)
 
 

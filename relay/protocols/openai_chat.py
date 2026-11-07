@@ -7,10 +7,12 @@ answering it form one group.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 from ..core.ir import Item, Kind, Media
-from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, data_media, data_url, error_message, json_text
+from .base import (OVERFLOW_PHRASES, Body, WireItem, canonical_json, data_media, data_url, error_message, extra,
+                   extras, json_text)
 
 
 # Message fields that reach the model, including common provider extensions for reasoning.
@@ -187,16 +189,17 @@ def _content_text(content: Any) -> tuple[str, tuple[Media, ...]]:
         if isinstance(part.get("text"), str):
             texts.append(part["text"])
         elif part.get("type") == "image_url":
-            url = part.get("image_url")
-            media.append(data_media("image", url.get("url", "") if isinstance(url, dict) else str(url or "")))
+            url = part.get("image_url") if isinstance(part.get("image_url"), dict) else {"url": str(part.get("image_url") or "")}
+            media.append(replace(data_media("image", url.get("url", "")), detail=url.get("detail"), extra=extra(url, "url")))
         elif part.get("type") == "input_audio" and isinstance(part.get("input_audio"), dict):
             audio = part["input_audio"]
             media.append(Media("audio", f"audio/{audio.get('format', '')}", audio.get("data") or ""))
         elif part.get("type") == "file" and isinstance(part.get("file"), dict):
             file = part["file"]
-            media.append(data_media("file", file.get("file_data") or file.get("file_id") or ""))
+            media.append(replace(data_media("file", file.get("file_data") or file.get("file_id") or ""),
+                                 extra=extra(file, "file_data", "file_id")))
         else:
-            media.append(Media(str(part.get("type"))))
+            media.append(Media(str(part.get("type")), extra=extra(part)))
     return "\n".join(texts), tuple(media)
 
 
@@ -206,9 +209,11 @@ def _content(text: str, media: tuple[Media, ...]) -> str | list[dict[str, Any]]:
     parts: list[dict[str, Any]] = [{"type": "text", "text": text}] if text else []
     for m in media:
         if m.type == "image":
-            parts.append({"type": "image_url", "image_url": {"url": data_url(m)}})
+            parts.append({"type": "image_url", "image_url": {**extras(m), "url": data_url(m)}})
         elif m.type == "audio":
             parts.append({"type": "input_audio", "input_audio": {"data": m.data, "format": m.mime.split("/")[-1]}})
+        elif m.type == "file":
+            parts.append({"type": "file", "file": {**extras(m), **({"file_data": data_url(m)} if m.data else {"file_id": m.url})}})
         else:
-            parts.append({"type": "file", "file": {"file_data": data_url(m)} if m.data else {"file_id": m.url}})
+            parts.append(extras(m))
     return parts

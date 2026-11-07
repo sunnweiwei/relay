@@ -96,6 +96,17 @@ def data_media(kind: str, url: str, mime: str = "") -> Media:
     return Media(kind, mime, url=url)
 
 
+def extra(part: dict[str, Any], *content: str) -> str:
+    """A media part's fields but its `content`, as `Media.extra`: an edit writes them back."""
+
+    rest = {key: value for key, value in part.items() if key not in content}
+    return json.dumps(rest, ensure_ascii=False, sort_keys=True) if rest else ""
+
+
+def extras(media: Media) -> dict[str, Any]:
+    return json.loads(media.extra) if media.extra else {}
+
+
 def data_url(media: Media) -> str:
     return f"data:{media.mime};base64,{media.data}" if media.data else media.url
 

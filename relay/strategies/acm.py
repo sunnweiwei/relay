@@ -11,7 +11,7 @@ tool result the model reads its context size, "[CURRENT CONTEXT TOKEN: N]" (a no
 request). The harness's shell stands in for the tools: the agent runs
 `echo "[manage_context]"` and `echo "[query_memory] N :: query"`, and the echo's result is rewritten
 in place. ACM's prompts are used as released (`src/prompts.py`), its guidance worded for a shell.
-Unlike the release, which serializes messages as text only, a compressed range's images go with it:
+Unlike the release, which serializes messages as text only, a compressed range's media go with it:
 each is marked `[image N]` where it was, attached to the summary request, and saved with the originals,
 so query_memory sees them too.
 """
@@ -20,11 +20,12 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from ..core.ir import LABELS, Context, Item, Kind, Media, Request
+from ..core.media import marks
 from ..core.tokens import approx_tokens, item_tokens
 from .base import Summarizer
 from .conversation import ignored, signalled, step
@@ -164,13 +165,13 @@ class ACM:
                   summarizer: Summarizer) -> str:
         """ACM's summary of `dropped`, whose original messages it saves first."""
 
-        messages, images = [], []
+        messages, media = [], []
         for item in dropped:
             message = {"role": LABELS.get(item.kind, item.kind.value), "content": item.text}
-            if shown := [m for m in item.media if m.type == "image"]:
-                message["content"] += "".join(f" [image {len(images) + k}]" for k in range(1, len(shown) + 1))
-                message["images"] = [{"mime": m.mime, "data": m.data, "url": m.url} for m in shown]
-                images += shown
+            if item.media:
+                message["content"] += "".join(f" {mark}" for mark in marks(item.media, len(media)))
+                message["media"] = [asdict(m) for m in item.media]
+                media += item.media
             messages.append(message)
         path = Path(self.directory) / request.conversation / f"summary_{number}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -178,7 +179,7 @@ class ACM:
         question = next((item.text for item in before if item.kind is Kind.USER), "")
         conversation = "\n\n".join(f"[{m['role']}] {m['content']}" for m in messages)
         prompt = SUMMARY_INSTRUCTION.format(question=question, conversation=conversation)
-        text = THINK.sub("", _ask(summarizer, prompt, images)).strip()
+        text = THINK.sub("", _ask(summarizer, prompt, media)).strip()
         memory = MEMORY.search(text)  # ACM's parse: the <memory> block, else the whole answer
         return memory.group(1).strip() if memory and len(memory.group(1).strip()) >= 50 else text
 
@@ -192,16 +193,16 @@ class ACM:
             return f"Error: summary_id {number} not found."
         saved = json.loads(path.read_text(encoding="utf-8"))
         history = "\n".join(f"[{m['role']}] {m['content']}" for m in saved)
-        images = [Media("image", **image) for m in saved for image in m.get("images", ())]
+        media = [Media(**m) for message in saved for m in message.get("media", ())]
         prompt = QUERY_MEMORY_PROMPT.format(summary_id=number, history=history, query=query.strip())
-        return f"[query_memory: summary_id={number}]\n\n{THINK.sub('', _ask(summarizer, prompt, images)).strip()}"
+        return f"[query_memory: summary_id={number}]\n\n{THINK.sub('', _ask(summarizer, prompt, media)).strip()}"
 
 
-def _ask(summarizer: Summarizer, prompt: str, images: list[Media]) -> str:
-    """ACM's prompt, answered as the harness's own summary request; with images, as one message carrying them
+def _ask(summarizer: Summarizer, prompt: str, media: list[Media]) -> str:
+    """ACM's prompt, answered as the harness's own summary request; with media, as one message carrying them
     (a summary request's prompt is text only)."""
 
-    return summarizer.complete([Item(Kind.USER, prompt, media=tuple(images))]) if images else summarizer.summarize(0, prompt)
+    return summarizer.complete([Item(Kind.USER, prompt, media=tuple(media))]) if media else summarizer.summarize(0, prompt)
 
 
 def _summary(item: Item) -> bool:

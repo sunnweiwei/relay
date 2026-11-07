@@ -14,7 +14,9 @@ from functools import lru_cache
 from .ir import Item, Media
 
 PIXELS_PER_TOKEN = 750  # Anthropic's documented rule; gpt-5's patches measure ~10% fewer
-IMAGE_TOKENS = 1600  # an image whose size cannot be read (a URL, a file id)
+IMAGE_TOKENS = 1600  # media whose size cannot be read (a URL, a file id)
+FILE_BYTES_PER_TOKEN = 16  # a PDF of text and pictures, roughly; the upstream's count corrects it
+AUDIO_BYTES_PER_TOKEN = 1000  # 16 kHz 16-bit audio at about 32 tokens a second
 BYTES_PER_TOKEN = 4  # Codex's rule; OpenAI and Gemini tokenizers measured about 4.6, so it errs high
 DENSER = (("claude", 2.5),)  # Claude's tokenizer measured about 2.7 bytes a token
 _counter: ContextVar[Callable[[str], int] | None] = ContextVar("relay_token_counter", default=None)
@@ -85,12 +87,18 @@ def item_tokens(item: Item, per_token: float = BYTES_PER_TOKEN) -> int:
 
 
 def media_tokens(media: Media) -> int:
-    """An image's tokens, from its size in pixels (its base64 is not text the model reads)."""
+    """Media's tokens: an image's from its size in pixels, a file's or audio's from its bytes (their
+    base64 is not text the model reads), a part Relay does not read as the text it is."""
 
-    if media.type != "image":
-        return 0
-    size = _image_size(media.data) if media.data else None
-    return math.ceil(size[0] * size[1] / PIXELS_PER_TOKEN) if size else IMAGE_TOKENS
+    if media.type == "image":
+        size = _image_size(media.data) if media.data else None
+        return math.ceil(size[0] * size[1] / PIXELS_PER_TOKEN) if size else IMAGE_TOKENS
+    if media.type not in ("file", "audio"):
+        return math.ceil(len(media.extra.encode("utf-8")) / BYTES_PER_TOKEN)
+    if not media.data:
+        return IMAGE_TOKENS
+    rate = AUDIO_BYTES_PER_TOKEN if media.type == "audio" else FILE_BYTES_PER_TOKEN
+    return math.ceil(len(media.data) * 3 / 4 / rate)
 
 
 @lru_cache(maxsize=4096)

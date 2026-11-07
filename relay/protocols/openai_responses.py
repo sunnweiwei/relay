@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import hashlib
+from dataclasses import replace
 from typing import Any
 
 from ..core.ir import Item, Kind, Media
 from .base import (OVERFLOW_PHRASES, Body, WireItem, canonical_json, data_media, data_url, decoded, error_message,
-                   json_text)
+                   extra, extras, json_text)
 
 _ROLES = {
     "system": Kind.SYSTEM,
@@ -213,14 +214,16 @@ def _content_text(content: Any) -> tuple[str, tuple[Media, ...]]:
             texts.append(part["text"])
         elif kind == "input_image":
             image = data_media("image", part.get("image_url") or part.get("file_id") or "")
-            media.append(Media(image.type, image.mime, image.data, image.url, part.get("detail")))
+            media.append(Media(image.type, image.mime, image.data, image.url, part.get("detail"),
+                               extra(part, "type", "image_url", "file_id")))
         elif kind == "input_file":
-            media.append(data_media("file", part.get("file_data") or part.get("file_url") or part.get("file_id") or ""))
+            file = data_media("file", part.get("file_data") or part.get("file_url") or part.get("file_id") or "")
+            media.append(replace(file, extra=extra(part, "type", "file_data", "file_url", "file_id")))
         elif kind == "input_audio" and isinstance(part.get("input_audio"), dict):
             audio = part["input_audio"]
             media.append(Media("audio", f"audio/{audio.get('format', '')}", audio.get("data") or ""))
         else:
-            media.append(Media(str(kind)))
+            media.append(Media(str(kind), extra=extra(part)))
     return "\n".join(texts), tuple(media)
 
 
@@ -228,14 +231,15 @@ def _content(text: str, media: tuple[Media, ...]) -> list[dict[str, Any]]:
     parts: list[dict[str, Any]] = [{"type": "input_text", "text": text}] if text or not media else []
     for m in media:
         if m.type == "image":
-            parts.append({"type": "input_image", "image_url": data_url(m)} if m.data or "://" in m.url
-                         else {"type": "input_image", "file_id": m.url})
+            parts.append({**extras(m), "type": "input_image",
+                          **({"image_url": data_url(m)} if m.data or "://" in m.url else {"file_id": m.url})})
         elif m.type == "audio":
             parts.append({"type": "input_audio", "input_audio": {"data": m.data, "format": m.mime.split("/")[-1]}})
-        elif m.data or "://" in m.url:
-            parts.append({"type": "input_file", **({"file_data": data_url(m)} if m.data else {"file_url": m.url})})
+        elif m.type == "file":
+            source = {"file_data": data_url(m)} if m.data else {"file_url": m.url} if "://" in m.url else {"file_id": m.url}
+            parts.append({**extras(m), "type": "input_file", **source})
         else:
-            parts.append({"type": "input_file", "file_id": m.url})
+            parts.append(extras(m))
     return parts
 
 

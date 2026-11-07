@@ -36,7 +36,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .. import settings
-from ..core.ir import Context, Item, Kind, Request
+from ..core.ir import Context, Item, Kind, Media, Request
+from ..core.media import counted
 from ..core.tokens import item_tokens
 from .base import Summarizer
 from .compaction import Compaction
@@ -75,7 +76,7 @@ class _Call:
     chars: int  # its result's size
     pinned: bool
     cut: int  # the cut of the conversation (a model response and its results) it goes with
-    images: int  # its result's images
+    media: tuple[Media, ...]  # its result's
 
 
 @dataclass(frozen=True)
@@ -169,7 +170,7 @@ class Jev:
                 answered = [results[k]] if len(results) == len(made) else results  # (one message of all: together)
                 calls.append(_Call(f"t{len(calls) + 1}", tool, value, at[n], at[answered[-1]],
                                    sum(len(items[r].text) for r in answered), False, cut,
-                                   sum(_images(items[r]) for r in answered)))
+                                   tuple(m for r in answered for m in items[r].media)))
         for call in calls:  # (a cut is pinned where one of its calls is)
             call.pinned = any(pinned(c.message) or pinned(c.result) for c in calls if c.cut == call.cut)
         return calls
@@ -192,7 +193,7 @@ class Jev:
             history = []
             for i, members in enumerate(messages):
                 own = [{"id": c.id, "tool": c.tool, "input": _truncate(_input(c.input), limit),
-                        "result": f"{_described(c.chars, c.images)} (omitted)"} for c in by_message.get(i, [])]
+                        "result": f"{_described(c.chars, c.media)} (omitted)"} for c in by_message.get(i, [])]
                 if texts[i].strip() or own:
                     history.append({"i": i, "role": _role(items, members), "text": texts[i], **({"tool_calls": own} if own else {})})
             return history
@@ -288,28 +289,23 @@ class Jev:
         for n, item in enumerate(items):
             action = decided.get(cuts.get(n, -1), "keep")
             if action == "drop_result" and item.kind is Kind.TOOL_RESULT:
-                out.append(replace(item, text=self._truncated(item.text, _images(item)),
-                                   media=tuple(m for m in item.media if m.type != "image")))
+                out.append(replace(item, text=self._truncated(item.text, item.media), media=()))
             elif not (action == "drop_call" and item.kind in (Kind.TOOL_CALL, Kind.TOOL_RESULT, Kind.REASONING)):
                 out.append(item)
         return tuple(out)
 
-    def _truncated(self, text: str, images: int) -> str:
+    def _truncated(self, text: str, media: tuple[Media, ...]) -> str:
         if len(text) <= self.head + 120:
-            return f"{text}\n{TRUNCATED.format(what=_described(0, images))}".strip() if images else text
+            return f"{text}\n{TRUNCATED.format(what=_described(0, media))}".strip() if media else text
         return (f"{text[: self.head]}\n" if self.head > 0 else "") + TRUNCATED.format(
-            what=_described(len(text) - self.head, images))
+            what=_described(len(text) - self.head, media))
 
 
-def _images(item: Item) -> int:
-    return sum(m.type == "image" for m in item.media)
+def _described(chars: int, media: tuple[Media, ...]) -> str:
+    """A result's size as Jev and the model are told it: "N chars", and its media."""
 
-
-def _described(chars: int, images: int) -> str:
-    """A result's size as Jev and the model are told it: "N chars", and its images."""
-
-    shown = [f"{chars} chars"] if chars or not images else []
-    return " and ".join([*shown, *([f"{images} image{'s' if images > 1 else ''}"] if images else [])])
+    shown = [f"{chars} chars"] if chars or not media else []
+    return " and ".join([*shown, *([counted(media)] if media else [])])
 
 
 def _messages(items: tuple[Item, ...]) -> list[list[int]]:
