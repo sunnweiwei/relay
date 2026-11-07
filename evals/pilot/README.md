@@ -159,9 +159,11 @@ caps). It is listed for completeness and does not support a ranking.
   (`science_*_isolation.py`). The code here is the consolidated version of those adapters,
   and some task adapters differ in detail from the snapshot that ran.
 - **The runs used Relay as of late October.** Every run used a snapshot of Relay from commit
-  `c6bd44f` with the evaluation's changes. Upstream has since changed ACM's signal handling
-  and Folding, so this branch's ACM and Folding differ in detail from the code that ran. The
-  runs of 2026-11-06 (below) used the same snapshot, so their methods match the earlier runs.
+  `c6bd44f` with the evaluation's changes. Upstream has since changed ACM (its signal
+  handling, and it now compresses the user's later messages and carries images) and Folding,
+  so the repository's ACM, ACM (forced) and Folding differ in detail from the code that ran.
+  The runs of 2026-11-06 used the same snapshot as the earlier runs, with ACM (forced) built on
+  that snapshot's ACM.
 - **The ARC prompt had a wrong example.** Its coordinate example used `ACTION2`; only
   `ACTION6` takes coordinates. `arc_sample.py` keeps the corrected text, but the full ARC
   runs used the original prompt. The ARC service also has no reset action, so `GAME_OVER`
