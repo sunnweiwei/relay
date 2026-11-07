@@ -1,5 +1,5 @@
 from .ace import ACE
-from .acm import ACM
+from .acm import ACM, ForcedACM
 from .autocompact import AutoCompact
 from .base import Strategy, Summarizer
 from .clm import ContextLanguageModel
@@ -11,10 +11,12 @@ from .mem1 import MEM1
 from .prolong import ProLong
 from .rlm import RLM, PersistentRLM
 from .selfcompact import SelfCompact
+from .truncation import Truncation
 
 STRATEGIES = {"compaction": Compaction, "clm": ContextLanguageModel, "folding": ContextFolding, "prolong": ProLong,
               "selfcompact": SelfCompact, "autocompact": AutoCompact, "acm": ACM, "ace": ACE, "mem1": MEM1, "rlm": RLM,
-              "rlm_persistent": PersistentRLM, "jev": Jev, "headroom": Headroom}  # the `strategy` setting
+              "rlm_persistent": PersistentRLM, "jev": Jev, "headroom": Headroom,
+              "acm_forced": ForcedACM, "truncation": Truncation}  # the `strategy` setting
 
-__all__ = ["ACE", "ACM", "MEM1", "RLM", "STRATEGIES", "AutoCompact", "Compaction", "ContextFolding", "ContextLanguageModel", "Headroom", "Jev",
-           "PersistentRLM", "ProLong", "SelfCompact", "Strategy", "Summarizer"]
+__all__ = ["ACE", "ACM", "ForcedACM", "MEM1", "RLM", "STRATEGIES", "AutoCompact", "Compaction", "ContextFolding", "ContextLanguageModel", "Headroom", "Jev",
+           "PersistentRLM", "ProLong", "SelfCompact", "Strategy", "Summarizer", "Truncation"]

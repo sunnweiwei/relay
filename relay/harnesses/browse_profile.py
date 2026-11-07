@@ -17,6 +17,9 @@ from ..protocols.base import Body
 PROFILE = "browse_minimal_v1"
 CODING_PREFIX = "You are Codex, an agent based on GPT-6. You and the user share one workspace, and your job"
 CODING_SHA256 = "a2735be23ce52098b1f735146accfb6b92ce819c8c69a07b8449a08d71260d56"
+# Codex model metadata served from 2026-11-06 changes one word of the skills section. The
+# profile replaces the whole text, so the agent reads the same instructions.
+LATER_CODING_SHA256 = ("e52174f354e3970ad8de5935fff8d04ddf2890a35659283d163befb56490198c",)
 BROWSE_INSTRUCTIONS = (
     "You are an agent solving a BrowseComp-Plus research task. Follow the task, "
     "tool contracts, and filesystem/network permissions. Use the provided "
@@ -47,7 +50,7 @@ def apply_profile(body: Body, profile: str | None) -> Body:
                 continue
             original = text = part.get("text", "")
             if text.startswith(CODING_PREFIX):
-                if hashlib.sha256(text.encode()).hexdigest() != CODING_SHA256:
+                if hashlib.sha256(text.encode()).hexdigest() not in (CODING_SHA256, *LATER_CODING_SHA256):
                     raise ValueError(f"{PROFILE}: unrecognized Codex coding instructions; refusing to "
                                      "forward them under this profile")
                 text = BROWSE_INSTRUCTIONS

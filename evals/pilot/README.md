@@ -27,52 +27,82 @@ Scores use one outcome policy on all three benchmarks (`outcomes.py`):
   retries, the quota guard stopped the run, or the input counter could not account for a
   request.
 
-Method comparisons use only the tasks on which all five working methods have a score under
-this policy.
+Method comparisons use the tasks on which all five core methods (Compaction, Folding, CLM,
+ACM, Self-Compact) have a score under this policy.
 
-### BrowseComp-Plus: 825 questions × 6 methods
+Two methods were added on 2026-11-06 (see Protocol): a truncation-only baseline and ACM with
+a forced compression. They ran a week after the other methods, and the account's weekly
+usage limit stopped them part of the way: on 404 and 403 of the 825 Browse questions, the
+first in the evaluation's fixed random order, and on 23 Science tasks. Their rows below use
+the tasks they have, and their contrasts use the tasks on which both methods have a score.
 
-The metric is strict accuracy. The interval is a 95% Wilson interval. The comparison set has
-796 tasks.
+### BrowseComp-Plus: 825 questions
 
-| Method | Accuracy (95% CI) | Task failures (0) | Excluded | Answer contains gold (lenient) | Runs with truncation fallback |
-| --- | --- | --- | --- | --- | --- |
-| Compaction | 49.6% (46.2–53.0%) | 5 | 1 | 54.1% | 0% |
-| Folding | 40.4% (37.1–43.8%) | 21 | 23 | 46.9% | 1% |
-| CLM | 39.5% (36.2–42.9%) | 1 | 0 | 48.1% | 0% |
-| ACM | 38.3% (35.0–41.7%) | 2 | 0 | 45.7% | 92% |
-| Self-Compact | 16.6% (14.2–19.3%) | 10 | 5 | 19.1% | 0% |
-| RLM (reference) | 0.0% | 4 | 113 | 0.0% | 0% |
+The metric is strict accuracy. The interval is a 95% Wilson interval. All 825 questions have a
+score for every core method.
 
-These are paired differences on the 796 common tasks:
+| Method | Accuracy (95% CI) | Runs scored | Task failures (0) | Excluded | Answer contains gold (lenient) | Runs with truncation fallback |
+| --- | --- | --- | --- | --- | --- | --- |
+| Compaction | 49.7% (46.3–53.1%) | 825 | 5 | 0 | 54.1% | 0% |
+| Folding | 40.2% (36.9–43.6%) | 825 | 21 | 0 | 46.5% | 1% |
+| CLM | 39.5% (36.2–42.9%) | 825 | 2 | 0 | 48.1% | 0% |
+| ACM | 38.2% (34.9–41.5%) | 825 | 2 | 0 | 45.6% | 92% |
+| Self-Compact | 16.8% (14.4–19.6%) | 825 | 10 | 0 | 19.4% | 0% |
+| ACM (forced), added | 36.7% (32.0–41.6%) | 390 | 2 | 13 | 44.8% | 6% |
+| Truncation only, added | 32.2% (27.8–37.0%) | 394 | 2 | 10 | 36.0% | 85% |
+| RLM (reference) | 0.0% | 708 | 4 | 117 | 0.0% | 0% |
 
-- Compaction minus Folding: +9.5% (95% bootstrap interval +6.4 to +12.6).
-- Compaction minus CLM: +10.2% (+6.9 to +13.7).
-- Compaction minus ACM: +11.6% (+8.0 to +14.8).
+These are paired differences between core methods on the 825 questions (95% bootstrap
+interval):
+
+- Compaction minus Folding: +9.5% (+6.4 to +12.6).
+- Compaction minus CLM: +10.2% (+6.9 to +13.5).
+- Compaction minus ACM: +11.5% (+8.1 to +14.9).
+
+These are differences from the truncation-only baseline, on the 394 questions it ran (389 for
+ACM (forced)):
+
+| Method minus Truncation only | Difference (95% CI) |
+| --- | --- |
+| Compaction | +20.1% (+15.2 to +25.1) |
+| Folding | +9.1% (+4.1 to +14.0) |
+| CLM | +7.1% (+2.5 to +11.7) |
+| ACM | +6.1% (+1.3 to +10.9) |
+| ACM (forced) | +4.6% (+0.0 to +9.5) |
+| Self-Compact | −13.2% (−18.3 to −7.9) |
+
+ACM (forced) minus ACM is −1.5% (−6.7 to +3.6) on 390 questions: forcing the compression did
+not help ACM. Truncation-only runs ended early (median 9 main requests, against 16 for ACM
+and 29 for Compaction).
 
 ### ARC-AGI-3: 25 public games × 6 methods
 
 The metric is the share of a game's levels completed. No run completed a whole game, and on
 14 of the 19 common games no method completed a level. This benchmark is at its floor here
-and does not separate the methods.
+and does not separate the methods. The added methods did not run on it.
 
-### Terminal-Bench-Science: 53 tasks with all working methods scored
+### Terminal-Bench-Science: 53 tasks with all core methods scored
 
 The metric is the share of the task's verifier tests that pass. It is a diagnostic partial
 score: the official reward is 1 only when every test passes, and only two runs reached
 reward 1 (ACM and Compaction, one each). The metric has a floor, since RLM runs that barely
 worked on the task still pass about 16% of the tests.
 
-| Method | Tests passed (95% CI) | Runs with truncation fallback |
-| --- | --- | --- |
-| ACM | 38.1% (29.6–46.8%) | 65% |
-| Compaction | 33.0% (24.4–41.0%) | 0% |
-| Folding | 31.9% (23.2–40.7%) | 0% |
-| CLM | 27.7% (18.6–37.0%) | 0% |
-| Self-Compact | 18.9% (11.4–27.1%) | 0% |
-| RLM (reference) | 15.8% (8.0–24.3%) | 0% |
+| Method | Tests passed (95% CI) | Runs scored | Runs with truncation fallback |
+| --- | --- | --- | --- |
+| ACM | 38.1% (29.6–46.8%) | 57 | 65% |
+| Compaction | 33.0% (24.4–41.0%) | 54 | 0% |
+| Folding | 31.9% (23.2–40.7%) | 55 | 0% |
+| CLM | 27.7% (18.6–37.0%) | 55 | 0% |
+| Self-Compact | 18.9% (11.4–27.1%) | 56 | 0% |
+| ACM (forced), added | 43.7% (28.7–59.2%) | 17 | 9% |
+| Truncation only, added | 42.4% (28.8–56.0%) | 18 | 61% |
+| RLM (reference) | 15.8% (8.0–24.3%) | 48 | 0% |
 
-The paired interval of ACM minus Compaction, from −1.8% to +14.0%, includes 0.
+The paired interval of ACM minus Compaction, from −1.8% to +14.0%, includes 0. The added
+methods ran on too few Science tasks to rank them: on the 16 tasks where both have a score,
+ACM minus Truncation only is +0.7% (−8.7 to +9.4), and Compaction minus Truncation only is
+−6.1% (−15.1 to +2.4).
 
 ### Earlier sampled comparison
 
@@ -85,9 +115,17 @@ caps). It is listed for completeness and does not support a ranking.
 
 - **ACM depends on the truncation fallback.** All runs enabled Relay's common overflow
   fallback. When a method's own forced recovery still leaves a request over the window,
-  Relay drops the oldest tool call groups. ACM needed this fallback in most runs, while the
-  other methods almost never did. ACM's results therefore describe ACM together with this
-  fallback.
+  Relay drops the oldest tool call groups. Released ACM has no forced recovery, and in 90%
+  of its Browse runs the model never asked it to compress, so the fallback managed the
+  context in most ACM runs. On Browse, ACM still beat the truncation-only baseline by 6.1%,
+  so its guidance and occasional compression add something over the fallback alone.
+- **The added methods are partial and a week later.** The truncation-only baseline and ACM
+  (forced) ran on 2026-11-06, about half of Browse and a third of the ready Science tasks,
+  until the account's weekly usage limit stopped the queues. Their questions are the first
+  in a fixed random order, so they are a random subset, but their comparison with methods run
+  a week earlier can include drift in the model or its serving. A same-day rerun of released
+  ACM, meant to measure that drift, was queued next but the account limit rejected it before
+  any run, so the drift is not measured.
 - **RLM does not measure the RLM method.** Relay replaces the conversation with the RLM's
   handoff. In many runs the main agent never sees the task, and its final answer asks for
   the question. RLM is shown for reference and is left out of the paired comparisons.
@@ -97,11 +135,14 @@ caps). It is listed for completeness and does not support a ranking.
   credit answers that list several candidates. The lenient column covers scored runs only.
   Compared with strict accuracy on the same runs, the gap differs by method, from 2.3% for
   Self-Compact to 8.5% for CLM. The strict ranking can therefore overstate some differences.
-- **The Browse prompt profile was not applied in 27 runs.** Browse runs replaced Codex's
-  generic coding instructions with a short Browse prompt (`relay/harnesses/browse_profile.py`).
-  In 27 runs (4 or 5 per method, on six questions) Codex sent a different version of its
-  prompt, and the profile left that prompt unchanged. These runs are marked in `cells.csv`
-  (`harness_profile_applied = False`). The profile now refuses unknown versions instead.
+- **27 Browse runs were repeated because the prompt profile was not applied.** Browse runs
+  replace Codex's generic coding instructions with a short Browse prompt
+  (`relay/harnesses/browse_profile.py`). In 27 runs (4 or 5 per method, on six questions) Codex
+  sent a different version of its prompt, and the profile left it unchanged. These cells,
+  and the 29 Browse cells first excluded as infrastructure failures, were run again on
+  2026-11-06 with a profile that refuses unchecked versions. The reruns replace the earlier
+  runs (`cells.csv`, `source = reruns-20261106`), so every core method now has all 825
+  questions.
 - **Each benchmark used one fixed condition, and runs under other conditions are excluded.**
   - Browse excluded five questions (183, 514, 1026, 692, 1099) that ran under earlier
     conditions.
@@ -117,6 +158,12 @@ caps). It is listed for completeness and does not support a ranking.
   runtime snapshots, because several tasks needed their own isolation adapters
   (`science_*_isolation.py`). The code here is the consolidated version of those adapters,
   and some task adapters differ in detail from the snapshot that ran.
+- **The runs used Relay as of late October.** Every run used a snapshot of Relay from commit
+  `c6bd44f` with the evaluation's changes. Upstream has since changed ACM (its signal
+  handling, and it now compresses the user's later messages and carries images) and Folding,
+  so the repository's ACM, ACM (forced) and Folding differ in detail from the code that ran.
+  The runs of 2026-11-06 used the same snapshot as the earlier runs, with ACM (forced) built on
+  that snapshot's ACM.
 - **The ARC prompt had a wrong example.** Its coordinate example used `ACTION2`; only
   `ACTION6` takes coordinates. `arc_sample.py` keeps the corrected text, but the full ARC
   runs used the original prompt. The ARC service also has no reset action, so `GAME_OVER`
@@ -127,8 +174,8 @@ caps). It is listed for completeness and does not support a ranking.
 - **The input counter is a local convention.** It is not the provider's tokenizer
   (see below). In every run, the provider-reported input of every main request stayed within
   the dispatch limit (the window plus the tolerance). Some runs did exceed the nominal
-  window: 786 Browse runs (745 of them ACM), 20 ARC runs and 26 Science runs. All of these
-  stayed within the tolerance.
+  window: 1,395 Browse runs (745 ACM, 321 ACM (forced), 288 truncation only), 20 ARC runs and
+  43 Science runs. All of these stayed within the tolerance.
 
 ## Protocol
 
@@ -145,6 +192,26 @@ caps). It is listed for completeness and does not support a ranking.
 
 The methods are `compaction`, `folding`, `clm`, `acm`, `selfcompact` and `rlm`, with Relay's
 default settings for each. The model is `gpt-6-luna` with medium reasoning effort.
+
+Two methods were added on 2026-11-06 and ran on BrowseComp-Plus and Terminal-Bench-Science:
+
+- `truncation` (`relay/strategies/truncation.py`) leaves the context as Codex sent it. When a
+  request is over the window, Relay's overflow fallback drops the oldest tool call groups. It
+  is the baseline that every context-management method should beat.
+- `acm_forced` is ACM with the forced recovery that released ACM lacks. When a request is over
+  the window, the history since the last summary is compressed as `manage_context` would
+  compress it, up to half the window so that the summarizer's own request fits, and the
+  summary joins the conversation as a message marked as the system's.
+
+The same day, 56 earlier Browse cells were run again: the 29 excluded as infrastructure
+failures and the 27 in which the Browse profile was not applied. A rerun replaces the earlier
+run of its cell in the results. These runs used the same runtime snapshot as the earlier
+runs, with three changes: the two methods, the retry of dropped connections on Relay's own
+requests, and the Browse profile refusing Codex instruction versions it has not checked. The
+Codex instructions served on 2026-11-06 differ from the checked version by one word in a
+section that the profile replaces, so the agent's instructions are the same. The agents'
+sandbox also hid two more local paths (a source checkout and agent session files), which adds
+their names to the permissions text the agent reads.
 
 ### BrowseComp-Plus retrieval
 
@@ -195,7 +262,7 @@ python -m evals.pilot.run --root "$RELAY_PILOT_ROOT" --out runs/q1/acm --prompt 
 The benchmark drivers wrap this runner:
 
 - **BrowseComp-Plus:** `browse_server.py build`, then `browse_suite.py` per run, or
-  `browse_matrix.py` for a queue.
+  `browse_queue.py` for a fixed list of cells (the runs of 2026-11-06 used it).
 - **ARC-AGI-3:** `arc_server.py`, then `arc_suite.py`. `arc_sample.py` freezes a game
   sample.
 - **Terminal-Bench-Science:** `science_container.py build`, then `science_sample_suite.py`
@@ -221,8 +288,9 @@ python -m evals.pilot.context_report --browse rows-browse.json --arc rows-arc.js
   --json evals/results/pilot/context-length.json --cells evals/results/pilot/cells.csv
 ```
 
-The raw trajectories are not in this repository. They contain benchmark content, including
-hidden test data and answers, that should not be republished. They are kept in the private
-Hugging Face dataset `Corning/relay-context-eval-trajectories`, one archive per benchmark and
-method, with a `runs.csv` that maps each row of `cells.csv` to its files. Ask the authors for
-access.
+The raw trajectories are not in this repository. They are in the Hugging Face dataset
+[`Corning/relay-context-eval-trajectories`](https://huggingface.co/datasets/Corning/relay-context-eval-trajectories),
+one archive per benchmark and method, with a `runs.csv` that maps each row of `cells.csv` to
+its files. They contain benchmark questions, answers and hidden test output in plain text, so
+access is gated: you accept the terms of use (no training, no republishing) and access is
+granted automatically.

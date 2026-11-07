@@ -10,10 +10,11 @@ from typing import Any
 
 from relay.core.engine import Engine
 from relay.core.ir import Item, Kind, Media, Request
+from relay.core.tokens import item_tokens
 from relay.harnesses import Harness
 from relay.protocols import Gemini, OpenAIChat, OpenAIResponses
-from relay.strategies import ACM, MEM1, AutoCompact, Compaction, SelfCompact
-from relay.strategies.acm import NOTHING, QUERY_MEMORY_PROMPT, SUMMARY_INSTRUCTION
+from relay.strategies import ACM, AutoCompact, Compaction, ForcedACM, MEM1, STRATEGIES, SelfCompact, Truncation
+from relay.strategies.acm import FORCED, NOTHING, QUERY_MEMORY_PROMPT, SUMMARY_INSTRUCTION
 from relay.strategies.autocompact import PROMPT
 from relay.strategies.conversation import IGNORED
 from relay.strategies.selfcompact import CONTINUE, QUESTION, RESEARCH, RUBRIC, SUMMARIZER
@@ -34,8 +35,10 @@ class Scripted:
         return self.answers.pop(0)
 
 
-def request(*items: Item, tokens: int = 1_000, window: int | None = 10_000, conversation: str = "c") -> Request:
-    return Request(items, items, frozenset(range(len(items) + 1)), tokens, window, conversation=conversation)
+def request(*items: Item, tokens: int = 1_000, window: int | None = 10_000, conversation: str = "c",
+            force: bool = False) -> Request:
+    return Request(items, items, frozenset(range(len(items) + 1)), tokens, window, force=force,
+                   conversation=conversation)
 
 
 def step(i: int, command: str = "", output: str = "", say: str = "") -> list[Item]:
@@ -110,6 +113,77 @@ class AutoCompactTests(unittest.TestCase):
         context = AutoCompact(Compaction(threshold=10, min_gain=0)).plan(
             request(*items), Scripted("S"))
         self.assertIs(context.items[-1].kind, Kind.SUMMARY)
+
+
+class TruncationTests(unittest.TestCase):
+    def test_the_baseline_never_changes_the_context(self) -> None:
+        self.assertIs(STRATEGIES["truncation"], Truncation)
+        items = (TASK, *step(1), *step(2))
+        for force in (False, True):
+            self.assertIsNone(Truncation().plan(request(*items, tokens=50_000, force=force), Scripted()))
+
+
+class ForcedACMTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.directory = tempfile.mkdtemp()
+
+    def test_released_acm_leaves_an_over_window_request_to_the_fallback(self) -> None:
+        items = (TASK, *step(1), *step(2))
+        context = ACM(self.directory).plan(request(*items, tokens=20_000, force=True), Scripted())
+        self.assertEqual(context.items[1:], items)
+        self.assertNotIn("forced", ACM(self.directory).fingerprint())
+
+    def test_a_forced_recovery_compresses_since_the_last_summary(self) -> None:
+        strategy = ForcedACM(self.directory)
+        self.assertIs(STRATEGIES["acm_forced"], ForcedACM)
+        manage = step(3, 'echo "[manage_context]"', "[manage_context]")
+        first = strategy.plan(request(TASK, *step(1), *step(2), *manage), Scripted("<memory>" + "a" * 60 + "</memory>"))
+        kept = list(first.items[1:])  # the task, the call and its summary
+        self.assertTrue(kept[-1].text.startswith("[summary_id: 1]"))
+
+        # Without force, a model that does not call manage_context keeps everything.
+        later = (*kept, *step(4), *step(5))
+        self.assertEqual(strategy.plan(request(*later), Scripted()).items[1:], later)
+
+        summarizer = Scripted("<memory>file_4: c4 and file_5: c5 were read; next read file_6.</memory>")
+        context = strategy.plan(request(*later, tokens=20_000, force=True), summarizer)
+        _, prompt = summarizer.calls[0]
+        self.assertTrue(prompt.startswith("Original question: read the files\n\nConversation"))
+        self.assertIn("CODE: c4", prompt)
+        self.assertNotIn("CODE: c1", prompt)  # already in summary 1
+        forced = context.items[-1]
+        self.assertEqual(list(context.items[1:-1]), kept)
+        self.assertEqual(forced.kind, Kind.USER)
+        self.assertEqual(forced.text, f"{FORCED}[summary_id: 2] file_4: c4 and file_5: c5 were read; next read file_6.")
+        saved = json.loads((Path(self.directory) / "c" / "summary_2.json").read_text())
+        self.assertEqual([m["role"] for m in saved], ["tool_call", "tool", "tool_call", "tool"])
+
+        # A third summary counts both kinds, and the forced one is not part of the question.
+        again = strategy.plan(request(*context.items[1:], *step(6), tokens=20_000, force=True),
+                              Scripted("<memory>" + "b" * 60 + "</memory>"))
+        self.assertTrue(again.items[-1].text.startswith(f"{FORCED}[summary_id: 3]"))
+        self.assertEqual(again.items[-2], forced)
+
+    def test_a_forced_recovery_compresses_only_what_its_summary_request_can_quote(self) -> None:
+        big = [step(i, output="x " * 3_000) for i in range(1, 5)]
+        group = sum(map(item_tokens, big[0]))
+        items = (TASK, *[item for group in big for item in group])
+        summarizer = Scripted("<memory>" + "d" * 60 + "</memory>")
+        window = 2 * (2 * group + 10)  # half the window quotes two groups, not three
+        context = ForcedACM(self.directory).plan(request(*items, window=window, tokens=2 * window, force=True), summarizer)
+        task, summary, *rest = context.items[1:]
+        self.assertEqual(task, TASK)
+        self.assertTrue(summary.text.startswith(f"{FORCED}[summary_id: 1]"))
+        self.assertEqual(rest, [item for group in big[2:] for item in group])  # the newest two groups stay
+        self.assertNotIn("CODE: c3", summarizer.calls[0][1])
+
+    def test_a_pending_user_turn_stays_after_the_summary(self) -> None:
+        follow = Item(Kind.USER, "and file 9?", 9)
+        context = ForcedACM(self.directory).plan(
+            request(TASK, *step(1), follow, tokens=20_000, force=True), Scripted("<memory>" + "c" * 60 + "</memory>"))
+        self.assertEqual([item.kind for item in context.items[1:]], [Kind.USER, Kind.USER, Kind.USER])
+        self.assertEqual(context.items[-1], follow)
+        self.assertTrue(context.items[-2].text.startswith(FORCED))
 
 
 class ACMTests(unittest.TestCase):

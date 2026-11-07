@@ -14,6 +14,12 @@ in place. ACM's prompts are used as released (`src/prompts.py`), its guidance wo
 Unlike the release, which serializes messages as text only, a compressed range's images go with it:
 each is marked `[image N]` where it was, attached to the summary request, and saved with the originals,
 so query_memory sees them too.
+
+`acm_forced` adds what released ACM lacks: a forced recovery. When a request is over the window
+(Relay's forced recovery under an input budget), what came since the last summary (at first, since
+the question) is compressed as `manage_context` would compress it, and the summary joins the
+conversation as a message of its own, marked as the system's. Without it, a model that never calls
+`manage_context` leaves the window to Relay's overflow fallback.
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from ..core.ir import LABELS, Context, Item, Kind, Media, Request
+from ..core.ir import AGENT_KINDS, LABELS, Context, Item, Kind, Media, Request
 from ..core.tokens import approx_tokens, item_tokens
 from .base import Summarizer
 from .conversation import ignored, signalled, step
@@ -109,12 +115,15 @@ SUMMARY_ID = "[summary_id: "
 ANSWERED = (SUMMARY_ID, "[query_memory: summary_id=", "Error: ")  # results already rewritten
 SIGNAL = re.compile(r"\[(manage_context|query_memory)\][ \t]*([^\n]*)")
 MEMORY = re.compile(r"<memory>(.*?)</memory>", re.S | re.I)
+FORCED = ("[The conversation reached the context window, so the system compressed it as manage_context "
+          "does.]\n")  # leads a forced summary, a message of its own
 THINK = re.compile(r"<think>.*?</think>", re.S)
 
 
 @dataclass(frozen=True)
 class ACM:
     directory: str = "/tmp/.acm"  # the saved originals, a folder per conversation
+    forced: bool = False  # compress since the last summary when a request is over the window
     name: str = "acm"
 
     @classmethod
@@ -123,7 +132,8 @@ class ACM:
 
     def fingerprint(self) -> dict[str, Any]:
         return {"name": self.name, "directory": self.directory, "guidance": GUIDANCE,
-                "summary": SUMMARY_INSTRUCTION, "query": QUERY_MEMORY_PROMPT}
+                "summary": SUMMARY_INSTRUCTION, "query": QUERY_MEMORY_PROMPT,
+                **({"forced": FORCED} if self.forced else {})}
 
     def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
         if not request.tools:
@@ -156,9 +166,39 @@ class ACM:
             tokens += approx_tokens(text) - approx_tokens(items[first].text)  # (its only call: the one result)
             items[first] = replace(items[first], text=text)
             n = end
+        if self.forced and request.force:
+            items, tokens = self._force(request, items, tokens, summarizer)
         window = f" Your context window is {request.window} tokens." if request.window else ""
         notes = (*ignoring, *((f"[CURRENT CONTEXT TOKEN: {tokens}]",) if any(i.kind is Kind.TOOL_RESULT for i in items) else ()))
         return Context((Item(Kind.SYSTEM, GUIDANCE.format(window=window)), *items), notes=notes)
+
+    def _force(self, request: Request, items: list[Item], tokens: int,
+               summarizer: Summarizer) -> tuple[list[Item], int]:
+        """The forced recovery: what came since the last summary (at first, since the question),
+        compressed into a summary message, up to a pending user turn or to the end mid-turn. The
+        oldest of it is compressed, up to the end of a tool group and to half the window, so that
+        the summarizer's own request (which quotes the compressed messages) fits the window too."""
+
+        last = max((i for i, item in enumerate(items) if item.kind in AGENT_KINDS), default=None)
+        if last is None:
+            return items, tokens
+        pending = any(item.kind is Kind.USER and not _summary(item) for item in items[last + 1:])
+        cut = last + 1 if pending else len(items)
+        question = next((m + 1 for m, item in enumerate(items) if item.kind is Kind.USER), 0)
+        since = max([question, *(m + 1 for m in range(cut) if _summary(items[m]))])
+        if request.window:
+            ends = [j + 1 for j in range(since, cut) if j + 1 == cut
+                    or (items[j].kind is Kind.TOOL_RESULT and items[j + 1].kind is not Kind.TOOL_RESULT)]
+            fitting = [end for end in ends if sum(map(item_tokens, items[since:end])) <= request.window // 2]
+            cut = max(fitting) if fitting else min(ends, default=cut)
+        dropped = items[since:cut]
+        if not dropped:
+            return items, tokens
+        number = sum(map(_summary, items[:since])) + 1
+        summary = Item(Kind.USER, f"{FORCED}{SUMMARY_ID}{number}] "
+                                  f"{self._compress(request, items[:cut], dropped, number, summarizer)}")
+        tokens += approx_tokens(summary.text) - sum(map(item_tokens, dropped))
+        return [*items[:since], summary, *items[cut:]], tokens
 
     def _compress(self, request: Request, before: list[Item], dropped: list[Item], number: int,
                   summarizer: Summarizer) -> str:
@@ -204,5 +244,12 @@ def _ask(summarizer: Summarizer, prompt: str, images: list[Media]) -> str:
     return summarizer.complete([Item(Kind.USER, prompt, media=tuple(images))]) if images else summarizer.summarize(0, prompt)
 
 
+@dataclass(frozen=True)
+class ForcedACM(ACM):
+    forced: bool = True
+    name: str = "acm_forced"
+
+
 def _summary(item: Item) -> bool:
-    return item.kind is Kind.TOOL_RESULT and item.text.startswith(SUMMARY_ID)
+    return ((item.kind is Kind.TOOL_RESULT and item.text.startswith(SUMMARY_ID))
+            or (item.kind is Kind.USER and item.text.startswith(FORCED)))

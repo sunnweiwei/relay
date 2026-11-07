@@ -23,6 +23,8 @@ ARC = ROOT / "full-arc-20261030/queue-state.json"
 SCIENCE = ROOT / "full-science-20261030"
 SCIENCE_LIVE = SCIENCE / "inference-luna-medium-7200s-128main-media-resume-20261101-v2"
 SCIENCE_CONDITION = {"max_requests": 128, "seconds": 7200, "window": 32000}
+# The queue of 2026-11-06 for the two added methods (truncation, acm_forced).
+SCIENCE_RERUN = ROOT / "reruns-20261106/science/queue-state.json"
 
 
 def read_json(path: Path) -> Any:
@@ -138,6 +140,12 @@ def science_rows() -> tuple[list[dict[str, Any]], dict[str, Any]]:
             row = science_row(cell["task_id"], cell["method"], Path(cell["attempt_paths"][-1]), "media_resume_v2")
             if row is not None:
                 rows.append(row)
+    if SCIENCE_RERUN.is_file():
+        for cell in json.loads(SCIENCE_RERUN.read_text())["cells"]:
+            if cell["status"] in ("finished", "unscored") and cell["attempt_paths"]:
+                row = science_row(cell["task_id"], cell["method"], Path(cell["attempt_paths"][-1]), "reruns_20261106")
+                if row is not None:
+                    rows.append(row)
     counts: dict[str, int] = {}
     for cell in state["cells"]:
         counts[cell["status"]] = counts.get(cell["status"], 0) + 1
