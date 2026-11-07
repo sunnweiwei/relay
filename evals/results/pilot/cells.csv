@@ -6,7 +6,6 @@ browse,1,folding,scored,,0,,,,10,62.523917904123664,33197,15047,92702,23344,1,5,
 browse,1,rlm,scored,,0,,,,3,452.9930371809751,17924,7211,21555,82131,32,3,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,1,selfcompact,scored,,0,,,model_request_limit,100,1017.767029505223,262949,17439,869428,1137330,80,40,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,10,acm,scored,,0,,,,16,85.24340122193098,40636,24940,292465,0,0,0,2,0,0,True,False,,,,,,browse-luna-expand16-20261027
-browse,10,acm_control,infrastructure,worker_infrastructure,,,,,,2.410086737945676,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,10,acm_forced,scored,,0,,,,25,160.06293105520308,85155,24956,423088,102205,6,6,1,0,0,True,False,,,,,,reruns-20261106
 browse,10,clm,scored,,0,,,model_request_limit,100,440.8545048404485,252927,20607,1475118,0,0,32,0,0,0,True,False,,,,,,browse-luna-expand16-20261027
 browse,10,compaction,scored,,0,,,model_request_limit,100,566.8951619230211,418008,17011,918632,701166,37,36,0,0,0,True,False,,,,,,browse-luna-expand16-20261027
@@ -409,7 +408,6 @@ browse,1066,rlm,scored,,0,,,wall_time_limit,19,1800.8793593086302,128685,7304,13
 browse,1066,selfcompact,scored,,0,,,model_request_limit,100,482.6525597386062,366288,21621,1293011,1195698,68,21,0,0,0,True,False,,,,,,browse-luna-167tasks-continuation-20261029
 browse,1066,truncation,scored,,0,,,,7,62.96919582784176,34897,24638,128112,0,0,0,1,0,0,True,False,,,,,,reruns-20261106
 browse,1068,acm,scored,,1,,,,17,137.16106572002172,53659,25232,336961,0,0,0,6,0,0,True,True,,,,,,browse-luna-167tasks-20261028
-browse,1068,acm_control,infrastructure,worker_infrastructure,,,,,,2.2940697949379683,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,1068,acm_forced,scored,,0,,,,14,70.51780024729669,32245,25264,222011,19638,1,1,0,0,0,True,False,,,,,,reruns-20261106
 browse,1068,clm,scored,,0,,,model_request_limit,100,459.026508256793,164752,21436,1601815,0,0,30,0,0,0,True,False,,,,,,browse-luna-167tasks-20261028
 browse,1068,compaction,scored,,0,,,,95,725.6263036839664,323465,16879,931581,530830,28,28,0,0,0,True,False,,,,,,browse-luna-167tasks-20261028
@@ -586,7 +584,6 @@ browse,110,folding,scored,,0,,,,34,171.21691425144672,57226,17011,389494,56422,3
 browse,110,rlm,scored,,0,,,,1,62.783879570662975,8020,7171,7171,15582,8,1,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,110,selfcompact,scored,,0,,,,7,77.70256324857473,29908,18100,78172,54441,3,1,0,0,0,True,True,,,,,,full-browse-429-exempt-20261030
 browse,1101,acm,scored,,1,,,,10,71.00571317598224,30266,21851,160037,0,0,0,1,0,0,True,True,,,,,,browse-luna-167tasks-continuation-20261029
-browse,1101,acm_control,infrastructure,worker_infrastructure,,,,,,2.3699146155267954,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,1101,acm_forced,scored,,1,,,,8,103.51229347661138,35955,24631,128085,28596,2,2,0,0,0,True,True,,,,,,reruns-20261106
 browse,1101,clm,scored,,1,,,,13,70.52848082780838,37444,20762,199520,0,0,2,0,0,0,True,True,,,,,,browse-luna-167tasks-continuation-20261029
 browse,1101,compaction,scored,,1,,,,10,69.74518329463899,43032,16784,98620,56093,3,2,0,0,0,True,True,,,,,,browse-luna-167tasks-continuation-20261029
@@ -741,7 +738,6 @@ browse,1133,rlm,scored,,0,,,wall_time_limit,11,1800.8797402121127,59698,7272,720
 browse,1133,selfcompact,scored,,0,,,model_request_limit,100,1070.7381015401334,349703,21382,853893,1427922,95,47,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,1133,truncation,scored,,1,,,,7,43.47398757003248,27244,21911,111787,0,0,0,1,0,0,True,True,,,,,,reruns-20261106
 browse,1134,acm,scored,,1,,,,64,273.5748790204525,249315,25245,1419704,0,0,0,36,0,0,True,True,,,,,,browse-luna-expand16-20261027
-browse,1134,acm_control,infrastructure,worker_infrastructure,,,,,,1.937990976497531,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,1134,acm_forced,scored,,0,,,,26,168.27848172932863,59374,25010,461937,75526,4,4,0,0,0,True,False,,,,,,reruns-20261106
 browse,1134,clm,scored,,0,,,,28,163.03803556226194,59153,20701,452672,0,0,9,0,0,0,True,True,,,,,,browse-luna-expand16-20261027
 browse,1134,compaction,scored,,0,,,model_request_limit,100,580.3369440473616,410981,16931,947023,681486,35,35,0,0,0,True,False,,,,,,browse-luna-expand16-20261027
@@ -840,7 +836,6 @@ browse,1155,rlm,scored,,0,,,wall_time_limit,7,1800.522827271372,45874,7503,43709
 browse,1155,selfcompact,scored,,0,,,model_request_limit,100,917.7084157057106,290589,20149,1015841,1232917,81,34,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,1155,truncation,scored,,0,,,,6,72.55783948116004,32725,22507,88472,0,0,0,1,0,0,True,False,,,,,,reruns-20261106
 browse,1158,acm,scored,,1,,,,8,45.53022185713053,22948,22670,126953,0,0,0,1,0,0,True,True,,,,,,browse-luna-20261027-truncate
-browse,1158,acm_control,infrastructure,worker_infrastructure,,,,,,2.0245005302131176,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,1158,acm_forced,scored,,1,,,,12,73.40302284061909,35815,25103,182685,18799,1,1,0,0,0,True,True,,,,,,reruns-20261106
 browse,1158,clm,scored,,1,,,,18,116.83798198960721,29851,20609,263703,0,0,2,0,0,0,True,True,,,,,,browse-luna-20261027-truncate
 browse,1158,compaction,scored,,1,,,,22,117.43772456422448,57165,16235,220364,78370,4,4,0,0,0,True,True,,,,,,browse-luna-20261027-truncate
@@ -1057,7 +1052,6 @@ browse,1203,folding,scored,,1,,,,31,244.08548686653376,75257,16894,317122,115864
 browse,1203,rlm,scored,,0,,,wall_time_limit,13,1801.4252884313464,77124,7490,86655,1330477,175,12,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,1203,selfcompact,scored,,0,,,model_request_limit,100,1089.127406174317,352566,21557,1147155,1273515,77,28,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,1204,acm,scored,,0,,,,15,65.6460756007582,57791,24648,242856,0,0,0,5,0,0,True,False,,,,,,browse-luna-20261027-truncate
-browse,1204,acm_control,infrastructure,worker_infrastructure,,,,,,2.032947139814496,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,1204,acm_forced,scored,,1,,,,30,235.41580723971128,111682,24797,571095,173726,10,10,0,0,0,True,True,,,,,,reruns-20261106
 browse,1204,clm,scored,,0,,,,19,86.68410875461996,37196,21412,306293,0,0,7,0,0,0,True,False,,,,,,browse-luna-20261027-truncate
 browse,1204,compaction,scored,,1,,,,27,179.648836331442,83482,16690,266372,120280,6,6,0,0,0,True,True,,,,,,browse-luna-20261027-truncate
@@ -1074,7 +1068,6 @@ browse,1206,rlm,infrastructure,upstream_connection_lost,,,,context_management_fa
 browse,1206,selfcompact,scored,,0,,,model_request_limit,100,875.8923511169851,455652,21223,1166088,1215520,71,27,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,1206,truncation,scored,,0,,,,21,131.04976861178875,98425,24449,400274,0,0,0,7,0,0,True,False,,,,,,reruns-20261106
 browse,1207,acm,scored,,0,,,,44,122.14273363910615,66386,25270,961348,0,0,0,25,0,0,True,False,,,,,,browse-luna-167tasks-continuation-20261029
-browse,1207,acm_control,infrastructure,worker_infrastructure,,,,,,1.8972814250737429,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,1207,acm_forced,scored,,0,,,model_request_limit,100,1133.653451839462,401707,25176,1975707,698730,42,42,3,0,0,True,False,,,,,,reruns-20261106
 browse,1207,clm,scored,,0,,,,53,244.81057831831276,88804,20785,841743,0,0,14,0,0,0,True,False,,,,,,browse-luna-167tasks-continuation-20261029
 browse,1207,compaction,scored,,0,,,,44,237.97254203259945,144930,16033,439847,225810,12,12,0,0,0,True,False,,,,,,browse-luna-167tasks-continuation-20261029
@@ -1123,7 +1116,6 @@ browse,1212,rlm,infrastructure,upstream_connection_lost,,,,context_management_fa
 browse,1212,selfcompact,scored,,0,,,,94,658.5756402481347,341318,21222,994891,1187244,73,31,0,0,0,True,True,,,,,,browse-luna-167tasks-continuation-20261029
 browse,1212,truncation,scored,,1,,,,13,94.58783887326717,37794,25122,254761,0,0,0,3,0,0,True,True,,,,,,reruns-20261106
 browse,1213,acm,scored,,0,,,,13,42.13646165840328,25055,24825,213246,0,0,0,1,0,0,True,False,,,,,,browse-luna-167tasks-continuation-20261029
-browse,1213,acm_control,infrastructure,worker_infrastructure,,,,,,1.9554498791694641,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,1213,acm_forced,scored,,0,,,,14,81.75189859606326,34096,23501,225218,18537,1,1,0,0,0,True,False,,,,,,reruns-20261106
 browse,1213,clm,scored,,0,,,,43,196.84668737277389,79908,20666,659383,0,0,11,0,0,0,True,False,,,,,,browse-luna-167tasks-continuation-20261029
 browse,1213,compaction,scored,,1,,,,21,165.59749995358288,72602,16320,215586,97878,5,5,0,0,0,True,True,,,,,,browse-luna-167tasks-continuation-20261029
@@ -1340,7 +1332,6 @@ browse,1243,folding,scored,,1,,,,16,75.80269820615649,31849,14848,165141,20251,1
 browse,1243,rlm,scored,,0,,,,7,1121.212101507932,56483,7269,50455,1163287,127,7,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,1243,selfcompact,scored,,0,,,model_request_limit,100,965.2069251462817,229362,18599,832150,1173026,89,43,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,1246,acm,scored,,0,,,,23,202.084389526397,100728,25084,439346,0,0,0,11,0,0,True,False,,,,,,browse-luna-expand16-20261027
-browse,1246,acm_control,infrastructure,worker_infrastructure,,,,,,2.3888201117515564,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,1246,acm_forced,scored,,0,,,,22,198.96750384941697,55635,24543,377003,56005,3,3,0,0,0,True,False,,,,,,reruns-20261106
 browse,1246,clm,scored,,0,,,,50,249.1842723507434,140919,20599,863842,0,0,23,0,0,0,True,False,,,,,,browse-luna-expand16-20261027
 browse,1246,compaction,scored,,0,,,,36,238.70750620774925,107234,16360,373913,154872,8,8,0,0,0,True,False,,,,,,browse-luna-expand16-20261027
@@ -1645,7 +1636,6 @@ browse,171,rlm,scored,,0,,,,5,588.5832756012678,46722,7509,36321,574484,71,5,0,0
 browse,171,selfcompact,scored,,1,,,,77,581.403157858178,301176,21415,818388,1052335,62,27,0,0,0,True,True,,,,,,browse-luna-167tasks-continuation-20261029
 browse,171,truncation,scored,,1,,,,10,88.61639476940036,38360,24793,165975,0,0,0,2,0,0,True,True,,,,,,reruns-20261106
 browse,174,acm,scored,,1,,,,16,132.7207824960351,20255,20008,235229,0,0,0,0,0,0,True,True,,,,,,browse-luna-167tasks-20261028
-browse,174,acm_control,infrastructure,worker_infrastructure,,,,,,2.4576269388198853,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,174,acm_forced,scored,,1,,,,8,67.42921922542155,35222,24440,126247,32546,2,2,0,0,0,True,True,,,,,,reruns-20261106
 browse,174,clm,scored,,0,,,,14,102.00481010042131,53990,20765,214407,0,0,6,0,0,0,True,True,,,,,,browse-luna-167tasks-20261028
 browse,174,compaction,scored,,1,,,,33,225.2682240922004,112773,15661,320459,160587,8,8,0,0,0,True,True,,,,,,browse-luna-167tasks-20261028
@@ -2008,7 +1998,6 @@ browse,248,rlm,scored,,0,,,,1,1264.375750105828,8033,7232,7232,248525,32,1,0,3,0
 browse,248,selfcompact,scored,,0,,,,30,216.229172129184,116955,20820,396242,325103,18,6,0,0,0,True,False,,,,,,browse-luna-167tasks-continuation-20261029
 browse,248,truncation,scored,,0,,,,6,56.5103532448411,35439,24905,95035,0,0,0,2,0,0,True,False,,,,,,reruns-20261106
 browse,249,acm,scored,,0,,,,7,68.72541982121766,20832,23913,99804,0,0,0,1,0,0,True,False,,,,,,browse-luna-expand16-20261027
-browse,249,acm_control,infrastructure,worker_infrastructure,,,,,,2.322386149317026,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,249,acm_forced,scored,,0,,,,11,90.87619059719145,42897,24945,172552,37995,2,2,0,0,0,True,True,,,,,,reruns-20261106
 browse,249,clm,scored,,0,,,,30,138.51778956875205,58934,20927,464453,0,0,9,0,0,0,True,True,,,,,,browse-luna-expand16-20261027
 browse,249,compaction,scored,,1,,,,70,434.0548480413854,239068,17013,707252,398383,21,20,0,0,0,True,True,,,,,,browse-luna-expand16-20261027
@@ -2159,7 +2148,6 @@ browse,275,folding,scored,,0,,,,33,923.1912163831294,76780,16812,342025,120509,6
 browse,275,rlm,scored,,0,,,wall_time_limit,6,1800.6311860233545,45829,7415,36271,1198710,141,5,0,27,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,275,selfcompact,scored,,0,,,model_request_limit,100,1166.226145144552,455757,20959,1054803,1367595,79,35,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,276,acm,scored,,0,,,,24,178.89536250941455,80810,25268,466424,0,0,0,10,0,0,True,True,,,,,,browse-luna-167tasks-20261028
-browse,276,acm_control,infrastructure,worker_infrastructure,,,,,,2.25242287106812,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,276,acm_forced,scored,,0,,,,18,110.97302965261042,52870,25254,301205,64799,4,4,0,0,0,True,False,,,,,,reruns-20261106
 browse,276,clm,scored,,0,,,,23,136.33510879985988,44857,20609,317083,0,0,4,0,0,0,True,False,,,,,,browse-luna-167tasks-20261028
 browse,276,compaction,scored,,0,,,,44,343.41096323914826,167392,15936,407571,263934,14,14,0,0,0,True,True,,,,,,browse-luna-167tasks-20261028
@@ -2228,7 +2216,6 @@ browse,287,rlm,infrastructure,upstream_connection_lost,,,,context_management_fai
 browse,287,selfcompact,scored,,0,,,model_request_limit,100,584.4519102238119,374642,20505,1050006,1238638,78,35,0,0,0,True,False,,,,,,browse-luna-167tasks-continuation-20261029
 browse,287,truncation,scored,,0,,,,11,64.00059738755226,42643,24826,199951,0,0,0,2,0,0,True,False,,,,,,reruns-20261106
 browse,288,acm,scored,,0,,,,38,195.9959366042167,96148,25270,794571,0,0,0,19,0,0,True,False,,,,,,browse-luna-167tasks-20261028
-browse,288,acm_control,infrastructure,worker_infrastructure,,,,,,2.4658178351819515,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,288,acm_forced,scored,,0,,,,9,142.58775177411735,41098,22878,156304,37814,2,2,0,0,0,True,False,,,,,,reruns-20261106
 browse,288,clm,scored,,0,,,,19,92.67879642359912,33979,20900,323719,0,0,8,0,0,0,True,False,,,,,,browse-luna-167tasks-20261028
 browse,288,compaction,scored,,0,,,,41,266.04326009750366,125718,16782,419042,189627,10,10,0,0,0,True,False,,,,,,browse-luna-167tasks-20261028
@@ -2237,7 +2224,6 @@ browse,288,rlm,infrastructure,upstream_connection_lost,,,,context_management_fai
 browse,288,selfcompact,scored,,0,,,,22,208.01377779617906,93565,21682,246056,243265,14,6,0,0,0,True,False,,,,,,browse-luna-167tasks-20261028
 browse,288,truncation,scored,,0,,,,33,300.0167198739946,61946,25197,695529,0,0,0,14,0,0,True,False,,,,,,reruns-20261106
 browse,289,acm,scored,,1,,,,14,96.8026278745383,47191,24238,261301,0,0,0,5,0,0,True,True,,,,,,browse-luna-expand16-continuation-20261028
-browse,289,acm_control,infrastructure,worker_infrastructure,,,,,,2.3920987881720066,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,289,acm_forced,scored,,1,,,,18,136.49125546962023,43883,24468,314472,50686,3,3,0,0,0,True,True,,,,,,reruns-20261106
 browse,289,clm,scored,,1,,,,28,109.67939584702253,78421,20847,426445,0,0,8,0,0,0,True,True,,,,,,browse-luna-expand16-continuation-20261028
 browse,289,compaction,scored,,1,,,,18,124.22331875190139,67768,16699,179693,98836,5,4,0,0,0,True,True,,,,,,browse-luna-expand16-continuation-20261028
@@ -2350,7 +2336,6 @@ browse,310,folding,scored,,1,,,,35,241.72749658115208,69412,17022,352467,93408,5
 browse,310,rlm,scored,,0,,,,8,1768.3583396766335,63702,7461,57959,1080933,178,8,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,310,selfcompact,scored,,0,,,model_request_limit,100,962.9631192591041,361753,19815,921547,1289595,91,40,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,311,acm,scored,,1,,,,10,60.05798879638314,34789,23343,140842,0,0,0,1,0,0,True,True,,,,,,browse-luna-expand16-20261027
-browse,311,acm_control,infrastructure,worker_infrastructure,,,,,,2.3924702256917953,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,311,acm_forced,scored,,1,,,,8,60.946987733244896,29215,23106,115148,17654,1,1,0,0,0,True,True,,,,,,reruns-20261106
 browse,311,clm,scored,,1,,,,11,60.24673234857619,32126,20916,170648,0,0,3,0,0,0,True,True,,,,,,browse-luna-expand16-20261027
 browse,311,compaction,scored,,1,,,,10,84.23645859956741,39571,15587,109238,39709,2,2,0,0,0,True,True,,,,,,browse-luna-expand16-20261027
@@ -2493,7 +2478,6 @@ browse,349,rlm,scored,,0,,,wall_time_limit,8,1800.9868158977479,48152,7216,50322
 browse,349,selfcompact,scored,,1,,,,84,849.862220460549,354580,21721,917592,1097437,65,28,0,0,0,True,True,,,,,,full-browse-429-exempt-20261030
 browse,349,truncation,scored,,0,,,,13,110.61096998304129,62450,24995,245635,0,0,0,6,0,0,True,False,,,,,,reruns-20261106
 browse,350,acm,scored,,0,,,,20,95.97086562775075,53572,25182,382449,0,0,0,9,0,0,True,False,,,,,,browse-luna-expand16-20261027
-browse,350,acm_control,infrastructure,worker_infrastructure,,,,,,2.4096889588981867,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,350,acm_forced,scored,,0,,,,28,250.34324791282415,117436,23595,512132,178980,10,10,0,0,0,True,False,,,,,,reruns-20261106
 browse,350,clm,scored,,0,,,model_request_limit,100,432.10642572678626,224778,21193,1684764,0,0,42,0,0,0,True,False,,,,,,browse-luna-expand16-20261027
 browse,350,compaction,scored,,0,,,model_request_limit,100,560.90218706429,370037,16795,987546,614877,32,32,0,0,0,True,False,,,,,,browse-luna-expand16-20261027
@@ -2536,7 +2520,6 @@ browse,357,folding,scored,,1,,,,23,156.01934024132788,68148,17008,229450,101123,
 browse,357,rlm,scored,,0,,,,10,1201.8924075886607,85075,7221,71901,836733,126,10,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,357,selfcompact,scored,,0,,,model_request_limit,100,1166.707059679553,335778,18806,916915,1332299,89,41,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,36,acm,scored,,0,,,,21,162.00124943628907,79649,24739,377566,0,0,0,7,0,0,True,False,,,,,,browse-luna-167tasks-20261028
-browse,36,acm_control,infrastructure,worker_infrastructure,,,,,,1.9519063532352448,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,36,acm_forced,scored,,1,,,,30,283.37677909992635,102853,25222,532676,159950,9,9,0,0,0,True,True,,,,,,reruns-20261106
 browse,36,clm,scored,,0,,,,12,74.47219074517488,39688,20864,148018,0,0,3,0,0,0,True,False,,,,,,browse-luna-167tasks-20261028
 browse,36,compaction,scored,,0,,,,52,364.45892159454525,155479,16769,541529,243195,13,10,0,0,0,True,False,,,,,,browse-luna-167tasks-20261028
@@ -2911,7 +2894,6 @@ browse,435,rlm,infrastructure,upstream_connection_lost,,,,context_management_fai
 browse,435,selfcompact,scored,,0,,,model_request_limit,100,775.9514948986471,260424,20359,916730,1183964,85,41,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,435,truncation,scored,,0,,,,15,138.26053090766072,30874,25231,260541,0,0,0,3,0,0,True,True,,,,,,reruns-20261106
 browse,436,acm,scored,,0,,,,9,72.63298187218606,24238,24175,134752,0,0,0,0,0,0,True,False,,,,,,browse-luna-20261027-truncate
-browse,436,acm_control,infrastructure,worker_infrastructure,,,,,,2.391309315338731,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,436,acm_forced,scored,,0,,,,13,106.72563542425632,47785,23857,229417,48890,3,3,0,0,0,True,False,,,,,,reruns-20261106
 browse,436,clm,scored,,0,,,model_request_limit,100,334.72836636193097,177124,20972,1621061,0,0,34,0,0,0,True,False,,,,,,browse-luna-20261027-truncate
 browse,436,compaction,scored,,0,,,model_request_limit,100,551.9271574486047,378708,16996,970133,642993,34,34,0,0,0,True,False,,,,,,browse-luna-20261027-truncate
@@ -3175,7 +3157,6 @@ browse,5,rlm,scored,,0,,,,12,1077.0810351148248,70447,7232,86407,1246187,172,12,
 browse,5,selfcompact,scored,,0,,,model_request_limit,100,691.1746854968369,367847,21231,1021169,1257615,80,36,0,0,0,True,False,,,,,,browse-luna-167tasks-continuation-20261029
 browse,5,truncation,scored,,1,,,,14,73.50983252003789,40955,25147,232217,0,0,0,3,0,0,True,True,,,,,,reruns-20261106
 browse,50,acm,scored,,0,,,,17,83.8935855999589,30611,25292,284923,0,0,0,4,0,0,True,False,,,,,,browse-luna-20261027-truncate
-browse,50,acm_control,infrastructure,worker_infrastructure,,,,,,2.411144021898508,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,50,acm_forced,scored,,0,,,,16,79.41799152456224,30725,24540,258121,17475,1,1,0,0,0,True,False,,,,,,reruns-20261106
 browse,50,clm,scored,,0,,,,65,234.58369126729667,107890,20673,1006981,0,0,15,0,0,0,True,False,,,,,,browse-luna-20261027-truncate
 browse,50,compaction,scored,,1,,,,11,64.08287071622908,43715,15611,102965,57261,3,3,0,0,0,True,True,,,,,,browse-luna-20261027-truncate
@@ -3506,7 +3487,6 @@ browse,552,rlm,scored,,0,,,wall_time_limit,13,1801.4228723794222,95628,7276,8625
 browse,552,selfcompact,scored,,0,,,model_request_limit,100,984.2910936269909,308414,20188,851634,1285654,90,45,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,552,truncation,scored,,0,,,,6,79.98977429419756,17857,18375,76366,0,0,0,0,0,0,True,False,,,,,,reruns-20261106
 browse,553,acm,scored,,0,,,,33,174.40502232126892,99939,25132,678449,0,0,0,17,0,0,True,False,,,,,,browse-luna-167tasks-continuation-20261029
-browse,553,acm_control,infrastructure,worker_infrastructure,,,,,,1.9290818870067596,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,553,acm_forced,scored,,0,,,,32,236.29008325003088,94120,25180,601810,130342,7,7,0,0,0,True,False,,,,,,reruns-20261106
 browse,553,clm,scored,,0,,,,33,166.26425297744572,106752,21016,514906,0,0,12,0,0,0,True,False,,,,,,browse-luna-167tasks-continuation-20261029
 browse,553,compaction,scored,,1,,,,95,517.57987613976,310214,16750,968703,510661,27,27,0,0,0,True,True,,,,,,browse-luna-167tasks-continuation-20261029
@@ -4175,7 +4155,6 @@ browse,682,folding,scored,,1,,,,97,1277.0229645799845,165662,16526,1057935,23924
 browse,682,rlm,scored,,0,,,,12,1765.6626010965556,88125,7256,86413,1731598,171,12,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,682,selfcompact,scored,,0,,,model_request_limit,100,1021.6637115217745,424953,20686,1138866,1445699,86,37,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,684,acm,scored,,0,,,,13,49.65788421034813,27650,23773,191011,0,0,0,1,0,0,True,False,,,,,,browse-luna-167tasks-continuation-20261029
-browse,684,acm_control,infrastructure,worker_infrastructure,,,,,,1.9303579684346914,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,684,acm_forced,scored,,1,,,,8,72.3619337733835,25976,23879,110978,14501,1,1,0,0,0,True,True,,,,,,reruns-20261106
 browse,684,clm,scored,,1,,,,18,107.62718978151679,48747,20300,288525,0,0,5,0,0,0,True,True,,,,,,browse-luna-167tasks-continuation-20261029
 browse,684,compaction,scored,,0,,,,15,102.58665766008198,53220,15226,143186,77178,4,4,0,0,0,True,False,,,,,,browse-luna-167tasks-continuation-20261029
@@ -4192,7 +4171,6 @@ browse,685,rlm,scored,,0,,,wall_time_limit,9,1801.3396850340068,65767,7505,58243
 browse,685,selfcompact,scored,,0,,,,69,625.7999018840492,241644,21730,846517,704542,43,15,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,685,truncation,scored,,0,,,,6,85.86757729016244,31293,24240,100238,0,0,0,1,0,0,True,False,,,,,,reruns-20261106
 browse,686,acm,scored,,1,,,,11,76.94129804335535,41364,24850,193700,0,0,0,2,0,0,True,True,,,,,,browse-luna-167tasks-20261028
-browse,686,acm_control,infrastructure,worker_infrastructure,,,,,,2.2923541255295277,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,686,acm_forced,scored,,0,,,model_request_limit,100,1039.2046453244984,411570,25091,2045653,761849,46,46,2,0,0,True,False,,,,,,reruns-20261106
 browse,686,clm,scored,,1,,,,15,102.30992368981242,54752,19950,220746,0,0,6,0,0,0,True,True,,,,,,browse-luna-167tasks-20261028
 browse,686,compaction,scored,,1,,,,30,243.4526474699378,109927,16594,296910,172907,9,9,0,0,0,True,True,,,,,,browse-luna-167tasks-20261028
@@ -4867,7 +4845,6 @@ browse,804,rlm,scored,,0,,,wall_time_limit,6,1801.4079009983689,28848,7325,36078
 browse,804,selfcompact,scored,,1,,,,83,709.2852613385767,220118,20459,756960,989843,73,35,0,0,0,True,True,,,,,,full-browse-429-exempt-20261030
 browse,804,truncation,scored,,1,,,,6,52.428613068535924,20620,19973,77299,0,0,0,0,0,0,True,True,,,,,,reruns-20261106
 browse,805,acm,scored,,0,,,,17,64.92857650853693,28875,25269,302720,0,0,0,3,0,0,True,False,,,,,,browse-luna-167tasks-20261028
-browse,805,acm_control,infrastructure,worker_infrastructure,,,,,,1.8936823848634958,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,805,acm_forced,scored,,0,,,,10,54.9815300963819,25983,24355,169940,16426,1,1,0,0,0,True,False,,,,,,reruns-20261106
 browse,805,clm,scored,,0,,,,65,333.10858549550176,123707,21210,1076384,0,0,24,0,0,0,True,True,,,,,,browse-luna-167tasks-20261028
 browse,805,compaction,scored,,1,,,,72,495.9930522851646,253101,16797,708022,413380,22,22,0,0,0,True,True,,,,,,browse-luna-167tasks-20261028
@@ -5482,7 +5459,6 @@ browse,930,folding,scored,,0,,,,34,231.84935717470944,66736,16982,347146,91436,5
 browse,930,rlm,scored,,0,,,wall_time_limit,3,1800.8070600107312,8211,7210,14384,48069,18,2,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,930,selfcompact,scored,,0,,,model_request_limit,100,953.7342463675886,352248,21491,1255065,1106035,65,21,0,0,0,True,False,,,,,,full-browse-429-exempt-20261030
 browse,932,acm,scored,,1,,,,8,38.53907295502722,24868,24613,132201,0,0,0,0,0,0,True,True,,,,,,browse-luna-expand16-20261027
-browse,932,acm_control,infrastructure,worker_infrastructure,,,,,,2.3921446688473225,,,,0,0,,0,0,0,,,,,,,,reruns-20261106-acm-control
 browse,932,acm_forced,scored,,1,,,,10,85.945904975757,23915,23655,165769,0,0,0,0,0,0,True,True,,,,,,reruns-20261106
 browse,932,clm,scored,,1,,,,12,67.5129908323288,36604,20635,200905,0,0,5,0,0,0,True,True,,,,,,browse-luna-expand16-continuation-20261028
 browse,932,compaction,scored,,1,,,,14,102.50397267006338,45193,16388,140518,54183,3,3,0,0,0,True,True,,,,,,browse-luna-expand16-20261027

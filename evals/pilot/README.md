@@ -124,8 +124,8 @@ caps). It is listed for completeness and does not support a ranking.
   until the account's weekly usage limit stopped the queues. Their questions are the first
   in a fixed random order, so they are a random subset, but their comparison with methods run
   a week earlier can include drift in the model or its serving. A same-day rerun of released
-  ACM, meant to measure that drift, stopped after 24 questions (its rows are in `cells.csv` as
-  `acm_control`) and is not reported.
+  ACM, meant to measure that drift, was queued next but the account limit rejected it before
+  any run, so the drift is not measured.
 - **RLM does not measure the RLM method.** Relay replaces the conversation with the RLM's
   handoff. In many runs the main agent never sees the task, and its final answer asks for
   the question. RLM is shown for reference and is left out of the paired comparisons.

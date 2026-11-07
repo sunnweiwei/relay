@@ -5,8 +5,7 @@ Prior cells that the plan selected for a pure-429 retry are replaced by the
 retry. The rerun queue of 2026-11-06 (``browse_queue.py``) adds two methods and
 reruns two kinds of earlier cells: those excluded as infrastructure failures and
 those in which the Browse profile was not applied. A rerun row replaces the
-earlier row of its cell and names it in ``replaces``. A same-day control reran
-released ACM on every question; its rows are the method ``acm_control``. Each row also records the unmanaged context length: the largest token
+earlier row of its cell and names it in ``replaces``. Each row also records the unmanaged context length: the largest token
 count of Codex's own history that Relay saw (``relay/conversations.json``).
 """
 
@@ -25,7 +24,6 @@ from typing import Any
 ROOT = Path(os.environ.get("RELAY_PILOT_ROOT", "relay-pilot"))
 RUN = ROOT / "full-browse-429-exempt-20261030"
 RERUN = ROOT / "reruns-20261106/browse/queue-state.json"
-CONTROL = ROOT / "reruns-20261106/browse-acm-control/queue-state.json"
 GOLD = ROOT / "full-browse-20261030/private"  # one {query_id, answer, qrels} file per question
 
 
@@ -133,12 +131,6 @@ def collect() -> dict[str, Any]:
             else:
                 index[key] = len(rows)
                 rows.append(new)
-    if CONTROL.is_file():
-        for cell in json.loads(CONTROL.read_text())["cells"]:
-            if cell["status"] == "finished":
-                rows.append(row({**cell, "method": "acm_control"}, "reruns-20261106-acm-control",
-                                cell.get("raw_score"), "task_result"))
-                reruns["control"] = reruns.get("control", 0) + 1
     return {"run": str(RUN), "target_cells": plan["target_cells"], "window": 23560,
             "queue_status": state.get("status"), "queue_counts": counts,
             "carried_cells": len(carried), "reruns": reruns, "rows": rows}

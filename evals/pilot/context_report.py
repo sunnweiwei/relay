@@ -28,19 +28,17 @@ from pathlib import Path
 from typing import Any
 
 WORKING = ["compaction", "folding", "clm", "acm", "selfcompact"]  # the core methods; they define context demand
-# Run on 2026-11-06 on part of Browse and Science (an account limit stopped the queues). A
-# same-day rerun of released ACM ("acm_control", 24 questions) is too small to report.
+# Run on 2026-11-06 on part of Browse and Science (an account limit stopped the queues).
 ADDED = ["acm_forced", "truncation"]
 ALL_METHODS = WORKING + ADDED + ["rlm"]
 LABEL = {"compaction": "Compaction", "folding": "Folding", "clm": "CLM", "acm": "ACM",
          "selfcompact": "Self-Compact", "rlm": "RLM", "acm_forced": "ACM (forced)",
-         "truncation": "Truncation only", "acm_control": "ACM (rerun 11-06)"}
+         "truncation": "Truncation only"}
 # Reference categorical palette, slots 1-6 in fixed order (validated: scripts/validate_palette.js). The
 # added methods reuse a related hue: ACM (forced) a darker ACM amber, the truncation baseline neutral grey.
 COLOR = {"compaction": "#2a78d6", "folding": "#eb6834", "clm": "#1baf7a", "acm": "#eda100",
-         "selfcompact": "#e87ba4", "rlm": "#008300", "acm_forced": "#9a6400", "truncation": "#7d7c76",
-         "acm_control": "#eda100"}
-DASH = {"rlm": "5 4", "acm_forced": "2 3", "acm_control": "8 3"}
+         "selfcompact": "#e87ba4", "rlm": "#008300", "acm_forced": "#9a6400", "truncation": "#7d7c76"}
+DASH = {"rlm": "5 4", "acm_forced": "2 3"}
 
 BENCH = {
     "browse": {"name": "BrowseComp-Plus", "metric": "score", "binary": True, "window": 23560,
@@ -422,7 +420,7 @@ th {{ font-weight:600; color:var(--ink2); border-bottom:1px solid var(--axis); }
 <h2>1. Runs</h2>
 <ul>{''.join(f'<li>{esc(line)}</li>' for line in status)}</ul>
 <div class="callout"><b>Context length.</b> A run's unmanaged context length is the token count of Codex's own full history at the end of the run, before any method rewrites it: how long the context would be without context management. A task's context demand is the median unmanaged length of the five core methods (Compaction, Folding, CLM, ACM, Self-Compact) on that task. Longer tasks also tend to be harder, so a falling curve mixes longer context with harder tasks; comparisons between methods on the same tasks are less affected.</div>
-<div class="callout"><b>Truncation fallback.</b> All runs used Relay's common overflow fallback: when a method's own forced recovery still left a request over the window, Relay dropped the oldest tool call groups. Released ACM has no forced recovery and the model rarely asked it to compress, so ACM needed the fallback in most runs, the other methods almost never (column "Runs with truncation fallback"). Two methods added on 2026-11-06 separate the two parts on Browse and Science: <i>Truncation only</i> leaves the context unchanged, so the fallback alone manages it, and <i>ACM (forced)</i> compresses, as manage_context does, the oldest history since its last summary when a request is over the window. They ran on 2026-11-06, a week after the other methods, until the account's weekly usage limit stopped them: on 404 and 403 of the 825 Browse questions (the first in the fixed random order) and on 23 Science tasks. A same-day rerun of released ACM, meant to measure drift between the two dates, stopped after 24 questions and is not reported.</div>
+<div class="callout"><b>Truncation fallback.</b> All runs used Relay's common overflow fallback: when a method's own forced recovery still left a request over the window, Relay dropped the oldest tool call groups. Released ACM has no forced recovery and the model rarely asked it to compress, so ACM needed the fallback in most runs, the other methods almost never (column "Runs with truncation fallback"). Two methods added on 2026-11-06 separate the two parts on Browse and Science: <i>Truncation only</i> leaves the context unchanged, so the fallback alone manages it, and <i>ACM (forced)</i> compresses, as manage_context does, the oldest history since its last summary when a request is over the window. They ran on 2026-11-06, a week after the other methods, until the account's weekly usage limit stopped them: on 404 and 403 of the 825 Browse questions (the first in the fixed random order) and on 23 Science tasks. A same-day rerun of released ACM, meant to measure drift between the two dates, was rejected by the account limit before any run, so the drift is not measured.</div>
 <div class="callout"><b>RLM is not a measurement of the RLM method.</b> Relay replaces the conversation with the RLM's handoff, and in many runs the main agent never sees the task (its final answer asks for the question). RLM is drawn for reference and is left out of the paired comparisons.</div>
 {sections}
 </main>
