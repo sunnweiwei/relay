@@ -12,8 +12,9 @@ because Relay's turns carry structure the paper's plain-text turns do not: a met
 one `[[CTX_TURN ...]]` block per turn, each bound to its turn by an id, so that untouched blocks
 stay the original items (tool calls, reasoning and images intact). An edited user, assistant or
 tool-result turn keeps its place with the new text (a result still answers its call). A turn's
-images show as `[image N of this turn, ~T tokens]` lines: an edited turn keeps the images whose lines
-it kept, so the model can drop an image and keep the text. Any other edited block, and every new one (`id=new-*`, any role label), becomes a user-role
+media show as `[image N of this turn, ~T tokens]` lines: an edited turn keeps those whose lines it
+kept, so the model can drop an image and keep the text. So do the task's, in a block of their own
+(`id=task`): its text stays protected, its attachments are the model's to drop. Any other edited block, and every new one (`id=new-*`, any role label), becomes a user-role
 note labelled with that role; removed blocks are gone; the document's order is followed. A tool
 call kept without its result, or a result without its call, is told as a note when the request is
 sent (Relay does that for every strategy, and only for those items). A file with no block headers
@@ -48,7 +49,8 @@ from threading import Lock
 from typing import Any
 
 from ..core.ir import LABELS, Context, Item, Kind, Request, note
-from ..core.tokens import item_tokens, media_tokens
+from ..core.media import counted, kept, lines
+from ..core.tokens import item_tokens
 from .base import Summarizer
 from .compaction import Compaction
 from .. import settings
@@ -117,9 +119,9 @@ ATTRIBUTE = re.compile(r"(document|index|role|id)=([\w-]+)")
 LABEL = re.compile(r"\[context role=([A-Za-z][\w-]*)\]\n")  # how a note carries its role
 STRUCTURAL = re.compile(r"^(\\*)(\[\[(?:CTX_TURN|LIVE_CONTEXT) )", re.M)  # escaped inside bodies
 NO_TEXT = "[no text: encrypted or media content]"
-IMAGE = "[image {n} of this turn, ~{tokens:,} tokens]"
-IMAGE_LINE = re.compile(r"^\[image (\d+) of this turn, ~[\d,]+ tokens\]$", re.M)
-IMAGES = "# A turn's images are its [image N of this turn, ...] lines: keep a line to keep its image, delete it to drop the image."
+ATTACHED = ("# A turn's attachments are its [image N of this turn, ...] lines: keep a line to keep its attachment, delete "
+            "it to drop that. Block id=task holds the task's: its text is protected, only these lines can change.")
+TASK = "task"  # the block of the task's attachments
 
 
 @dataclass(frozen=True)
@@ -182,7 +184,7 @@ class ContextLanguageModel:
             notes += [notice] if notice else []
         revision = state.get("revision", 0) + (recovered or items != list(request.current))
         named = state.get("named", request.conversation)  # (the conversation's name settles only after the first reply)
-        text = _render(items[task:], _document(named, revision), revision)
+        text = _render(items[task:], _document(named, revision), revision, items[task - 1] if task else None)
         _write(path, text)
         _own(path, _ids(items[task:]))
         nudged = state.get("nudged", [])
@@ -239,7 +241,7 @@ def _apply(edited: str, request: Request, task: int, state: dict[str, Any],
         blocks.append((header, attributes))
     head: list[Item] = []
     if not blocks:  # plain text: everything after the task becomes one note
-        body = _unescape("\n".join(line for line in edited.splitlines() if line not in (meta, COMMENT, IMAGES))).strip()
+        body = _unescape("\n".join(line for line in edited.splitlines() if line not in (meta, COMMENT, ATTACHED))).strip()
         if not body:
             return None, before, "[context file: edit NOT applied — the file is empty.]"
         head.append(note("notes", body))
@@ -248,16 +250,18 @@ def _apply(edited: str, request: Request, task: int, state: dict[str, Any],
             return None, before, f"[context file: edit NOT applied — keep its first line exactly as it was: {meta}]"
         by_id = {id_: n for n, id_ in enumerate(state["ids"])}
         preamble = "\n".join(line for line in edited[: blocks[0][0].start()].splitlines()
-                             if line not in (meta, COMMENT, IMAGES))
+                             if line not in (meta, COMMENT, ATTACHED))
         if preamble.strip():
             head.append(note("notes", _unescape(preamble).strip()))
         seen: set[str] = set()
         for n, (header, attributes) in enumerate(blocks):
             id_ = attributes["id"]
             body = _unescape(edited[header.end(): blocks[n + 1][0].start() if n + 1 < len(blocks) else len(edited)]).strip()
-            if id_ in seen or not (id_ in by_id or id_.startswith("new-")):
+            if id_ in seen or not (id_ in by_id or id_ == TASK or id_.startswith("new-")):
                 return None, before, f"[context file: edit NOT applied — block id {id_} is {'repeated' if id_ in seen else 'unknown'}.]"
             seen.add(id_)
+            if id_ == TASK:
+                continue
             if not body:
                 continue  # removed
             item = snapshot[by_id[id_]] if id_ in by_id else None
@@ -265,12 +269,17 @@ def _apply(edited: str, request: Request, task: int, state: dict[str, Any],
             if item is not None and (role, body) == _shown(item):
                 head.append(item)
             elif item is not None and role == _shown(item)[0]:
-                head.append(_edited(item, body))  # new text, same turn: a result still answers its call
+                head.append(kept(item, body))  # new text, same turn: a result still answers its call
             else:
                 head.append(note(role, body))
     # As it will be sent: what the protocol cannot keep where it stands (a call whose result was
     # removed) is told as a note, the rest stays as written.
-    items = list(request.sendable((*current[:task], *head, *current[end:])))
+    protected = list(current[:task])
+    if blocks and task and protected[-1].media:  # (its text stays whatever the block says: `kept` only for its media)
+        body = next((edited[h.end(): blocks[n + 1][0].start() if n + 1 < len(blocks) else len(edited)]
+                     for n, (h, attributes) in enumerate(blocks) if attributes["id"] == TASK), "")
+        protected[-1] = replace(protected[-1], media=kept(protected[-1], body).media)
+    items = list(request.sendable((*protected, *head, *current[end:])))
     after = before - _size(current) + _size(items)
     if limit and after > before and after > limit:  # the paper's default gate: an edit must fit
         return None, before, (f"[context file: edit REJECTED — it GREW context ~{before}->{after} tokens, so it was NOT "
@@ -297,15 +306,16 @@ def _guard(items: list[Item], tokens: int, limit: int, anchor: int, path: Path) 
         if tokens <= limit:
             break
         item = items[n]
-        if item.kind is not Kind.TOOL_RESULT or item.text.startswith(WITHHELD) or not item.text.strip():
+        if item.kind is not Kind.TOOL_RESULT or item.text.startswith(WITHHELD) or not (item.text.strip() or item.media):
             continue
         size, file = item_tokens(item), path.parent / "withheld" / f"{path.stem}.{_digest(item.text)[:12]}.txt"
-        replacement = replace(item, text=f"{WITHHELD} tool result (~{size:,} tokens) withheld over budget. Full text: {file}",
-                              media=())
+        told = (f" Full text: {file}" if item.text.strip() else "") + (f" Its {counted(item.media)} went with it." if item.media else "")
+        replacement = replace(item, text=f"{WITHHELD} tool result (~{size:,} tokens) withheld over budget.{told}", media=())
         saved = size - item_tokens(replacement)
         if saved <= 0:
             continue  # A short result must not grow into a longer file-path note.
-        _write(file, item.text)
+        if item.text.strip():
+            _write(file, item.text)
         items[n] = replacement
         tokens -= saved
         withheld += 1
@@ -320,30 +330,21 @@ def _guard(items: list[Item], tokens: int, limit: int, anchor: int, path: Path) 
         "with offset/limit.")
 
 
-def _render(items: list[Item], document: str, revision: int) -> str:
+def _render(items: list[Item], document: str, revision: int, task: Item | None = None) -> str:
     blocks = [f"{HEADER.format(document=document, index=n, role=role, id=id_)}\n{_escape(body)}"
               for n, (item, id_) in enumerate(zip(items, _ids(items)), start=1) for role, body in [_shown(item)]]
-    images = [IMAGES] if any(m.type == "image" for item in items for m in item.media) else []
-    return "\n\n".join([META.format(revision=revision, document=document), COMMENT, *images, *blocks]) + "\n"
+    if task is not None and task.media:
+        blocks.insert(0, f"{HEADER.format(document=document, index=0, role='user', id=TASK)}\n{lines(task)}")
+    attached = [ATTACHED] if any(item.media for item in (*items, *([task] if task else []))) else []
+    return "\n\n".join([META.format(revision=revision, document=document), COMMENT, *attached, *blocks]) + "\n"
 
 
 def _shown(item: Item) -> tuple[str, str]:
-    """The role label and text a block shows for an item, a line for each of its images."""
+    """The role label and text a block shows for an item, a line for each of its media."""
 
-    images = "\n".join(IMAGE.format(n=n, tokens=media_tokens(m))
-                        for n, m in enumerate((m for m in item.media if m.type == "image"), start=1))
     if item.ref is None and item.kind is Kind.USER and (label := LABEL.match(item.text)):
-        return label.group(1), "\n".join(filter(None, (item.text[label.end():].strip(), images)))
-    return LABELS.get(item.kind, item.kind.value), "\n".join(filter(None, (item.text.strip(), images))) or NO_TEXT
-
-
-def _edited(item: Item, body: str) -> Item:
-    """`item` with an edited block's text, keeping the images whose lines the block kept."""
-
-    images = [m for m in item.media if m.type == "image"]
-    kept = {int(n) for n in IMAGE_LINE.findall(body)}
-    media = tuple(m for m in item.media if m.type != "image") + tuple(m for n, m in enumerate(images, 1) if n in kept)
-    return replace(item, text=IMAGE_LINE.sub("", body).strip(), media=media)
+        return label.group(1), "\n".join(filter(None, (item.text[label.end():].strip(), lines(item))))
+    return LABELS.get(item.kind, item.kind.value), "\n".join(filter(None, (item.text.strip(), lines(item)))) or NO_TEXT
 
 
 def _ids(items: list[Item] | tuple[Item, ...]) -> list[str]:

@@ -8,8 +8,8 @@ recorded, so retrieval cannot copy the memory back into itself. Where PRO-LONG w
 each harness's hooks, Relay writes it from the requests: the harness resends its whole history,
 so every item reaches the log once, whatever the harness. The log matters once the context loses
 something, so the strategy runs inside another (`inner`, compaction by default), which decides
-what the model sees; PRO-LONG adds the skill to it and keeps the log. An event's images, which
-PRO-LONG's hooks never see, are saved beside the log (`images/`, one file per image, named by its
+what the model sees; PRO-LONG adds the skill to it and keeps the log. An event's media, which
+PRO-LONG's hooks never see, are saved beside the log (`images/`, one file for each, named by its
 content) and the event names their files, so the model can open one again once the context lost it.
 """
 
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import mimetypes
 import json
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -101,7 +102,7 @@ def _append(log: Path, session: str, items: tuple[Item, ...], path: str) -> None
             reading = reading and item.kind is not Kind.TOOL_RESULT
             continue
         content: dict[str, Any] = {"text": item.text}
-        if saved := [_saved(images, m) for m in item.media if m.type == "image"]:
+        if saved := [_saved(images, m) for m in item.media if m.data or m.url]:
             content["images"] = saved
         entries.append({"timestamp": datetime.now(timezone.utc).isoformat(), "sessionId": session,
                         "type": TYPES[item.kind], "content": content})
@@ -114,12 +115,12 @@ def _append(log: Path, session: str, items: tuple[Item, ...], path: str) -> None
 
 
 def _saved(directory: Path, media: Media) -> str:
-    """Where an image is kept for the log: its file beside the log (once per content), else its URL."""
+    """Where media are kept for the log: a file beside the log (once per content), else their URL."""
 
     if not media.data:
         return media.url
     data = base64.b64decode(media.data)
-    file = directory / f"{hashlib.sha256(data).hexdigest()[:16]}.{EXTENSIONS.get(media.mime, 'png')}"
+    file = directory / f"{hashlib.sha256(data).hexdigest()[:16]}.{EXTENSIONS.get(media.mime) or (mimetypes.guess_extension(media.mime) or '.png')[1:]}"
     if not file.exists():
         directory.mkdir(parents=True, exist_ok=True)
         file.write_bytes(data)

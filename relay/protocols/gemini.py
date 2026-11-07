@@ -13,7 +13,7 @@ import re
 from typing import Any
 
 from ..core.ir import Item, Kind, Media
-from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, decoded, error_message
+from .base import OVERFLOW_PHRASES, Body, WireItem, canonical_json, decoded, error_message, extra, extras
 
 
 class Gemini:
@@ -39,7 +39,7 @@ class Gemini:
             if parts and all(part.get("thought") for part in parts):
                 return Item(Kind.REASONING, text, opaque=opaque)
             return Item(Kind.ASSISTANT, text, opaque=opaque)
-        media = tuple(m for part in parts if (m := _media(part)))
+        media = tuple(m for part in parts for m in _media(part))
         if item.get("role") == "function" or any(_has(part, "functionResponse") for part in parts):
             return Item(Kind.TOOL_RESULT, text, media=media)
         return Item(Kind.USER, text, media=media)
@@ -74,7 +74,7 @@ class Gemini:
 
     def edit(self, wire: WireItem, text: str, media: tuple[Media, ...]) -> WireItem:
         """Thoughts stay as they were; tool results share the new content: the first carries it
-        (and its repeats)."""
+        (and its repeats), with the media, inside it where the function response had them there."""
 
         parts = [part for part in wire.get("parts") or [] if isinstance(part, dict)]
         if wire.get("role") == "model":
@@ -84,12 +84,16 @@ class Gemini:
         responses = [part for part in parts if _has(part, "functionResponse")]
         if not responses:
             return {**wire, "parts": _content(text, media)}
+        keys = ("functionResponse", "function_response")
+        nested = any((part.get(key) or {}).get("parts") for part in responses for key in keys)
         edited = []
         for part in responses:  # a result Gemini CLI repeats (it does on resume) stays repeated
-            key = "functionResponse" if "functionResponse" in part else "function_response"
+            key = keys[0] if keys[0] in part else keys[1]
             same = canonical_json(part) == canonical_json(responses[0])
-            edited.append({**part, key: {**part[key], "response": {"output": text if same else ""}}})
-        return {**wire, "parts": [*edited, *(_content("", media) if media else [])]}
+            response = {k: v for k, v in part[key].items() if k != "parts"}
+            edited.append({**part, key: {**response, "response": {"output": text if same else ""},
+                                         **({"parts": _content("", media)} if nested and same and media else {})}})
+        return {**wire, "parts": [*edited, *(_content("", media) if media and not nested else [])]}
 
     def orphans(self, items: list[WireItem]) -> set[int]:
         """Model turns whose function calls the turn right after them does not answer, and turns
@@ -206,8 +210,10 @@ def _part_text(part: dict[str, Any]) -> str:
     for key in ("functionCall", "functionResponse", "executableCode", "codeExecutionResult"):
         if _has(part, key):
             value = part.get(key, part.get(_snake(key)))
-            if key == "functionResponse" and _output(value) is not None:
-                return _output(value)  # (the output itself, where `edit` writes it)
+            if key == "functionResponse":
+                if _output(value) is not None:
+                    return _output(value)  # (the output itself, where `edit` writes it)
+                value = {k: v for k, v in value.items() if k != "parts"}  # (its media are media)
             return json.dumps(value, ensure_ascii=False)
     return ""
 
@@ -219,16 +225,21 @@ def _output(response: Any) -> str | None:
     return inner["output"] if isinstance(inner, dict) and list(inner) == ["output"] and isinstance(inner["output"], str) else None
 
 
-def _media(part: dict[str, Any]) -> Media | None:
-    inline = part.get("inlineData") or part.get("inline_data")
-    if isinstance(inline, dict):
-        return Media(_kind(inline.get("mimeType") or inline.get("mime_type") or ""),
-                     inline.get("mimeType") or inline.get("mime_type") or "", inline.get("data") or "")
-    file = part.get("fileData") or part.get("file_data")
-    if isinstance(file, dict):
-        mime = file.get("mimeType") or file.get("mime_type") or ""
-        return Media(_kind(mime), mime, url=file.get("fileUri") or file.get("file_uri") or "")
-    return None
+def _media(part: dict[str, Any]) -> list[Media]:
+    """A part's media, those inside a function response included."""
+
+    response = part.get("functionResponse") or part.get("function_response")
+    if isinstance(response, dict):
+        return [m for inner in response.get("parts") or [] if isinstance(inner, dict) for m in _media(inner)]
+    for camel, snake in (("inlineData", "inline_data"), ("fileData", "file_data")):
+        value = part.get(camel, part.get(snake))
+        if isinstance(value, dict):
+            mime = value.get("mimeType") or value.get("mime_type") or ""
+            rest = {k: v for k, v in value.items() if k not in {"mimeType", "mime_type", "data", "fileUri", "file_uri"}}
+            fields = {k: v for k, v in part.items() if k not in {camel, snake}} | ({camel: rest} if rest else {})
+            return [Media(_kind(mime), mime, value.get("data") or "", url=value.get("fileUri") or value.get("file_uri") or "",
+                          extra=extra(fields))]
+    return []
 
 
 def _kind(mime: str) -> str:
@@ -238,8 +249,11 @@ def _kind(mime: str) -> str:
 def _content(text: str, media: tuple[Media, ...]) -> list[dict[str, Any]]:
     parts: list[dict[str, Any]] = [{"text": text}] if text or not media else []
     for m in media:
-        parts.append({"inlineData": {"mimeType": m.mime, "data": m.data}} if m.data
-                     else {"fileData": {"mimeType": m.mime, "fileUri": m.url}})
+        part = extras(m)
+        if m.data:
+            parts.append({**part, "inlineData": {**part.get("inlineData", {}), "mimeType": m.mime, "data": m.data}})
+        else:
+            parts.append({**part, "fileData": {**part.get("fileData", {}), "mimeType": m.mime, "fileUri": m.url}})
     return parts
 
 

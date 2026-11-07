@@ -151,7 +151,7 @@ class ClmTests(unittest.TestCase):
         self.send(*self.history, *shot)
         text = self.mirror().read_text()
         self.assertIn("the dialog opened\n[image 1 of this turn, ~2,765 tokens]", text)
-        self.assertIn("keep a line to keep its image", text)
+        self.assertIn("keep a line to keep its attachment", text)
         self.edit(lambda s: s.replace("the dialog opened", "the save dialog opened"))
         sent = json.dumps(self.send(*self.history, *shot, *call(6)).body["input"])
         self.assertIn("the save dialog opened", sent)
@@ -160,6 +160,49 @@ class ClmTests(unittest.TestCase):
         sent = json.dumps(self.send(*self.history, *shot, *call(6), *call(7)).body["input"])
         self.assertIn("the save dialog opened", sent)
         self.assertNotIn(screen["image_url"], sent)
+
+    def test_a_file_is_a_line_as_an_image_is(self) -> None:
+        self.engine = Engine(ContextLanguageModel(budget=20_000, directory=str(self.directory)))
+        report = {"type": "input_file", "file_data": "data:application/pdf;base64," + "A" * 4000, "filename": "report.pdf"}
+        shot = [{"type": "function_call", "call_id": "c5", "name": "sh", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c5", "output": [{"type": "input_text", "text": "fetched"}, report]}]
+        self.send(*self.history, *shot)
+        self.assertIn("fetched\n[file 1 of this turn, ~188 tokens]", self.mirror().read_text())
+        self.edit(lambda s: s.replace("fetched\n[file 1 of this turn, ~188 tokens]", "fetched"))
+        sent = json.dumps(self.send(*self.history, *shot, *call(6)).body["input"])
+        self.assertNotIn("report.pdf", sent)
+        self.assertIn("fetched\\n[1 file removed]", sent)
+
+    def test_the_tasks_attachments_are_the_models_to_drop_and_its_text_is_not(self) -> None:
+        self.engine = Engine(ContextLanguageModel(budget=20_000, directory=str(self.directory)))
+        head = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">II", 750, 100) + b"\x08\x02\x00\x00\x00"
+        screen = {"type": "input_image", "image_url": "data:image/png;base64," + base64.b64encode(head).decode()}
+        task = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "what is this"}, screen]}
+        history = [msg("developer", "rules"), task, *call(1), *call(2)]
+        self.send(*history)
+        text = self.mirror().read_text()
+        self.assertRegex(text, r"index=0 role=user id=task\]\]\n\[image 1 of this turn, ~100 tokens\]")
+        self.assertNotIn("what is this", text)
+        self.edit(lambda s: s.replace("[image 1 of this turn, ~100 tokens]\n", "not what it asked\n"))
+        sent = self.send(*history, *call(3))
+        self.assertNotIn(screen["image_url"], json.dumps(sent.body["input"]))
+        self.assertIn("what is this", json.dumps(sent.body["input"]))
+        self.assertNotIn("not what it asked", json.dumps(sent.body["input"]))
+        self.assertNotIn("id=task", self.mirror().read_text())
+
+    def test_a_task_without_attachments_has_no_block(self) -> None:
+        self.send(*self.history)
+        self.assertNotIn("id=task", self.mirror().read_text())
+
+    def test_a_result_of_images_alone_gives_way_to_the_overflow_guard(self) -> None:
+        self.engine = Engine(ContextLanguageModel(budget=20_000, directory=str(self.directory)))
+        head = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">II", 1920, 1080) + b"\x08\x02\x00\x00\x00"
+        screen = {"type": "input_image", "image_url": "data:image/png;base64," + base64.b64encode(head).decode()}
+        shots = [item for n in range(5, 15) for item in (
+            {"type": "function_call", "call_id": f"c{n}", "name": "sh", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": f"c{n}", "output": [screen]})]
+        sent = json.dumps(self.send(*self.history, *shots).body["input"])
+        self.assertIn("withheld over budget. Its 1 image went with it.", sent)
 
     def test_the_harnesss_context_stays_where_it_was_sent(self) -> None:
         codex = HARNESSES["codex"]

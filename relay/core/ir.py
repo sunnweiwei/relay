@@ -6,6 +6,11 @@ answers with the `Context` the model should see: items taken from the request (k
 are, or with new text or media), new items, anywhere. What the harness wrote itself (system and
 context items) never reaches the strategy; the harness profile places it. Items remember which
 wire item they came from, so anything a strategy keeps is forwarded byte-for-byte.
+
+Media are part of the contract. A codec reports all of an item's non-text content as its `media`
+and writes back exactly the media it is given, each as it came, so taking one out of an item removes
+it from what is sent. Every one counts (`media_tokens`) and has one form where only text goes
+(`core.media`), so a strategy decides what stays, not what kinds there are.
 """
 
 from __future__ import annotations
@@ -36,13 +41,14 @@ LABELS = {Kind.USER: "user", Kind.ASSISTANT: "assistant", Kind.REASONING: "reaso
 
 @dataclass(frozen=True)
 class Media:
-    """Non-text content of an item: an image, a file, audio."""
+    """Non-text content of an item: an image, a file, audio, or a part Relay does not read."""
 
-    type: str  # "image", "file", "audio"
+    type: str  # "image", "file", "audio"; any other: the part's own type, all of it in `extra`
     mime: str = ""  # e.g. "image/png", when known
     data: str = ""  # base64 content, when inline
     url: str = ""  # or where it is: a URL, a provider's file id
     detail: str | None = None  # provider image detail, when the protocol exposes it
+    extra: str = ""  # JSON of the part's other fields, which go back with it (`protocols.base.extra`)
 
 
 @dataclass(frozen=True)

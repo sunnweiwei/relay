@@ -171,7 +171,7 @@ class ACMTests(unittest.TestCase):
         self.assertEqual((how, sent.kind, sent.media), ("complete", Kind.USER, (screen,)))
         self.assertIn("[tool] clicked [image 1]", sent.text)
         saved = json.loads((Path(self.directory) / "c" / "summary_1.json").read_text())
-        self.assertEqual(saved[-1]["images"], [{"mime": "image/png", "data": "aGVsbG8=", "url": ""}])
+        self.assertEqual([Media(**m) for m in saved[-1]["media"]], [screen])
 
         query = step(4, 'echo "[query_memory] 1 :: where is the save button"', "[query_memory] 1 :: where is the save button")
         summarizer = Scripted("bottom right")
