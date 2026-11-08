@@ -501,37 +501,49 @@ Code's hook the instructions and notes cannot be delivered, so CLM runs through 
 
 `relay strategy folding` lets the agent branch off a sub-task and come back with a message, as in
 FoldAgent ([github.com/sunnweiwei/FoldAgent](https://github.com/sunnweiwei/FoldAgent),
-`relay/strategies/folding.py`). The harness's own shell stands in for FoldAgent's `branch` and
-`return` tools: the guidance asks the agent to run `echo "[branch] <description> :: <task>"`, work on
-the sub-task, and run `echo "[return] <message>"`. The echo's result is rewritten in place:
-FoldAgent's branch message ("ROLE CHANGE: `MODE: BRANCH`" and the task) when the branch opens, and
-"Branch has finished its task, the returned message is: ..." when it returns, when the branch's
-steps and the return call fold away. Nothing before the branch call changes, so the upstream's
-prompt cache serves it on the request after the fold. A branch cannot open another (FoldAgent's
-rule). The conversation itself says which branches are open or done; the strategy keeps no state.
-Fixed-threshold compaction is the fallback, as in AutoCompact: when the context as folded still
-reaches the compaction threshold (the agent did not branch, or a branch grew past it), the
-conversation is compacted as `compaction` compacts it, with its settings.
+`relay/strategies/folding.py`), with FoldAgent's prompts verbatim: the system prompt gets its
+`<MULTI_AGENT>` block, its `branch` and `return` tools and the MAIN directive of its user prompt (not
+its SWE phase list). The harness's own shell stands in for the tools, and only their call syntax
+changes: the agent runs `echo "[branch] <description> :: <prompt>"` and `echo "[return] <message>"`,
+each alone. The echo's result is rewritten in place. A branch inherits the whole conversation; the
+branch call's result becomes FoldAgent's branch message ("ROLE CHANGE: `MODE: BRANCH`"; the task is
+the call's, shown above it). While a branch is open, each observation ends with FoldAgent's
+branch-mode reminder (after a step's last result; where one result answers several calls, in a note
+on that request), and a branch call is refused with FoldAgent's message. A branch closes when it
+returns ("Branch has finished its task, the returned message is: ..."), or when the model ends its
+turn without returning, with FoldAgent's text for a branch that stops without a return ("Branch has
+finished its task. The last message was: ..." and the model's answer). Then the branch's own steps
+fold away; the user's messages and anything else stay, and nothing before the branch call changes,
+so the upstream's prompt cache serves it on the request after the fold. As in FoldAgent, a branch
+must return 512 tokens before the context's limit, counted over the whole context (FoldAgent counts
+from its prompt, main's steps before the branch included): there its last step is rolled back,
+FoldAgent's prompt to return is added, and the model's next response closes the branch. At most 10
+branches stand in the context (FoldAgent's `max_session` in its evaluations); the 11th is refused
+with its message. The conversation itself says which branches are open or done; the strategy keeps
+no state. The context's limit is Relay's addition, since FoldAgent ends the episode when main's
+context is full and a harness cannot: with no branch open, a context that still reaches the
+compaction threshold is compacted as `compaction` compacts it, with its settings, and a branch must
+return 512 tokens before that threshold (114,688 tokens at the default 90% of a 128K window).
 
-Checked in Docker with `check.py --strategy folding` (read file_1, read file_2 and file_3 in a
-branch and return their codes, read file_4; then say, without reading, whether file_2's text is
-still there). The branch opened and folded in 18 of 19 harness/model pairs: Codex, Claude Code, pi,
-OpenCode, Kilo, Crush, OpenClaw, Goose, Kimi Code, Hermes, nanobot, DeepSeek Harness, WorkBuddy and
-mini-swe-agent on GPT, and Gemini CLI, pi, Goose and Crush on Gemini. Every later request kept the
-returned codes and neither file's text, and the model answered right and no longer saw file_2. On
-the request after the fold the upstream's cache served 69% to 98% of the prompt where it reports
-cache use (Codex 86%, Claude Code 89%, Gemini CLI on Gemini 72%). Gemini CLI on GPT, which had not
-been told about branches (see the LiteLLM note under CLM), used its own sub-agent tool
-(`invoke_agent`); told, it branches and folds too. Codex at times reaches for its `spawn_agent`. A
-signal is a lone echo of it in a tool's input (one argument, nothing after it), read from the
-echo's output in whatever form a harness reports it (plain, JSON, `Command: … Output: …`), else,
-where the call reports no output, from the command; text that only mentions it (the model's,
-another tool's input, a grep for it) is none. The guidance asks for the echo as the only tool
-call of its response (as for AutoCompact's and ACM's signals); one beside other calls is ignored,
-and the model is told so: in the echo's own result where it has one (Codex, Chat Completions,
-Claude Code's hook; of several results, the one saying what the echo printed, in whatever order
-they come), else, where one message answers all the calls (Anthropic Messages, Gemini), in a note
-on the request right after. The other calls' results stay as they were.
+Checked in Docker with `check.py --strategy folding`, with Relay's earlier wording of the prompts
+(read file_1, read file_2 and file_3 in a branch and return their codes, read file_4; then say,
+without reading, whether file_2's text is still there). The branch opened and folded in 18 of 19
+harness/model pairs: Codex, Claude Code, pi, OpenCode, Kilo, Crush, OpenClaw, Goose, Kimi Code,
+Hermes, nanobot, DeepSeek Harness, WorkBuddy and mini-swe-agent on GPT, and Gemini CLI, pi, Goose
+and Crush on Gemini. Every later request kept the returned codes and neither file's text, and the
+model answered right and no longer saw file_2. On the request after the fold the upstream's cache
+served 69% to 98% of the prompt where it reports cache use (Codex 86%, Claude Code 89%, Gemini CLI
+on Gemini 72%). Gemini CLI on GPT, which had not been told about branches (see the LiteLLM note
+under CLM), used its own sub-agent tool (`invoke_agent`); told, it branches and folds too. Codex at
+times reaches for its `spawn_agent`. A signal is a lone echo of it in a tool's input (one argument,
+nothing after it), read from the echo's output in whatever form a harness reports it (plain, JSON,
+`Command: … Output: …`), else, where the call reports no output, from the command; text that only
+mentions it (the model's, another tool's input, a grep for it) is none. The guidance asks for the
+echo as the only tool call of its response (as for AutoCompact's and ACM's signals); one beside
+other calls is ignored, and the model is told so: in the echo's own result where it has one (Codex,
+Chat Completions, Claude Code's hook; of several results, the one saying what the echo printed, in
+whatever order they come), else, where one message answers all the calls (Anthropic Messages,
+Gemini), in a note on the request right after. The other calls' results stay as they were.
 
 ## PRO-LONG
 
@@ -682,7 +694,7 @@ guidance asks the agent to `echo` a signal, and the echo's result is rewritten i
 | ACM ([github](https://github.com/lixiaochuan2020/agentic-context-management)) | `acm` | `echo "[manage_context]"` compresses everything since the previous call through the response that made it (at first, since the original question, which stays, as in ACM's runner; the user's later messages are compressed too), and only "[summary_id: N] ..." stays, as a user message, the originals saved to `acm_dir/<conversation>/summary_N.json`; `echo "[query_memory] N :: query"` answers from them; both ask the model as ACM's runner does (the prompt alone, no tools; messages as `[role] content`, without calls or reasoning; a summary without a clean `<memory>` block asked for once more), but with no output cap; the last tool result ends with "[CURRENT CONTEXT TOKEN: N]", N the request's tokens plus ACM's 16,384-token output reserve; from 95% of the window the request ends with ACM's STOP_PROMPT | ACM's summarizer, recall and stop prompts, verbatim; its system prompt and tool descriptions without the search benchmark's parts, each tool called by its echo; a compressed range's images go to the summarizer and are saved with the originals (the release serializes text only) |
 | MEM1 ([github](https://github.com/MIT-MI/MEM1)) | `mem1` | as MEM1's inference loop, each request holds only the user's messages, the model's newest response and its results (every earlier step cleared, whether or not that response wrote its `<IS>` state); MEM1's prompt goes before the first user message, as before its question | MEM1's (`make_prefix`), for an agent's tools, `<think>` as `<IS>` |
 | RLM ([github](https://github.com/alexzhang13/rlm)) | `rlm`, `rlm_persistent` | before every step the authors' RLM works out the agent's next step, the conversation held as `context` in its REPL; its answer is all the task's model sees of the conversation, and that model, with the harness's tools, takes the step. `rlm` is a fresh query every request (the whole conversation again, nothing cached); `rlm_persistent` is the authors' multi-turn mode: the conversation's REPL stays, each request adds only what is new as `context_k`, and earlier work stays in `history_k` and in the model's variables. The REPL holds text, each image marked where it was; the conversation's newest images go with the answer to the model that takes the step | the authors' (`rlms` 0.1.3); the root prompt asks for the next step |
-| Context Folding | `folding` | see above | FoldAgent's |
+| Context Folding | `folding` | see above | FoldAgent's, verbatim (its call syntax mapped to the echo) |
 
 Base is Relay without a strategy that changes anything. AutoCompact and MEM1 train their models to
 the behavior; an untrained model gets the guidance alone, so whether it compacts at the right

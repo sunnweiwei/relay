@@ -92,6 +92,15 @@ def signalled(response: Sequence[Item], results: Sequence[Item], pattern: re.Pat
     return None  # output, but not the echo's
 
 
+def echoed(response: Sequence[Item], pattern: re.Pattern[str]) -> str | None:
+    """The argument of the last lone echo of a signal among a model response's calls, as its
+    command gives it (see `signalled`), if one is."""
+
+    found = [argument for item in response if item.kind is Kind.TOOL_CALL for values in _inputs(item.text)
+             if (argument := _echoed(values, pattern)) is not None]
+    return found[-1] if found else None
+
+
 IGNORED = ("Your {name} echo ran beside other tool calls, so it was ignored: run it again alone, with no other "
            "tool call beside it.")  # what the model is told of a signal beside other calls
 

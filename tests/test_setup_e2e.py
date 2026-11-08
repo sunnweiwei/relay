@@ -22,7 +22,7 @@ from pathlib import Path
 from tests.fakes import FakeUpstream, serve
 
 MODEL = "gpt-5.1-codex"
-CLM, FOLDING = "## Managing your context", "## Branches (context folding)"
+CLM, FOLDING = "## Managing your context", "<MULTI_AGENT>"
 
 
 class AppServer:

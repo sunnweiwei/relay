@@ -9,7 +9,8 @@ from relay.harnesses import Harness
 from relay.protocols import AnthropicMessages, Gemini, OpenAIChat, OpenAIResponses
 from relay.strategies import Compaction, ContextFolding
 from relay.strategies.conversation import IGNORED
-from relay.strategies.folding import BRANCH as BRANCH_MESSAGE, NESTED, RETURNED
+from relay.strategies.folding import (BRANCH as BRANCH_MESSAGE, FORCED, GUIDANCE, LIMIT, NESTED, REMINDER, RETURNED,
+                                      UNRETURNED)
 
 CODEC, HARNESS = OpenAIResponses(), Harness()
 TOOLS = [{"type": "function", "name": "sh", "parameters": {}}]
@@ -26,6 +27,13 @@ def run(i: int, command: str, output: str) -> list[dict[str, Any]]:
 
 def read(i: int) -> list[dict[str, Any]]:
     return run(i, f"cat file_{i}.txt", f"file {i} text\nCODE: c{i}")
+
+
+def reminded(steps: list[dict[str, Any]], description: str) -> list[dict[str, Any]]:
+    """`steps` as a branch's steps are sent: each result with the reminder after it."""
+
+    return [{**item, "output": f"{item['output']}\n{REMINDER.format(description=description)}"}
+            if item["type"].endswith("_output") else item for item in steps]
 
 
 BRANCH = run(10, 'echo "[branch] Read files :: read file_2 and file_3, report their codes"',
@@ -47,9 +55,9 @@ class FoldingTests(unittest.TestCase):
 
     def test_a_branch_opens_with_foldagents_message(self) -> None:
         sent = self.send(*self.history, *BRANCH).body["input"]
-        self.assertTrue(self.text(sent[1]).startswith("## Branches"))  # the guidance, after the harness's own
-        self.assertTrue(self.text(sent[-1]).startswith("ROLE CHANGE: `MODE: BRANCH`"))
-        self.assertIn("read file_2 and file_3, report their codes", self.text(sent[-1]))
+        self.assertEqual(self.text(sent[1]), GUIDANCE)  # FoldAgent's, after the harness's own
+        self.assertTrue(GUIDANCE.startswith("<MULTI_AGENT>") and GUIDANCE.endswith("Now you are in `MODE: MAIN`"))
+        self.assertEqual(self.text(sent[-1]), BRANCH_MESSAGE)  # verbatim: the task is the call's, shown above it
         self.assertEqual(sent[-2], BRANCH[0])  # the call, as it was
 
     def test_a_return_folds_the_branch_and_keeps_the_prefix(self) -> None:
@@ -68,10 +76,25 @@ class FoldingTests(unittest.TestCase):
         self.assertEqual(later[:-2], items)
         self.assertEqual(later[-2:], read(4))
 
+    def test_codex_code_mode(self) -> None:
+        # Codex 0.162 on: each command a script for its `exec` tool, its output after a header.
+        def ran(i: int, command: str, output: str) -> list[dict[str, Any]]:
+            script = f"const r = await tools.exec_command({{cmd:{json.dumps(command)}}}); text(r.output);"
+            return [{"type": "custom_tool_call", "call_id": f"x{i}", "name": "exec", "input": script},
+                    {"type": "custom_tool_call_output", "call_id": f"x{i}", "output": f"Script completed\nOutput:\n{output}"}]
+
+        branch = ran(10, 'echo "[branch] Read files :: read file_2"', "[branch] Read files :: read file_2\n")
+        step = ran(2, "cat file_2.txt", "CODE: c2\n")
+        sent = self.send(*self.history, *branch, *step).body["input"]
+        self.assertEqual(sent[-4:], [branch[0], {**branch[1], "output": BRANCH_MESSAGE}, *reminded(step, "Read files")])
+        ret = ran(11, "echo '[return] file_2: c2\nnothing pending'", "[return] file_2: c2\nnothing pending\n")
+        folded = self.send(*self.history, *branch, *step, *ret).body["input"]
+        self.assertEqual(folded[-2:], [branch[0], {**branch[1], "output": RETURNED.format(message="file_2: c2\nnothing pending")}])
+
     def test_a_branch_cannot_branch(self) -> None:
         nested = run(12, 'echo "[branch] Deeper :: more"', "[branch] Deeper :: more")
         sent = self.send(*self.history, *BRANCH, *read(2), *nested).body["input"]
-        self.assertEqual(self.text(sent[-1]), NESTED)
+        self.assertEqual(self.text(sent[-1]), f"{NESTED}\n{REMINDER.format(description='Read files')}")
 
     def test_signals_are_read_from_any_form_of_output(self) -> None:
         # Hermes reports a command's output as JSON; Gemini CLI repeats the command before it.
@@ -252,6 +275,97 @@ class FoldingTests(unittest.TestCase):
         self.assertEqual(len(folded.body["contents"]), 3)
         self.assertIn("file_2: c2", json.dumps(folded.body["contents"][2]))
         self.assertFalse(send(*history, call("cat file_3.txt"), output("file 3 text")).compacted)  # done, not again
+
+    def test_each_observation_in_a_branch_ends_with_foldagents_reminder(self) -> None:
+        reminder = REMINDER.format(description="Read files")
+        first = self.send(*self.history, *BRANCH, *read(2)).body["input"]
+        self.assertEqual(self.text(first[-1]), f"file 2 text\nCODE: c2\n{reminder}")
+        later = self.send(*self.history, *BRANCH, *read(2), *read(3)).body["input"]
+        self.assertEqual(later[:-2], first)  # once each, and the prefix as it was sent (the prompt cache holds)
+        self.assertEqual(self.text(later[-1]), f"file 3 text\nCODE: c3\n{reminder}")
+        # Once the branch returns, the main conversation's results are its own again.
+        after = self.send(*self.history, *BRANCH, *read(2), *read(3), *RETURN, *read(4)).body["input"]
+        self.assertEqual(after[-2:], read(4))
+        self.assertNotIn("branch mode", json.dumps(after))
+
+    def test_a_fold_keeps_the_users_messages(self) -> None:
+        # A user message that comes in while a branch runs (Codex's mid-turn input) stays; only the
+        # branch's own steps fold away.
+        mid = msg("user", "also say which file is longer")
+        sent = self.send(*self.history, *BRANCH, *read(2), mid, *read(3), *RETURN).body["input"]
+        self.assertEqual(sent[2:], [*self.history[1:], BRANCH[0], {**BRANCH[1], "output": RETURNED.format(
+            message="file_2: c2, file_3: c3")}, mid])
+
+    def test_a_branch_closes_when_the_model_ends_its_turn(self) -> None:
+        # FoldAgent's text for a branch that stops without a return; its steps and the answer fold away.
+        self.send(*self.history, *BRANCH, *read(2))
+        answer, task = msg("assistant", "file_2: c2"), msg("user", "now read file_4")
+        sent = self.send(*self.history, *BRANCH, *read(2), answer, task).body["input"]
+        self.assertEqual(sent[2:], [*self.history[1:], BRANCH[0], {**BRANCH[1], "output": UNRETURNED.format(
+            message="file_2: c2")}, task])
+        later = self.send(*self.history, *BRANCH, *read(2), answer, task, *read(4)).body["input"]
+        self.assertEqual(later[-2:], read(4))  # the new turn is main's: no reminder
+        self.assertEqual(later[:-2], sent)
+
+    def test_a_branch_past_its_limit_is_told_to_return_instead_of_compacted(self) -> None:
+        engine = Engine(ContextFolding(Compaction(threshold=4_000, min_gain=0)))
+
+        def send(*items: dict[str, Any]) -> Any:
+            return engine.prepare(CODEC, HARNESS, {"model": "m", "input": list(items), "tools": TOOLS}, tenant="t",
+                                  post=lambda r: self.fail("no summary is asked for"))
+
+        steps = [item for i in range(2, 7) for item in run(i, f"cat big_{i}", "x" * 4_000)]
+        send(*self.history, *BRANCH)
+        sent = send(*self.history, *BRANCH, *steps).body["input"]
+        self.assertEqual(sent[2:-1], [*self.history[1:], BRANCH[0], {**BRANCH[1], "output": BRANCH_MESSAGE},
+                                      *reminded(steps[:-2], "Read files")])  # the last step rolled back
+        self.assertEqual(sent[-1], {"type": "message", "role": "user", "content": [{"type": "input_text", "text": FORCED}]})
+        self.assertEqual(send(*self.history, *BRANCH, *steps).body["input"], sent)  # (a retry: told once)
+        # Its answer closes the branch: a return, with its message.
+        folded = send(*self.history, *BRANCH, *steps, *RETURN).body["input"]
+        self.assertEqual(folded[2:], [*self.history[1:], BRANCH[0], {**BRANCH[1], "output": RETURNED.format(
+            message="file_2: c2, file_3: c3")}])
+        # Any other answer, with what the model said and called (FoldAgent's text for no return).
+        engine = Engine(ContextFolding(Compaction(threshold=4_000, min_gain=0)))
+        send(*self.history, *BRANCH, *steps)
+        folded = send(*self.history, *BRANCH, *steps, *run(12, "cat more.txt", "more")).body["input"]
+        self.assertEqual(self.text(folded[-1]), UNRETURNED.format(message='sh {"cmd": "cat more.txt"}'))
+        self.assertNotIn(FORCED, json.dumps(folded))
+
+    def test_an_eleventh_branch_is_refused(self) -> None:
+        def branch(i: int) -> list[dict[str, Any]]:
+            return [*run(100 + i, f'echo "[branch] B{i} :: read file_{i}"', f"[branch] B{i} :: read file_{i}"), *read(i),
+                    *run(200 + i, f'echo "[return] r{i}"', f"[return] r{i}")]
+
+        ten = [item for i in range(10) for item in branch(i)]
+        eleventh = run(300, 'echo "[branch] B10 :: read file_10"', "[branch] B10 :: read file_10")
+        sent = self.send(*self.history, *ten, *eleventh, *read(11)).body["input"]
+        texts = [self.text(item) for item in sent]
+        self.assertEqual(sum(text.startswith(RETURNED.split(":")[0]) for text in texts), 10)
+        self.assertEqual(texts[-3], LIMIT.format(count=10))
+        self.assertEqual(texts[-3], "You've already reached the limit of 10 branch calls. Continue working independently.")
+        self.assertEqual(sent[-2:], read(11))  # (no branch open)
+
+    def test_a_result_shared_by_several_calls_gets_the_reminder_in_a_note(self) -> None:
+        # Claude Code answers parallel tool uses in one message: the reminder follows it as a note.
+        codec = AnthropicMessages()
+
+        def use(i: str, name: str, command: str) -> dict[str, Any]:
+            return {"type": "tool_use", "id": i, "name": name, "input": {"command": command}}
+
+        def result(i: str, text: str) -> dict[str, Any]:
+            return {"type": "tool_result", "tool_use_id": i, "content": text}
+
+        task = {"role": "user", "content": "investigate the files"}
+        branch = [{"role": "assistant", "content": [use("b", "Bash", 'echo "[branch] Read models :: read models.py"')]},
+                  {"role": "user", "content": [result("b", "[branch] Read models :: read models.py")]}]
+        calls = {"role": "assistant", "content": [use("x", "Read", "exceptions.py"), use("y", "Read", "models.py")]}
+        results = {"role": "user", "content": [result("x", "EXCEPTIONS TEXT"), result("y", "MODELS TEXT")]}
+        sent = self.engine.prepare(codec, HARNESS, {"model": "m", "messages": [task, *branch, calls, results],
+                                                    "tools": [{"name": "Bash"}]},
+                                   tenant="a", post=lambda r: (500, {})).body["messages"]
+        self.assertEqual(sent[-1]["content"], [*results["content"], {"type": "text", "text": REMINDER.format(
+            description="Read models")}])
 
     def test_a_conversation_without_branches_is_left_alone(self) -> None:
         sent = self.send(*self.history, *read(2))

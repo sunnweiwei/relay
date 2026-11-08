@@ -141,7 +141,7 @@ class ClaudeCodeHookTests(unittest.TestCase):
         bodies = self.run_claude(ContextFolding(), FakeUpstream(tool_calls=2))
         self.assertTrue(bodies)
         for body in bodies:
-            self.assertIn("## Branches (context folding)", body["system"][-1]["text"][-3_000:])
+            self.assertIn("<MULTI_AGENT>", body["system"][-1]["text"][-3_000:])
 
     def test_a_result_the_strategy_rewrites_and_a_branch_that_folds(self) -> None:
         def bash(command: str) -> dict[str, Any]:

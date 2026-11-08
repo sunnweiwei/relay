@@ -19,6 +19,7 @@ from relay.harnesses import HARNESSES
 from relay.integrations.claude_code import HISTORY, PLUGIN, TAIL, ClaudeCodeHook
 from relay.prompts import SUMMARIZATION_PROMPT, SUMMARY_PREFIX
 from relay.strategies import MEM1, Compaction, ContextFolding
+from relay.strategies.folding import REMINDER
 from relay.transport import create_app
 
 
@@ -277,8 +278,9 @@ class ClaudeCodeCompactTests(unittest.TestCase):
         echoed = {"role": "user", "text": "", "toolUses": [], "toolResults": [{"tool_use_id": "t1", "text": written["text"]}]}
         self.assertEqual(hook.compact(engine, {"messages": [*messages, echoed], "instructions": hook.instructions(engine)}),
                          {"skip": "folding: not now"})  # (nothing left to compact)
-        self.assertEqual(hook.result(engine, {"messages": [*messages, echoed, call(2)],  # (not a signal)
-                                              "call": {"tool_use_id": "t2", "text": "CODE: c2"}}), {})
+        self.assertEqual(hook.result(engine, {"messages": [*messages, echoed, call(2)],  # (in the branch: the reminder)
+                                              "call": {"tool_use_id": "t2", "text": "CODE: c2"}}),
+                         {"text": f"CODE: c2\n{REMINDER.format(description='read')}"})
         ret = {"role": "assistant", "text": "", "toolUses": [
             {"tool_use_id": "t3", "tool": "Bash", "input": {"command": 'echo "[return] c2"'}}]}
         later = [*messages, echoed, call(2), result(2), ret]
@@ -351,7 +353,7 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(client.post("/relay/v1/compact", json={"harness": "nope"}).status_code, 500)
 
     def test_the_instructions_and_what_the_hook_cannot_run(self) -> None:
-        self.assertIn("## Branches", TestClient(create_app(Engine(ContextFolding()))).post(
+        self.assertIn("<MULTI_AGENT>", TestClient(create_app(Engine(ContextFolding()))).post(
             "/relay/v1/instructions", json={"harness": "claude_code"}).json()["instructions"])
         self.assertEqual(TestClient(create_app(Engine(MEM1()))).post(  # (a new context every request)
             "/relay/v1/instructions", json={"harness": "claude_code"}).status_code, 409)
