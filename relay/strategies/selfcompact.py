@@ -11,7 +11,8 @@ message; in a conversation the question is all the user has said, so every user 
 order, and the summarizer is given them all (with one, exactly the release's). A CONTINUE verdict
 leaves the conversation as it was. As the release gates it (`selfcheck_min_round`,
 `selfcheck_min_tokens`, `selfcheck_period`), probes come once the conversation has `min_round` model
-responses and the prompt `min_tokens` tokens, every `period` responses; past `backstop` of the budget
+responses and the prompt `gate` of the budget (the release's 40,000 tokens of its 108,000, as a share,
+as the CLM paper runs it at other budgets), every `period` responses; past `backstop` of the budget
 the summary is made without asking, a backstop of Relay's own (at its budget the release forces a
 final answer instead). The prompts are those of Self-Compact's released code (`prompts.py`:
 SELFCHECK_PROMPT, SUMMARIZE_PROMPT, CONTINUE_AFTER_SUMMARY), verbatim, and the summary is the answer's
@@ -94,8 +95,8 @@ VERDICT = re.compile(r"\b(C1|C2|C3|N1)\b(?:\s+[A-Z-]+)?[^A-Za-z0-9\n]*([YN])\b")
 @dataclass(frozen=True)
 class SelfCompact:
     budget: int | None = None  # tokens; None: the model's context window
-    min_tokens: int = 40_000  # probe once the prompt has this many tokens
-    min_round: int = 3  # and the conversation this many model responses
+    gate: float = 40_000 / 108_000  # probe once the prompt passes this share of the budget
+    min_round: int = 3  # and the conversation has this many model responses
     period: int = 2  # every this many model responses since the last summary
     backstop: float = HARD_LIMIT  # summarize without asking past this share
     name: str = "selfcompact"
@@ -105,7 +106,7 @@ class SelfCompact:
         return cls()
 
     def fingerprint(self) -> dict[str, Any]:
-        return {"name": self.name, "budget": self.budget, "min_tokens": self.min_tokens, "min_round": self.min_round,
+        return {"name": self.name, "budget": self.budget, "gate": self.gate, "min_round": self.min_round,
                 "period": self.period,
                 "backstop": self.backstop, "rubric": RUBRIC, "summarizer": SUMMARIZER}
 
@@ -117,7 +118,7 @@ class SelfCompact:
         starts = responses(items)
         rounds = sum(start > last for start in starts)
         forced = request.force or request.tokens >= self.backstop * budget
-        due = (request.tokens >= self.min_tokens and len(starts) >= self.min_round
+        due = (request.tokens >= self.gate * budget and len(starts) >= self.min_round
                and rounds and rounds % self.period == 0)
         if not (forced or due) or (cut := summary_cut(request)) is None:
             return None

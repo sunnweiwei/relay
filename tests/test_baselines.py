@@ -54,7 +54,7 @@ TASK = Item(Kind.USER, "read the files", 1)
 
 
 class SelfCompactTests(unittest.TestCase):
-    strategy = SelfCompact(min_tokens=3_700)  # probes every 2 responses from the third, past 3,700 tokens
+    strategy = SelfCompact()  # probes every 2 responses from the third, past 37% of the window (10k)
 
     def test_probes_every_second_response_past_the_gates(self) -> None:
         two, three = (TASK, *step(1), *step(2)), (TASK, *step(1), *step(2), *step(3))
@@ -95,7 +95,7 @@ class SelfCompactTests(unittest.TestCase):
         self.assertEqual(context.items, (TASK, Item(Kind.ASSISTANT, RESEARCH + "SUMMARY"), Item(Kind.USER, CONTINUE)))
 
     def test_the_release_gates_by_default(self) -> None:
-        self.assertEqual((SelfCompact().min_tokens, SelfCompact().min_round, SelfCompact().period), (40_000, 3, 2))
+        self.assertEqual((SelfCompact().gate * 108_000, SelfCompact().min_round, SelfCompact().period), (40_000, 3, 2))
 
 
 class AutoCompactTests(unittest.TestCase):
