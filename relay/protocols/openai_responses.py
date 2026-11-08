@@ -54,8 +54,10 @@ class OpenAIResponses:
         if kind == "compaction":  # opaque server-side compaction
             return Item(Kind.SUMMARY, opaque=decoded(item.get("encrypted_content")))
         if kind.endswith("_output"):
-            text, media = _content_text(item.get("output"))
-            return Item(Kind.TOOL_RESULT, text, media=media)
+            output = item.get("output")
+            text, media = _content_text(output)
+            parts = tuple(part["text"] for part in output if _is_text(part)) if isinstance(output, list) else ()
+            return Item(Kind.TOOL_RESULT, text, media=media, parts=parts)
         if kind.endswith("_call"):
             fields = (item.get(key) for key in ("name", "arguments", "input", "action"))
             return Item(Kind.TOOL_CALL, " ".join(_string(value) for value in fields if value))
@@ -110,6 +112,9 @@ class OpenAIResponses:
         if kind == "message" and wire.get("role") != "assistant":
             return {**wire, "content": _content(text, media)}
         if kind.endswith("_output"):
+            output = wire.get("output")
+            if isinstance(output, list) and media == _content_text(output)[1] and (kept := _kept(output, text)):
+                return {**wire, "output": kept}
             return {**wire, "output": _content(text, media) if media else text}
         raise ValueError(f"the content of a {kind} item cannot change on its own")
 
@@ -210,7 +215,7 @@ def _content_text(content: Any) -> tuple[str, tuple[Media, ...]]:
         if not isinstance(part, dict):
             continue
         kind = part.get("type")
-        if kind in _TEXT_PARTS and isinstance(part.get("text"), str):
+        if _is_text(part):
             texts.append(part["text"])
         elif kind == "input_image":
             image = data_media("image", part.get("image_url") or part.get("file_id") or "")
@@ -225,6 +230,30 @@ def _content_text(content: Any) -> tuple[str, tuple[Media, ...]]:
         else:
             media.append(Media(str(kind), extra=extra(part)))
     return "\n".join(texts), tuple(media)
+
+
+def _is_text(part: Any) -> bool:
+    return isinstance(part, dict) and part.get("type") in _TEXT_PARTS and isinstance(part.get("text"), str)
+
+
+def _kept(output: list[Any], text: str) -> list[Any] | None:
+    """A list output given `text` as its text, in its parts: those whose text `text` keeps, from the
+    start and from the end, stay as they were, and what is between them goes in the first part
+    between, the others between dropped (a strategy that changes the parts one by one changes one
+    there). None where the output has no text part."""
+
+    at = [n for n, part in enumerate(output) if _is_text(part)]
+    old = [output[n]["text"] for n in at]
+    a = b = 0
+    while a < len(old) - 1 and text.startswith("".join(f"{o}\n" for o in old[:a + 1])):
+        a += 1
+    head = sum(len(o) + 1 for o in old[:a])
+    while a + b < len(old) - 1 and text[head:].endswith("".join(f"\n{o}" for o in old[len(old) - b - 1:])):
+        b += 1
+    tail = sum(len(o) + 1 for o in old[len(old) - b:])
+    dropped = set(at[a + 1:len(at) - b])
+    return [{**part, "text": text[head:len(text) - tail]} if n == at[a] else part
+            for n, part in enumerate(output) if n not in dropped] if at else None
 
 
 def _content(text: str, media: tuple[Media, ...]) -> list[dict[str, Any]]:

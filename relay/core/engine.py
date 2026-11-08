@@ -257,6 +257,7 @@ class Engine:
             name,
             codec.offers_tools(body),
             sendable,
+            model=body.get("model") or "",
         )
         leading = next((n for n, item in enumerate(items) if item.kind not in CONTEXT_KINDS), len(items))
 

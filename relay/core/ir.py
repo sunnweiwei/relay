@@ -61,6 +61,9 @@ class Item:
     opaque: int = 0  # bytes of opaque content the model reads (encrypted reasoning, ...), decoded
     opaque_key: str = ""  # digest only; links reasoning to previously observed provider usage
     token_structure: str | None = None  # structured declarations; count decoded fields, not JSON escaping
+    # A tool result given as a list of parts: the text of each (`text` joins them with newlines), so a
+    # strategy can change each on its own (the codec keeps the parts whose text the new text keeps).
+    parts: tuple[str, ...] = field(default=(), compare=False)
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,7 @@ class Request:
     # result is gone, new text for a call) told as a note. Relay applies it to every answer.
     sendable: Callable[[tuple[Item, ...]], tuple[Item, ...]] = field(default=lambda items: items, repr=False,
                                                                      compare=False)
+    model: str = ""  # the model the request names
 
 
 def note(role: str, text: str) -> Item:
