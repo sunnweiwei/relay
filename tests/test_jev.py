@@ -64,7 +64,7 @@ class JevTests(unittest.TestCase):
         self.assertEqual(state["history"][:2], [
             {"i": 0, "role": "user", "text": "fix the bug"},
             {"i": 1, "role": "assistant", "text": "",
-             "tool_calls": [{"id": "t1", "tool": "sh", "input": '{"cmd":"cat f1.py"}', "result": "2000 chars (omitted)"}]}])
+             "tool_calls": [{"id": "t1", "tool": "sh", "input": '{"cmd":"cat f1.py"}', "result": "ok, 2000 chars (omitted)"}]}])
         self.assertEqual(len(state["history"]), 7)  # (the messages of results alone say nothing more)
         # The first message and the newest six (the last three calls with their results) are pinned.
         self.assertEqual(sorted(questions), ["call_t1", "call_t2", "call_t3", "result_t1", "result_t2", "result_t3"])
@@ -90,15 +90,26 @@ class JevTests(unittest.TestCase):
         head = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">II", 1920, 1080) + b"\x08\x02\x00\x00\x00"
         screen = {"type": "input_image", "image_url": "data:image/png;base64," + base64.b64encode(head).decode()}
         shots = [item for i in range(1, 7) for item in run(i, "click", "")]
-        for item in shots[1::2]:
-            item["output"] = [{"type": "input_text", "text": "clicked"}, screen]
+        for item in shots[1::2]:  # (a reduction counts characters, as the library's does: not the images)
+            item["output"] = [{"type": "input_text", "text": "clicked " + "z" * 2000}, screen]
         ask = FakeJev(result_t2=0.1, result_t3=0.1)
         sent = self.send(jev(ask), [msg("user", "save the file"), *shots])
         self.assertFalse(any(SUMMARY_PREFIX in CODEC.classify(item).text for item in sent))
         (truncated,) = [item for item in sent if item.get("call_id") == "c2" and item["type"] == "function_call_output"]
         self.assertNotIn(screen["image_url"], json.dumps(truncated))
-        self.assertIn("truncated 1 image of this tool result", json.dumps(truncated))
-        self.assertIn("7 chars and 1 image (omitted)", json.dumps(ask.asked[0][0]))
+        self.assertIn("chars and 1 image of this tool result", json.dumps(truncated))
+        self.assertIn("ok, 2008 chars and 1 image (omitted)", json.dumps(ask.asked[0][0]))
+
+    def test_at_the_trigger_when_a_turn_starts_and_mid_turn_where_the_harness_compacts(self) -> None:
+        def strategy(ask: Any) -> Jev:
+            return Jev(trigger=Compaction(threshold=1000), fallback=Compaction(threshold=10**6), ask=ask)
+
+        history = [msg("user", "fix the bug"), *steps(6)]
+        ask = FakeJev()
+        self.send(strategy(ask), history)  # (mid-turn, past the trigger but short of the harness's threshold)
+        self.assertEqual(ask.asked, [])
+        self.send(strategy(ask), [*history, msg("assistant", "done"), msg("user", "and the tests?")])
+        self.assertEqual(len(ask.asked), 1)
 
     def test_freeing_less_than_a_quarter_is_compaction_instead(self) -> None:
         sent = self.send(jev(FakeJev()), [msg("user", "fix the bug"), *steps(6)])
@@ -136,8 +147,8 @@ class JevTests(unittest.TestCase):
         sent = self.send(jev(ask), history, AnthropicMessages())
         state, questions = ask.asked[0]
         self.assertEqual(state["history"][1], {"i": 1, "role": "assistant", "text": "Files 1.", "tool_calls": [
-            {"id": "t1", "tool": "Read", "input": '{"file_path":"1a.py"}', "result": "4001 chars (omitted)"},
-            {"id": "t2", "tool": "Read", "input": '{"file_path":"1b.py"}', "result": "4001 chars (omitted)"}]})
+            {"id": "t1", "tool": "Read", "input": '{"file_path":"1a.py"}', "result": "ok, 4001 chars (omitted)"},
+            {"id": "t2", "tool": "Read", "input": '{"file_path":"1b.py"}', "result": "ok, 4001 chars (omitted)"}]})
         self.assertEqual(len(questions), 16)  # (the last three responses, pinned, are not asked about)
         self.assertEqual(sent, [*history[:3], *history[9:]])  # each of the three gone with its text
 
@@ -146,7 +157,7 @@ class JevTests(unittest.TestCase):
         long = [msg("user", "fix the bug " + "x" * 3000), *steps(4), msg("assistant", "y" * 3000), msg("user", "next"), *steps(3)]
         self.send(jev(ask, state_tokens=900), long)
         state = ask.asked[0][0]
-        self.assertLessEqual(_tokens(json.dumps(state, separators=(",", ":"))), 900)
+        self.assertLessEqual(_tokens(json.dumps(state, separators=(",", ":"))), 910)  # (the library's estimate: entry by entry)
         texts = [entry["text"] for entry in state["history"]]
         self.assertTrue(any("chars omitted …]" in text for text in texts))
         self.assertEqual(state["history"][0]["text"][:16], "fix the bug xxxx")  # (the first message, pinned, abridged last)

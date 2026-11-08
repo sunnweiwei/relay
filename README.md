@@ -596,16 +596,19 @@ probabilities and writes no text, decides which tool calls and results are still
 rest of the conversation stays verbatim, in order. It follows the library and its Claude Code
 plugin as they are:
 
-- when the context reaches 60% of the window (the plugin's `compactAtPercent`; `compact_ratio`, or
-  the other `compaction` triggers), every tool call outside the first message and the newest six gets
+- when a user turn starts with the conversation before it at 60% of the window (the plugin's
+  `compactAtPercent`, which it checks when a turn has ended; `compact_ratio`, or the other
+  `compaction` triggers), and mid-turn where the harness would compact (`compaction`'s own
+  threshold, whose summary the plugin replaces with Jev), every tool call outside the first message and the newest six gets
   the library's two `noul` questions: should the call stay, and should its result stay verbatim;
 - Jev's state is the whole conversation, oldest first, each result told by its size and long texts
   abridged, shrunk in the library's stages to 25k tokens; the questions go in as many requests as fit
   30k beside it, at once;
 - a call whose result Jev keeps (0.5 or more) stays as it is; one whose call it keeps keeps the
   first 300 characters of its result and the library's note (its images go too, and the note says
-  so); the others go, with their results. A result's images are part of its size as Jev is told it,
-  and of the share freed, which is counted in tokens;
+  so); the others go, with their results. A result's images are part of its size as Jev is told it;
+  the share freed is counted in characters, as the library counts it (the messages' text, the calls'
+  inputs and the results' text, not thinking or images);
 - where Jev cannot answer (no key, an error, a history it cannot fit) or the result frees less than
   a quarter of the conversation (as the library counts it: not the harness's instructions and tools),
   `compaction` compacts it then, as the plugin falls back to Claude Code's own summary. Relay's log
@@ -614,11 +617,11 @@ plugin as they are:
 Relay sees a model response's calls and their results as one cut of the conversation (an Anthropic
 message holds all of a response's results), so a response's calls are kept or dropped together, as
 much as the one of them Jev keeps most; where the protocol writes the model's text (and thinking)
-in the message of its calls (Anthropic, Chat Completions, Gemini), it goes with them. A result is
-told to Jev by its size alone, without the library's `ok` or `error`, which Relay cannot tell.
-The state, the questions and their batches are the library's: run on the same conversations,
+in the message of its calls (Anthropic, Chat Completions, Gemini), it goes with them. Relay cannot
+tell whether a result was an error, so each is `ok`, as the library tells one whose flag it does not
+know. The state, the questions and their batches are the library's: run on the same conversations,
 fast-jev-compaction's own code and Relay's give the same state at each stage, the same token
-estimates and the same batches, but for the `ok` (checked against its commit e3f262a).
+estimates and the same batches (checked against its commit e3f262a).
 
 Jev is TypeSafe's API (`relay set jev_api_key=...`, or `TYPESAFE_API_KEY`), or OpenRouter's, with
 the same requests (`jev_url`, `jev_model`; see [Configuration](#configuration)). What Jev reads (the

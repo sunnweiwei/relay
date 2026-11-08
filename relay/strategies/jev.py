@@ -3,22 +3,24 @@ compaction that deletes and never summarizes. TypeSafe's Jev, a model that answe
 with probabilities and writes no text, decides which tool calls and results the conversation still
 needs; everything else stays verbatim, in order.
 
-As its Claude Code plugin does it: when the context reaches 60% of the window (`compactAtPercent`),
-every tool call outside the first message and the newest six (`preserveRecentMessages`) gets two
+As its Claude Code plugin does it: when a turn starts with the context at 60% of the window
+(`compactAtPercent`, which the plugin checks when a turn has ended), and mid-turn where the harness
+would compact (`compaction`'s threshold, whose summary the plugin replaces), every tool call outside the first message and the newest six (`preserveRecentMessages`) gets two
 `noul` questions, whether the call should stay and whether its result should stay verbatim. A call
 whose result Jev keeps (probability 0.5 or more) stays as it is; one whose call it keeps keeps the
 first 300 characters of its result and a note; the others go with their results. Jev's state is the
 whole conversation, each result told by its size, shrunk in the library's stages to 25k tokens; the
 questions go in as many requests as fit 30k beside it, at once. Where Jev cannot be asked (no key,
-an error, a history that cannot be fitted) or frees less than a quarter of the context, `compaction`
+an error, a history that cannot be fitted) or frees less than a quarter of the context (in characters
+of the messages' text, the calls' inputs and the results', as the library counts), `compaction`
 compacts it then, as the plugin falls back to Claude Code's own summary. Messages count as Claude
 Code's do: a model response, the results answering it, and each other message.
 
 Where Relay sits makes two differences. A model response's calls and their results are one cut of
 the conversation for Relay (an Anthropic message holds all of a response's results), so its calls
 are kept or dropped together: each is asked about, and the response keeps what any of them is kept
-for. And a result is told by its size alone (`N chars (omitted)`), not as `ok` or `error`: Relay does
-not see whether it was an error. Where the protocol writes the model's text (and its thinking) in the
+for. And Relay does not see whether a result was an error: each is `ok`, as the library tells one it
+does not know of. Where the protocol writes the model's text (and its thinking) in the
 message of its calls (Anthropic, Chat Completions, Gemini), that message goes with them. Jev is TypeSafe's API (`jev_api_key`, else TYPESAFE_API_KEY), or OpenRouter's
 (`jev_url=https://openrouter.ai/api/alpha/decisions`, `jev_model=~typesafe/jev-latest`).
 """
@@ -56,6 +58,7 @@ KEEP_CALL = ("Tool call {id} ({tool}) should stay in the history: knowing this c
              "matters for what the assistant does next")
 KEEP_RESULT = ("The full output of tool call {id} ({tool}, {chars} chars) should stay in the history verbatim: the "
                "assistant still needs its contents and re-running the tool would not do")
+COUNTED = frozenset({Kind.USER, Kind.ASSISTANT, Kind.SUMMARY, Kind.TOOL_CALL, Kind.TOOL_RESULT})
 TRUNCATED = "[fast-jev-compaction truncated {what} of this tool result; re-run the tool if needed]"
 INPUT_CHARS = (1000, 200, 60)  # successive caps on a call's input in the state
 TEXT_HEAD, TEXT_TAIL = 400, 150
@@ -109,16 +112,16 @@ class Jev:
                 "model": self.model, "context": STATE_CONTEXT}
 
     def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
-        if not request.tools or not (request.force or self.trigger.due(request)[0]):
+        if not request.tools or not (request.force or self._due(request)):
             return None
         try:
             items, stats = self._compact(request)
         except Exception as error:  # (as the plugin: whatever went wrong, the summary instead)
             log.warning("jev: fallback to compaction (%s)", error)
             return self.fallback.plan(replace(request, force=True), summarizer)
-        # (of the conversation, as the library's messages: not the harness's instructions and tools,
-        # which Codex declares among the items, and nothing compacts)
-        size = lambda kept: sum(item_tokens(item) for item in kept if item.kind is not Kind.SYSTEM)  # noqa: E731
+        # (the library's `messageChars`: the messages' text, the calls' inputs and the results' text;
+        # not the harness's instructions and tools, which Codex declares among the items, nor thinking or media)
+        size = lambda kept: sum(len(item.text) for item in kept if item.kind in COUNTED)  # noqa: E731
         before = size(request.current)
         reduction = (before - size(items)) / before if before else 0.0
         log.info("jev: %d%% reduction; %s", round(reduction * 100), stats)
@@ -126,6 +129,17 @@ class Jev:
             log.info("jev: fallback to compaction (below %d%% minimum)", round(self.min_reduction * 100))
             return self.fallback.plan(replace(request, force=True), summarizer)
         return Context(items)
+
+    def _due(self, request: Request) -> bool:
+        """At the trigger when a user turn starts (its history before the turn), as the plugin checks
+        when a turn has ended; mid-turn, where the harness compacts."""
+
+        items = request.current
+        last = max((n for n, item in enumerate(items) if item.kind in RESPONSE), default=None)
+        if last is not None and any(item.kind is Kind.USER for item in items[last + 1:]):
+            before = request.tokens - sum(map(item_tokens, items[last + 1:]))
+            return self.trigger.due(replace(request, tokens=before))[0]
+        return self.fallback.due(request)[0]
 
     def _compact(self, request: Request) -> tuple[tuple[Item, ...], str]:
         items = request.current
@@ -193,7 +207,7 @@ class Jev:
             history = []
             for i, members in enumerate(messages):
                 own = [{"id": c.id, "tool": c.tool, "input": _truncate(_input(c.input), limit),
-                        "result": f"{_described(c.chars, c.media)} (omitted)"} for c in by_message.get(i, [])]
+                        "result": f"ok, {_described(c.chars, c.media)} (omitted)"} for c in by_message.get(i, [])]
                 if texts[i].strip() or own:
                     history.append({"i": i, "role": _role(items, members), "text": texts[i], **({"tool_calls": own} if own else {})})
             return history
@@ -368,7 +382,7 @@ def _line(call: _Call) -> str:
                         for key, value in call.input.items())
     else:
         text = _input(call.input)
-    return f"{call.id} {call.tool} {_truncate(SPACES.sub(' ', text), INPUT_CHARS[-1])} → {call.chars}ch"
+    return f"{call.id} {call.tool} {_truncate(SPACES.sub(' ', text), INPUT_CHARS[-1])} → ok {call.chars}ch"
 
 
 def _input(value: Any) -> str:
