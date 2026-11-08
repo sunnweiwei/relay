@@ -406,9 +406,9 @@ compaction per conversation, matched by its own history. A sub-agent forked from
 parent's history (Codex `fork_turns`) extends the parent's prefix and so starts from the
 parent's compaction.
 
-Deliberate differences from Codex: a compaction that would free less than
-`compact_min_gain` of the threshold is skipped, so a threshold set close to the
-fixed prompt overhead (system prompt and tools) does not trigger a summary on every
+Deliberate differences from Codex: with `compact_min_gain` set (off by default, as in Codex), a
+compaction that would free less than that share of the threshold is skipped, so a threshold set
+close to the fixed prompt overhead (system prompt and tools) does not trigger a summary on every
 request; the summary request keeps the tool definitions with tool calls disabled
 (Anthropic rejects tool history without them) where Codex sends none; a history too long
 for one summary request is summarized piece by piece instead of dropping its oldest items;
@@ -794,7 +794,7 @@ starts, and `relay set` restarts the service for them.
 | `clm_steering` | unset | CLM: a file holding a context-management policy in words, added to the model's guidance (see `tests/docker/steering/`). |
 | `clm_nudges` | `on` | CLM: `off` drops the budget nudges (the size readout stays), as in the paper's steering runs. |
 | `clm_guard` | `on` | CLM: pi-clm's overflow guard. A request past the budget less the reserve has the oldest tool results since the model's last accepted edit replaced, one by one, by a note naming a file with the full text, until it fits. `off` leaves the budget to the model, as the size readout and nudges ask. |
-| `compact_min_gain` | `0.1` | Skip compactions that free less than this share of the threshold (or growth). |
+| `compact_min_gain` | `0` | Skip compactions that free less than this share of the threshold (or growth). |
 | `openai_base_url` | `https://api.openai.com/v1` | Upstream for the Responses API. |
 | `anthropic_base_url` | `https://api.anthropic.com` | Upstream for the Messages API. |
 | `openai_api_key`, `anthropic_api_key` | unset | Replace the harness's credentials for that upstream. |

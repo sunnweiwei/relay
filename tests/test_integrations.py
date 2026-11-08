@@ -324,7 +324,7 @@ class ClaudeCodeCompactTests(unittest.TestCase):
         self.assertNotIn("notice", same)
 
     def test_the_instructions_are_the_strategys_own(self) -> None:
-        self.assertIn("internal state", ClaudeCodeHook().instructions(Engine(MEM1())))
+        self.assertIn("<IS>", ClaudeCodeHook().instructions(Engine(MEM1())))
         self.assertIn("branch", ClaudeCodeHook().instructions(Engine(ContextFolding())).lower())
         self.assertEqual(ClaudeCodeHook().instructions(Engine(Compaction())), "")
 

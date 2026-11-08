@@ -5,16 +5,18 @@ since the window began; 95% of the window always triggers), the conversation is
 summarized with Codex's prompt and replaced like Codex's replacement history: the newest
 user messages within `retain_user_tokens` (newest first; the oldest one kept may be
 truncated) and the summary last. Mid-turn (the request ends with tool results) all of it
-is summarized; at the start of a turn the summary covers everything before the new turn,
-which stays verbatim. The harness's own context is not the strategy's concern: the harness
-profile puts its current state into the result (Codex: above the last user message kept). A compaction that would free less than
-`min_gain` of the budget is skipped, so a threshold set too close to the fixed prompt
-overhead cannot trigger a summary on every request.
+is summarized; at the start of a turn, as Codex checks the threshold before the new user
+message is recorded, the history before the turn must reach it, and the summary covers that
+history while the new turn stays verbatim. The harness's own context is not the strategy's concern: the harness
+profile puts its current state into the result (Codex: above the last user message kept). With
+`min_gain` set (off, as in Codex), a compaction that would free less than that share of the
+budget is skipped, so a threshold set too close to the fixed prompt overhead cannot trigger a
+summary on every request.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ..core.ir import AGENT_KINDS, Context, Item, Kind, Request
@@ -33,7 +35,7 @@ class Compaction:
     growth: int | None = None  # or: tokens added since the window began (Codex's BodyAfterPrefix)
     ratio: float = 0.9  # Codex's auto_compact_token_limit: 90% of the window
     retain_user_tokens: int = 20_000  # COMPACT_USER_MESSAGE_MAX_TOKENS in Codex
-    min_gain: float = 0.1  # skip unless at least this share of the threshold is freed
+    min_gain: float = 0.0  # skip unless at least this share of the threshold is freed
     name: str = "compaction"
 
     def __post_init__(self) -> None:
@@ -56,7 +58,7 @@ class Compaction:
             growth=int(growth) if growth else None,
             ratio=float(settings.value("compact_ratio", "0.9")),
             retain_user_tokens=int(settings.value("retain_user_tokens", "20000")),
-            min_gain=float(settings.value("compact_min_gain", "0.1")),
+            min_gain=float(settings.value("compact_min_gain", "0")),
         )
 
     def fingerprint(self) -> dict[str, Any]:
@@ -90,6 +92,10 @@ class Compaction:
         cut = summary_cut(request)
         if cut is None:
             return None
+        if not request.force and cut < len(request.current):  # (a turn starts: the history before it decides)
+            before = request.tokens - sum(map(item_tokens, request.current[cut:]))
+            if not self.due(replace(request, tokens=before))[0]:
+                return None
         items = request.current[:cut]
         users = self._recent_users(items)
         freed = sum(map(item_tokens, items)) - sum(map(item_tokens, users))
