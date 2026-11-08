@@ -349,6 +349,10 @@ class MEM1Tests(unittest.TestCase):
     def test_the_first_step_sees_the_prompt_and_the_task(self) -> None:
         self.assertEqual(MEM1().plan(request(TASK), Scripted()).items, (Item(Kind.USER, GUIDANCE + "read the files", 1),))
 
+    def test_the_prompt_goes_in_once(self) -> None:  # (the context as last sent comes back with it)
+        sent = MEM1().plan(request(TASK, *step(1)), Scripted()).items
+        self.assertEqual(MEM1().plan(request(*sent, *step(2)), Scripted()).items[0].text, GUIDANCE + "read the files")
+
 
 if __name__ == "__main__":
     unittest.main()

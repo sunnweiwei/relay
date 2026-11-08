@@ -54,4 +54,6 @@ class MEM1:
         first = next((n for n, item in enumerate(items) if item.kind is Kind.USER), None)
         if first is None:
             return Context((Item(Kind.SYSTEM, GUIDANCE.strip()), *items))
+        if items[first].text.startswith(GUIDANCE):  # (the context as last sent: the prompt is there already)
+            return Context(items)
         return Context((*items[:first], replace(items[first], text=GUIDANCE + items[first].text), *items[first + 1:]))
