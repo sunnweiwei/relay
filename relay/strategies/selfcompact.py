@@ -7,8 +7,10 @@ STUCK; only C1 = C2 = C3 = Y and N1 = N fires the summarizer, also appended to t
 with the question, and the summary then replaces the trajectory as Self-Compact's agent replaces it
 (`agent.py`, `summarize`): what is left is the question, the summary as the assistant's ("Here is
 my research so far:"), and the user's "continue". The release answers one question, its only user
-message; in a conversation the question is all the user has said, so every user message stays, in
-order, and the summarizer is given them all (with one, exactly the release's). A CONTINUE verdict
+message; in a conversation the question is what the user has said: the first message stays whole,
+as the release keeps its question, and the later ones as Codex keeps a user's messages through a
+compaction, newest first within `user_tokens` (the oldest kept cut in the middle), and the summarizer
+is given those (with one user message, exactly the release's). A CONTINUE verdict
 leaves the conversation as it was. As the release gates it (`selfcheck_min_round`,
 `selfcheck_min_tokens`, `selfcheck_period`), probes come once the conversation has `min_round` model
 responses and the prompt `gate` of the budget (the release's 40,000 tokens of its 108,000, as a share,
@@ -27,7 +29,7 @@ from typing import Any
 
 from ..core.ir import Context, Item, Kind, Request
 from .base import Summarizer
-from .compaction import DEFAULT_WINDOW, HARD_LIMIT, summary_cut
+from .compaction import DEFAULT_WINDOW, HARD_LIMIT, Compaction, summary_cut
 from .conversation import responses
 
 RUBRIC = """You are about to decide whether to compress your conversation history into a summary that REPLACES the full history above. After compression, you continue research from only [system, original_question, assistant_summary, user_continue]. Compression is irreversible: anything not preserved in the summary is gone.
@@ -97,6 +99,7 @@ class SelfCompact:
     budget: int | None = None  # tokens; None: the model's context window
     gate: float = 40_000 / 108_000  # probe once the prompt passes this share of the budget
     min_round: int = 3  # and the conversation has this many model responses
+    user_tokens: int = 20_000  # the later user messages kept, as Codex's COMPACT_USER_MESSAGE_MAX_TOKENS
     period: int = 2  # every this many model responses since the last summary
     backstop: float = HARD_LIMIT  # summarize without asking past this share
     name: str = "selfcompact"
@@ -106,7 +109,7 @@ class SelfCompact:
         return cls()
 
     def fingerprint(self) -> dict[str, Any]:
-        return {"name": self.name, "budget": self.budget, "gate": self.gate, "min_round": self.min_round,
+        return {"name": self.name, "budget": self.budget, "gate": self.gate, "min_round": self.min_round, "user_tokens": self.user_tokens,
                 "period": self.period,
                 "backstop": self.backstop, "rubric": RUBRIC, "summarizer": SUMMARIZER}
 
@@ -124,7 +127,8 @@ class SelfCompact:
             return None
         if not forced and not _fires(summarizer.summarize(cut, RUBRIC)):
             return None
-        users = tuple(item for item in items[:cut] if item.kind is Kind.USER and item.text != CONTINUE)
+        asked = tuple(item for item in items[:cut] if item.kind is Kind.USER and item.text != CONTINUE)
+        users = (*asked[:1], *Compaction(retain_user_tokens=self.user_tokens)._recent_users(asked[1:]))
         answer = summarizer.summarize(cut, SUMMARIZER + QUESTION.format(question="\n\n".join(u.text for u in users)))
         summary = (found.group(1) if (found := SUMMARY.search(answer)) else answer).strip()
         if not summary:

@@ -83,6 +83,16 @@ class SelfCompactTests(unittest.TestCase):
         again = self.strategy.plan(request(*context.items, new, *step(5), *step(6), tokens=4_000), Scripted(FIRE, "S2"))
         self.assertEqual(again.items, (TASK, later, new, Item(Kind.ASSISTANT, RESEARCH + "S2"), Item(Kind.USER, CONTINUE)))
 
+    def test_later_user_messages_kept_as_codex_keeps_them(self) -> None:
+        big = [Item(Kind.USER, f"turn {n} " + "x" * 400, 20 + n) for n in range(4)]
+        items = (TASK, *step(1), big[0], *step(2), big[1], *step(3), big[2], *step(4), big[3])
+        strategy = SelfCompact(user_tokens=250)  # (room for two of the later ones and part of a third)
+        context = strategy.plan(request(*items, *step(5), *step(6), tokens=4_000), Scripted(FIRE, "S"))
+        first, cut, *newest = context.items[:4]
+        self.assertEqual((first, newest), (TASK, [big[2], big[3]]))  # (the first whole, then the newest)
+        self.assertTrue(cut.text.startswith("turn 1") and len(cut.text) < len(big[1].text))  # (the oldest kept, cut)
+        self.assertNotIn(big[0].text, [item.text for item in context.items])
+
     def test_stuck_or_unproven_does_not_fire(self) -> None:
         for answer in ("C1: Y\nC2: Y\nC3: Y\nN1: Y -- duplicates", "C1: Y\nC2: Y\nN1: N"):
             self.assertIsNone(self.strategy.plan(request(TASK, *(i for n in range(1, 5) for i in step(n)), tokens=4_000),
