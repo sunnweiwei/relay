@@ -10,10 +10,11 @@ from typing import Any
 
 from relay.core.engine import Engine
 from relay.core.ir import Item, Kind, Media, Request
+from relay.core.tokens import item_tokens
 from relay.harnesses import Harness
 from relay.protocols import Gemini, OpenAIChat, OpenAIResponses
 from relay.strategies import ACM, MEM1, AutoCompact, Compaction, SelfCompact
-from relay.strategies.acm import NOTHING, QUERY_MEMORY_PROMPT, SUMMARY_INSTRUCTION
+from relay.strategies.acm import QUERY_MEMORY_PROMPT, RESERVE, STOP_PROMPT, SUMMARY_INSTRUCTION
 from relay.strategies.autocompact import PROMPT
 from relay.strategies.mem1 import GUIDANCE
 from relay.strategies.conversation import IGNORED
@@ -35,8 +36,10 @@ class Scripted:
         return self.answers.pop(0)
 
 
-def request(*items: Item, tokens: int = 1_000, window: int | None = 10_000, conversation: str = "c") -> Request:
-    return Request(items, items, frozenset(range(len(items) + 1)), tokens, window, conversation=conversation)
+def request(*items: Item, tokens: int = 1_000, window: int | None = 10_000, conversation: str = "c",
+            history: tuple[Item, ...] | None = None) -> Request:
+    return Request(items if history is None else history, items, frozenset(range(len(items) + 1)), tokens, window,
+                   conversation=conversation)
 
 
 def step(i: int, command: str = "", output: str = "", say: str = "") -> list[Item]:
@@ -128,49 +131,66 @@ class ACMTests(unittest.TestCase):
         self.directory = tempfile.mkdtemp()
         self.strategy = ACM(self.directory)
 
-    def test_manage_context_compresses_since_the_last_call_and_saves_the_originals(self) -> None:
-        manage = step(3, 'echo "[manage_context]"', "[manage_context]")
+    def saved(self, number: int = 1) -> list[dict[str, Any]]:
+        return json.loads((Path(self.directory) / "c" / f"summary_{number}.json").read_text())
+
+    def test_manage_context_compresses_through_the_call_and_only_the_summary_stays(self) -> None:
+        manage = [Item(Kind.REASONING, "file_1 and file_2 are read; time to compress", 403),
+                  *step(3, 'echo "[manage_context]"', "[manage_context]", say="Compressing the reads.")]
         items = (TASK, *step(1), *step(2), *manage)
         summarizer = Scripted("<think>plan</think><memory>## Knowledge state\nfile_1: c1, file_2: c2 (both read in full)</memory>")
         context = self.strategy.plan(request(*items), summarizer)
-        _, prompt = summarizer.calls[0]
-        self.assertEqual(summarizer.calls[0][0], 0)
-        self.assertTrue(prompt.startswith("Original question: read the files"))
-        self.assertIn("[tool] file 2 text\nCODE: c2", prompt)
+        (how, (asked,)), = summarizer.calls  # one user message alone: no system prompt, no tools
+        self.assertEqual((how, asked.kind), ("complete", Kind.USER))
+        prompt = asked.text
+        self.assertTrue(prompt.startswith("Original question: read the files\n\nConversation to compress:\n\n[tool] file 1 text"))
+        self.assertIn("[tool] file 2 text\nCODE: c2\n\n[assistant] Compressing the reads.\n\nCompress the conversation", prompt)
+        for hidden in ("cat file_1.txt", "manage_context]", "time to compress", "[tool_call]", "[reasoning]"):
+            self.assertNotIn(hidden, prompt)  # `[role] content`: no calls, no reasoning
         self.assertEqual(prompt.split("Conversation to compress:")[1][-200:], SUMMARY_INSTRUCTION[-200:])
-        guidance, *kept = context.items
-        self.assertIn("manage_context", guidance.text)
-        self.assertEqual(kept[:2], [TASK, manage[0]])
-        self.assertEqual(kept[2].text, "[summary_id: 1] ## Knowledge state\nfile_1: c1, file_2: c2 (both read in full)")
-        self.assertEqual(kept[2].ref, manage[1].ref)  # still the call's own result
-        saved = json.loads((Path(self.directory) / "c" / "summary_1.json").read_text())
-        self.assertEqual([m["role"] for m in saved], ["tool_call", "tool", "tool_call", "tool"])
-        self.assertTrue(context.notes[0].startswith("[CURRENT CONTEXT TOKEN: "))
+        guidance, task, summary = context.items  # the calling response and its result went with the range
+        self.assertIn('`echo "[manage_context]"`', guidance.text)
+        self.assertEqual(task, TASK)
+        text = "[summary_id: 1] ## Knowledge state\nfile_1: c1, file_2: c2 (both read in full)"
+        tokens = 1_000 - sum(map(item_tokens, items[1:])) + item_tokens(Item(Kind.USER, text))
+        self.assertEqual(summary, Item(Kind.USER, f"{text}\n\n[CURRENT CONTEXT TOKEN: {tokens + RESERVE}]"))
+        self.assertEqual(context.notes, ())
+        self.assertEqual([m["role"] for m in self.saved()], ["tool_call", "tool", "tool_call", "tool", "reasoning", "assistant",
+                                                             "tool_call"])
 
         # The next call compresses only what came after the summary; a summary is never compressed again.
         again = step(5, 'echo "[manage_context]"', "[manage_context]")
         summarizer = Scripted("<memory>" + "file_4: c4 read in full, nothing else found so far." + "</memory>")
-        later = self.strategy.plan(request(*kept, *step(4), *again), summarizer).items[1:]
-        self.assertEqual(list(later[:3]), kept)
-        self.assertTrue(later[-1].text.startswith("[summary_id: 2] file_4: c4"))
-        self.assertNotIn("CODE: c1", summarizer.calls[0][1])
+        later = self.strategy.plan(request(*context.items[1:], *step(4), *again), summarizer).items[1:]
+        self.assertEqual(later[:2], (TASK, Item(Kind.USER, text)))  # (its marker gone: the last summary has it)
+        self.assertTrue(later[2].text.startswith("[summary_id: 2] file_4: c4"))
+        self.assertTrue(later[2].text.endswith("]") and "[CURRENT CONTEXT TOKEN: " in later[2].text)
+        self.assertNotIn("CODE: c1", summarizer.calls[0][1][0].text)
+        self.assertNotIn("[CURRENT CONTEXT TOKEN", summarizer.calls[0][1][0].text)
 
-        # Nothing between two calls: ACM's error.
-        twice = step(6, 'echo "[manage_context]"', "[manage_context]")
-        self.assertEqual(self.strategy.plan(request(*later, *twice), Scripted()).items[-1].text, NOTHING)
+    def test_a_summary_without_a_clean_memory_block_is_asked_for_once_more(self) -> None:
+        manage = step(2, 'echo "[manage_context]"', "[manage_context]")
+        retried = Scripted("Here it is: file_1 holds c1",
+                           "<memory>file_1 holds CODE c1; it was read in full, nothing else.</memory>")
+        summary = self.strategy.plan(request(TASK, *step(1), *manage), retried).items[2]
+        self.assertEqual(len(retried.calls), 2)
+        self.assertTrue(summary.text.startswith("[summary_id: 1] file_1 holds CODE c1; it was read in full"))
+        twice = Scripted("<memory>short</memory>", "<memory>still short</memory>")  # (under 50 characters)
+        summary = self.strategy.plan(request(TASK, *step(1), *manage, conversation="d"), twice).items[2]
+        self.assertTrue(summary.text.startswith("[summary_id: 1] <memory>still short</memory>"))  # the last answer, whole
 
     def test_the_users_later_messages_are_compressed_too(self) -> None:
         later = Item(Kind.USER, "file_2 holds CODE c2", 9)
         manage = step(3, 'echo "[manage_context]"', "[manage_context]")
         summarizer = Scripted("<memory>The user said file_2 holds CODE c2; file_1 was read.</memory>")
         context = self.strategy.plan(request(TASK, *step(1), later, *step(2), *manage), summarizer)
-        _, task, *kept = context.items
-        self.assertEqual((task, kept[0]), (TASK, manage[0]))
-        self.assertNotIn(later, kept)
-        self.assertTrue(summarizer.calls[0][1].startswith("Original question: read the files\n"))
-        self.assertIn("[user] file_2 holds CODE c2", summarizer.calls[0][1])
-        saved = json.loads((Path(self.directory) / "c" / "summary_1.json").read_text())
-        self.assertEqual([m["role"] for m in saved], ["tool_call", "tool", "user", "tool_call", "tool"])
+        _, task, summary = context.items
+        self.assertEqual(task, TASK)
+        self.assertTrue(summary.text.startswith("[summary_id: 1] The user said"))
+        prompt = summarizer.calls[0][1][0].text
+        self.assertTrue(prompt.startswith("Original question: read the files\n"))
+        self.assertIn("[user] file_2 holds CODE c2", prompt)
+        self.assertEqual([m["role"] for m in self.saved()], ["tool_call", "tool", "user", "tool_call", "tool", "tool_call"])
 
     def test_a_ranges_images_go_to_the_summarizer_and_the_saved_originals(self) -> None:
         screen = Media("image", "image/png", "aGVsbG8=")
@@ -181,8 +201,7 @@ class ACMTests(unittest.TestCase):
         how, (sent,) = summarizer.calls[0]
         self.assertEqual((how, sent.kind, sent.media), ("complete", Kind.USER, (screen,)))
         self.assertIn("[tool] clicked [image 1]", sent.text)
-        saved = json.loads((Path(self.directory) / "c" / "summary_1.json").read_text())
-        self.assertEqual([Media(**m) for m in saved[-1]["media"]], [screen])
+        self.assertEqual([Media(**m) for m in next(m for m in self.saved() if "media" in m)["media"]], [screen])
 
         query = step(4, 'echo "[query_memory] 1 :: where is the save button"', "[query_memory] 1 :: where is the save button")
         summarizer = Scripted("bottom right")
@@ -193,43 +212,82 @@ class ACMTests(unittest.TestCase):
 
     def test_query_memory_recalls_from_the_saved_originals(self) -> None:
         manage = step(3, 'echo "[manage_context]"', "[manage_context]")
-        kept = self.strategy.plan(request(TASK, *step(1), *step(2), *manage), Scripted("<memory>short</memory>")).items[1:]
+        short = Scripted("<memory>file_1 and file_2 were read; their codes are in the files.</memory>")
+        kept = self.strategy.plan(request(TASK, *step(1), *step(2), *manage), short).items[1:]
         query = step(4, 'echo "[query_memory] 1 :: the CODE of file_2"', "[query_memory] 1 :: the CODE of file_2")
-        summarizer = Scripted("- **Relevant findings:** file_2 CODE: c2")
+        summarizer = Scripted("<think>file_2</think>\n- **Relevant findings:** file_2 CODE: c2")
         recalled = self.strategy.plan(request(*kept, *query), summarizer).items[-1]
-        self.assertEqual(recalled.text, "[query_memory: summary_id=1]\n\n- **Relevant findings:** file_2 CODE: c2")
-        cut, prompt = summarizer.calls[0]
-        self.assertEqual(cut, 0)
-        self.assertTrue(prompt.startswith("Saved messages under summary_id=1:"))
+        self.assertTrue(recalled.text.startswith("[query_memory: summary_id=1]\n\n- **Relevant findings:** file_2 CODE: c2\n\n"
+                                                 "[CURRENT CONTEXT TOKEN: "))
+        (how, (asked,)), = summarizer.calls
+        self.assertEqual(how, "complete")
+        prompt = asked.text
+        self.assertTrue(prompt.startswith("Saved messages under summary_id=1:\n\n[tool] file 1 text"))
         self.assertIn("CODE: c2", prompt)
+        self.assertNotIn("cat file_2.txt", prompt)
         self.assertIn("extract content relevant to: the CODE of file_2", prompt)
         self.assertEqual(prompt[-120:], QUERY_MEMORY_PROMPT.format(summary_id=1, history="", query="")[-120:])
         missing = step(5, 'echo "[query_memory] 7 :: x"', "[query_memory] 7 :: x")
-        self.assertEqual(self.strategy.plan(request(*kept, *missing), Scripted()).items[-1].text, "Error: summary_id 7 not found.")
+        self.assertTrue(self.strategy.plan(request(*kept, *missing), Scripted()).items[-1].text.startswith(
+            "Error: summary_id 7 not found.\n\n[CURRENT CONTEXT TOKEN: "))
 
-    def test_through_the_engine_the_rewrite_holds_and_the_marker_ends_the_request(self) -> None:
+    def test_the_marker_ends_the_last_tool_result_and_moves_on(self) -> None:
+        items = (TASK, *step(1), *step(2))
+        context = self.strategy.plan(request(*items, tokens=5_000), Scripted())
+        self.assertEqual(context.items[1:-1], items[:-1])
+        marked = f"{items[-1].text}\n\n[CURRENT CONTEXT TOKEN: {5_000 + RESERVE}]"
+        self.assertEqual(context.items[-1], Item(Kind.TOOL_RESULT, marked, items[-1].ref))
+        self.assertIn("Your context window is 10000 tokens.", context.items[0].text)
+        # A new user message: the marker stays on the last tool result, the previous one taken off.
+        echoed = step(3, output="text\n\n[CURRENT CONTEXT TOKEN: 7]")  # (a harness's own text ending so stays)
+        later = Item(Kind.USER, "and file_3?", 9)
+        harness = (*items, *echoed, later)
+        again = self.strategy.plan(request(*context.items[1:], *echoed, later, tokens=6_000, history=harness), Scripted())
+        self.assertEqual(again.items[1:-2], harness[:-2])
+        tokens = 6_000 - item_tokens(context.items[-1]) + item_tokens(items[-1])  # (the old marker no longer counts)
+        self.assertEqual(again.items[-2].text,
+                         f"text\n\n[CURRENT CONTEXT TOKEN: 7]\n\n[CURRENT CONTEXT TOKEN: {tokens + RESERVE}]")
+        self.assertEqual(again.items[-1], later)
+        self.assertNotIn("Your context window", self.strategy.plan(request(*items, window=None), Scripted()).items[0].text)
+
+    def test_from_95_percent_of_the_window_the_request_ends_with_the_stop_prompt(self) -> None:
+        items = (TASK, *step(1))
+        stopped = self.strategy.plan(request(*items, tokens=9_500), Scripted())
+        self.assertEqual((stopped.items[1:], stopped.notes), (items, (STOP_PROMPT,)))  # (no marker with it)
+        self.assertEqual(self.strategy.plan(request(*items, tokens=9_499), Scripted()).notes, ())
+
+    def test_through_the_engine_the_summary_holds_and_the_marker_moves(self) -> None:
         codec, engine = OpenAIResponses(), Engine(self.strategy)
+        asked: list[dict[str, Any]] = []
 
         def call(i: int, command: str, output: str) -> list[dict[str, Any]]:
             return [{"type": "function_call", "call_id": f"c{i}", "name": "sh", "arguments": json.dumps({"cmd": command})},
                     {"type": "function_call_output", "call_id": f"c{i}", "output": output}]
 
         def upstream(body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+            asked.append(body)
             return 200, {"status": "completed", "output": [{"type": "message", "role": "assistant", "content": [
                 {"type": "output_text", "text": "<memory>file_1 holds CODE c1; it was read in full, nothing else yet.</memory>"}]}]}
 
         history = [{"type": "message", "role": "user", "content": "read the files"}, *call(1, "cat file_1.txt", "CODE: c1"),
                    *call(2, 'echo "[manage_context]"', "[manage_context]")]
-        sent = engine.prepare(codec, Harness(), {"model": "m", "input": history, "tools": [{}]}, tenant="t", post=upstream)
+        body = {"model": "m", "instructions": "codex", "input": history, "tools": [{}]}
+        sent = engine.prepare(codec, Harness(), body, tenant="t", post=upstream)
+        (summary_request,) = asked  # ACM's: the prompt alone
+        self.assertEqual((summary_request["instructions"], len(summary_request["input"]), "tools" in summary_request),
+                         ("", 1, False))
         items = sent.body["input"]
         self.assertTrue(sent.compacted)
-        self.assertIn("## Context memory", json.dumps(items[0]))  # the guidance, as the system prompt
-        self.assertEqual([i.get("call_id") for i in items[2:4]], ["c2", "c2"])
-        self.assertTrue(items[3]["output"].startswith("[summary_id: 1] file_1 holds CODE c1"))
-        self.assertIn("[CURRENT CONTEXT TOKEN: ", json.dumps(items[-1]))
-        later = engine.prepare(codec, Harness(), {"model": "m", "input": [*history, *call(3, "ls", "file_1.txt")],
-                                                   "tools": [{}]}, tenant="t", post=upstream).body["input"]
-        self.assertEqual(later[:4], items[:4])
+        self.assertIn("## Context memory", sent.body["instructions"])  # the guidance, in the system prompt
+        self.assertEqual([i.get("role") for i in items], ["user", "user"])  # the question, then the summary
+        self.assertRegex(json.dumps(items[1]), r"\[summary_id: 1\] file_1 holds CODE c1.*\[CURRENT CONTEXT TOKEN: \d+\]")
+        later = engine.prepare(codec, Harness(), {**body, "input": [*history, *call(3, "ls", "file_1.txt")]},
+                               tenant="t", post=upstream).body["input"]
+        self.assertEqual(later[0], items[0])
+        self.assertNotIn("CURRENT CONTEXT TOKEN", json.dumps(later[1]))
+        self.assertEqual([i.get("call_id") for i in later[2:]], ["c3", "c3"])
+        self.assertRegex(later[3]["output"], r"^file_1.txt\n\n\[CURRENT CONTEXT TOKEN: \d+\]$")
+        self.assertEqual(len(asked), 1)
 
 
 class GeminiTests(unittest.TestCase):
@@ -257,7 +315,7 @@ class GeminiTests(unittest.TestCase):
             self.assertTrue(first.compacted)
             self.assertIn(mark, json.dumps(first.body["contents"][-1]))
             later = self.send(engine, *history, *self.shell("ls", "file_1.txt"), summary="never asked")
-            self.assertFalse(later.compacted)
+            self.assertEqual(later.compacted, strategy.name == "acm")  # (ACM moves its marker to the new result)
             self.assertNotIn("never asked", json.dumps(later.body))
 
 

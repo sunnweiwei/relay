@@ -43,6 +43,22 @@ def step(items: Sequence[Item], n: int) -> tuple[int, int, int] | None:
     return None
 
 
+def answered(items: Sequence[Item], n: int) -> list[tuple[str, Any]]:
+    """The calls the result at `n` answers, each its tool and input: the one in its place among its
+    response's calls, or all of them where one result answers them all (Anthropic Messages, Gemini)."""
+
+    first = end = n
+    while first and items[first - 1].kind is Kind.TOOL_RESULT:
+        first -= 1
+    while end < len(items) and items[end].kind is Kind.TOOL_RESULT:
+        end += 1
+    start = first
+    while start and items[start - 1].kind in RESPONSE:
+        start -= 1
+    found = [call for item in items[start:first] if item.kind is Kind.TOOL_CALL for call in calls(item.text)[0]]
+    return [found[n - first]] if len(found) == end - first else found
+
+
 def signalled(response: Sequence[Item], results: Sequence[Item], pattern: re.Pattern[str],
               whole: bool = False) -> tuple[str, str, int | None, bool] | None:
     """A shell call of a model response echoing a signal (`pattern`'s groups: its name, then its

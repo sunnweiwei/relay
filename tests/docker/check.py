@@ -1431,7 +1431,7 @@ def evaluate_prolong(name: str, home: Path) -> dict:
     types = {entry["type"] for entry in log}
     if not log:
         problems.append("no log")
-    elif missing := {"user_prompt", "tool_call", "tool_result", "assistant_message"} - types:
+    elif missing := {"session_start", "user_prompt", "tool_result", "assistant_message"} - types:
         problems.append(f"the log has no {sorted(missing)}")
     if log and not any("file 2 animal: otter" in t for t in texts):
         problems.append("file_2's text is not in the log")
@@ -1560,21 +1560,21 @@ def evaluate_autocompact(name: str, home: Path) -> dict:
 
 
 def evaluate_acm(name: str, home: Path) -> dict:
-    """Check a `--strategy acm` run: manage_context compressed the three reads (its echo answered by
-    "[summary_id: 1] ...", their originals saved), and from then on no request shows their text;
+    """Check a `--strategy acm` run: manage_context compressed the three reads (they and the echo gone,
+    "[summary_id: 1] ..." in their place, their originals saved), and from then on no request shows their text;
     query_memory recalled file_2's animal from the saved originals; every request after a tool
     result ends with the context size; the model has the CODEs and the animal."""
 
     trace, events, requests, answers = baseline_run(name, home)
     saved = sorted((home.parent / "project/.acm").glob("*/summary_1.json"))
-    first = next((n for n, r in enumerate(requests) if any(i.kind is Kind.TOOL_RESULT and "[summary_id: 1]" in i.text
+    first = next((n for n, r in enumerate(requests) if any(i.kind is Kind.USER and "[summary_id: 1]" in i.text
                                                            for i in seen(r))), None)
     problems = [] if first is not None else ["manage_context never compressed"]
     if not saved or "file 2 animal: otter" not in saved[0].read_text():
         problems.append("the originals were not saved")
     for n in range(len(requests) if first is None else first, len(requests)):
         items = seen(requests[n])
-        at = next(k for k, i in enumerate(items) if i.kind is Kind.TOOL_RESULT and "[summary_id: 1]" in i.text)
+        at = next(k for k, i in enumerate(items) if i.kind is Kind.USER and "[summary_id: 1]" in i.text)
         if kept := [k for k in (1, 2, 3) if full(items[:at], k)]:
             problems.append(f"request {n}, after the summary: file_{kept[0]}'s text is kept")
             break
