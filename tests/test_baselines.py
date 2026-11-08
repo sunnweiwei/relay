@@ -255,6 +255,10 @@ class ACMTests(unittest.TestCase):
         stopped = self.strategy.plan(request(*items, tokens=9_500), Scripted())
         self.assertEqual((stopped.items[1:], stopped.notes), (items, (STOP_PROMPT,)))  # (no marker with it)
         self.assertEqual(self.strategy.plan(request(*items, tokens=9_499), Scripted()).notes, ())
+        # A new user message (the next task) is answered without it: the model may compress first.
+        later = (*items, Item(Kind.USER, "and file_3?", 9))
+        self.assertEqual(self.strategy.plan(request(*later, tokens=9_600), Scripted()).notes, ())
+        self.assertEqual(self.strategy.plan(request(*later, *step(2), tokens=9_600), Scripted()).notes, (STOP_PROMPT,))
 
     def test_through_the_engine_the_summary_holds_and_the_marker_moves(self) -> None:
         codec, engine = OpenAIResponses(), Engine(self.strategy)

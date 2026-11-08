@@ -16,6 +16,9 @@ The last tool result (or summary) ends with "[CURRENT CONTEXT TOKEN: N]", N the 
 ACM's 16,384-token output reserve (after a message answering several calls it is a note: rewriting
 the message would merge their results); from 95% of the window the request ends with ACM's
 STOP_PROMPT instead, and the harness, which Relay cannot stop, goes on as the model answers it. The
+runner's STOP ends its one question; in a conversation it ends the task at hand, the user's turn: a
+new user message is answered without it, so the model can compress first, and gets it again once it
+has answered within that turn and is still past 95%. The
 harness's shell stands in for the tools: the agent runs `echo "[manage_context]"` and
 `echo "[query_memory] N :: query"`, alone. ACM's system prompt and tool descriptions are used as
 released, without the search benchmark's parts (its role line, search advice and answer format),
@@ -208,7 +211,9 @@ class ACM:
             summary = Item(Kind.USER, f"{SUMMARY_ID}{number}] {text}")
             tokens += item_tokens(summary) - sum(map(item_tokens, items[since:end]))
             items[since:end], n = [summary], since + 1
-        stop = request.window is not None and tokens >= int(request.window * STOP)
+        asked = max((m for m, item in enumerate(items) if item.kind is Kind.USER and not _summary(item)), default=-1)
+        answering = any(item.kind in (Kind.ASSISTANT, Kind.REASONING, Kind.TOOL_CALL) for item in items[asked + 1:])
+        stop = request.window is not None and tokens >= int(request.window * STOP) and answering  # (within a turn)
         last = next((m for m in reversed(range(len(items))) if items[m].kind is Kind.TOOL_RESULT or _summary(items[m])), None)
         if last is not None and not stop:  # (the runner's request after STOP_PROMPT has no marker)
             marker = f"[CURRENT CONTEXT TOKEN: {tokens + RESERVE}]"
