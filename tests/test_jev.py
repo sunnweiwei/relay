@@ -100,6 +100,19 @@ class JevTests(unittest.TestCase):
         self.assertIn("chars and 1 image of this tool result", json.dumps(truncated))
         self.assertIn("ok, 2008 chars and 1 image (omitted)", json.dumps(ask.asked[0][0]))
 
+    def test_a_codex_code_mode_call_is_told_as_the_command_it_runs(self) -> None:
+        def scripted(i: int, command: str) -> list[dict[str, Any]]:
+            script = f'const r = await tools.exec_command({{cmd:{json.dumps(command)},workdir:"/app"}}); text(r.output);'
+            return [{"type": "custom_tool_call", "call_id": f"c{i}", "name": "exec", "input": script},
+                    {"type": "custom_tool_call_output", "call_id": f"c{i}", "output": [
+                        {"type": "input_text", "text": "Script completed\nWall time 0.0 seconds\nOutput:\n"},
+                        {"type": "input_text", "text": f"{i}" * 2000}]}]
+
+        ask = FakeJev()
+        self.send(jev(ask), [msg("user", "fix the bug"), *(item for i in range(1, 7) for item in scripted(i, f"cat f{i}.py"))])
+        call = ask.asked[0][0]["history"][1]["tool_calls"][0]
+        self.assertEqual((call["tool"], call["input"]), ("exec_command", '{"cmd":"cat f1.py"}'))
+
     def test_at_the_trigger_when_a_turn_starts_and_mid_turn_where_the_harness_compacts(self) -> None:
         def strategy(ask: Any) -> Jev:
             return Jev(trigger=Compaction(threshold=1000), fallback=Compaction(threshold=10**6), ask=ask)

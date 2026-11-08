@@ -20,7 +20,8 @@ Where Relay sits makes two differences. A model response's calls and their resul
 the conversation for Relay (an Anthropic message holds all of a response's results), so its calls
 are kept or dropped together: each is asked about, and the response keeps what any of them is kept
 for. And Relay does not see whether a result was an error: each is `ok`, as the library tells one it
-does not know of. Where the protocol writes the model's text (and its thinking) in the
+does not know of. A Codex code-mode call (an `exec` script) is told as the one command it runs, as
+the plugin is told a Bash call's command. Where the protocol writes the model's text (and its thinking) in the
 message of its calls (Anthropic, Chat Completions, Gemini), that message goes with them. Jev is TypeSafe's API (`jev_api_key`, else TYPESAFE_API_KEY), or OpenRouter's
 (`jev_url=https://openrouter.ai/api/alpha/decisions`, `jev_model=~typesafe/jev-latest`).
 """
@@ -43,6 +44,7 @@ from ..core.media import counted
 from ..core.tokens import item_tokens
 from .base import Summarizer
 from .compaction import Compaction
+from ..harnesses.codex import scripted
 from .conversation import RESPONSE, calls as _parsed
 
 log = logging.getLogger("relay")
@@ -175,7 +177,7 @@ class Jev:
         pinned = lambda m: m == 0 or m >= len(messages) - self.recent  # noqa: E731
         calls: list[_Call] = []
         for cut, (start, end) in enumerate(_cuts(items, boundaries)):
-            made = [(n, tool, value) for n in range(start, end) if items[n].kind is Kind.TOOL_CALL
+            made = [(n, *_scripted(tool, value)) for n in range(start, end) if items[n].kind is Kind.TOOL_CALL
                     for tool, value in _parsed(items[n].text)[0]]
             results = [n for n in range(start, end) if items[n].kind is Kind.TOOL_RESULT]
             if not made or not results:  # (a call without its result is not a candidate)
@@ -313,6 +315,15 @@ class Jev:
             return f"{text}\n{TRUNCATED.format(what=_described(0, media))}".strip() if media else text
         return (f"{text[: self.head]}\n" if self.head > 0 else "") + TRUNCATED.format(
             what=_described(len(text) - self.head, media))
+
+
+def _scripted(tool: str, value: Any) -> tuple[str, Any]:
+    """A call as Jev is told it: a Codex code-mode script (`exec`, JavaScript) as the one command it
+    runs (`exec_command` {"cmd": ...}) or patch it applies, as the plugin sees a Bash call's command."""
+
+    if tool == "exec" and isinstance(value, str) and (ran := scripted(value)) is not None:
+        return ran[0], ({"cmd": ran[1]} if ran[0] == "exec_command" else ran[1])
+    return tool, value
 
 
 def _described(chars: int, media: tuple[Media, ...]) -> str:

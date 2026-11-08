@@ -634,7 +634,9 @@ plugin as they are:
 Relay sees a model response's calls and their results as one cut of the conversation (an Anthropic
 message holds all of a response's results), so a response's calls are kept or dropped together, as
 much as the one of them Jev keeps most; where the protocol writes the model's text (and thinking)
-in the message of its calls (Anthropic, Chat Completions, Gemini), it goes with them. Relay cannot
+in the message of its calls (Anthropic, Chat Completions, Gemini), it goes with them. A Codex
+code-mode call (an `exec` script) is told to Jev as the one command it runs (`exec_command`), as the
+plugin sees a Bash call's command. Relay cannot
 tell whether a result was an error, so each is `ok`, as the library tells one whose flag it does not
 know. The state, the questions and their batches are the library's: run on the same conversations,
 fast-jev-compaction's own code and Relay's give the same state at each stage, the same token
