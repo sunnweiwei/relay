@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from starlette.responses import JSONResponse
 
 from relay import Compaction, Engine, PrefixStore, ProxyConfig, create_app, providers
 from relay.prompts import SUMMARY_PREFIX
@@ -104,6 +105,20 @@ class ProxyTests(unittest.TestCase):
         self.assertEqual((summary["stream"], summary["tool_choice"]), (False, {"type": "none"}))
         self.assertEqual(len(main["messages"]), 2)
         self.assertTrue(last_user_text(main["messages"]).startswith(SUMMARY_PREFIX))
+
+    def test_an_upstream_rate_limit_is_waited_out_where_set(self) -> None:
+        class Limited(FakeUpstream):
+            refusals = 1
+
+            async def _responses(self, request: Any) -> Any:
+                if self.refusals:
+                    self.refusals -= 1
+                    return JSONResponse({"detail": "Rate limit exceeded"}, 429)
+                return await super()._responses(request)
+
+        for wait, status in (("0", 429), ("10", 200)):
+            with self.subTest(wait=wait), relay_settings(upstream_429_wait=wait), relay(Limited()) as (url, _):
+                self.assertEqual(httpx.post(f"{url}/v1/responses", json=responses_body(1), headers=HEADERS).status_code, status)
 
     def test_context_overflow_is_compacted_and_retried(self) -> None:
         body = responses_body(6)

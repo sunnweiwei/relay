@@ -8,6 +8,7 @@ harness hooks (`hooks.py`).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -306,10 +307,20 @@ def create_app(engine: Engine | None = None, config: ProxyConfig | None = None) 
         try:
             if engine.input_budget:
                 engine.input_budget.check(codec, exchange.body, "main")
-            if exchange.body is body:
-                response = await _send(client, url, headers, content)
-            else:
-                response = await _send(client, url, plain, exchange.body)
+            # (`upstream_429_wait`: seconds Relay itself waits out an upstream rate limit before passing
+            # it on, for an evaluation whose harness gives up on a short burst of them; off by default)
+            wait, delay, waited = float(settings.value("upstream_429_wait", "0") or 0), 2.0, 0.0
+            while True:
+                if exchange.body is body:
+                    response = await _send(client, url, headers, content)
+                else:
+                    response = await _send(client, url, plain, exchange.body)
+                if response.status_code != 429 or waited >= wait:
+                    break
+                await response.aclose()
+                log.info("upstream 429: sending again in %.0f s", delay)
+                await asyncio.sleep(delay)
+                waited, delay = waited + delay, min(delay * 2, 30.0)
             if response.status_code >= 400:
                 error = await response.aread()
                 await response.aclose()
