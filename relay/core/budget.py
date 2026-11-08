@@ -15,7 +15,7 @@ import struct
 from typing import Any, ClassVar
 
 from ..protocols.base import Body, Codec
-from .tokens import counted_item_tokens, structured_tokens
+from .tokens import BYTES_PER_TOKEN, counted_item_tokens, structured_tokens
 from .ir import Item
 
 
@@ -110,6 +110,9 @@ class InputBudget:
     reasoning_usage: dict[str, tuple[int, int]] = field(default_factory=dict, compare=False, repr=False)
     dispatch_slack: int = 0
     overflow_fallback: str = "error"
+    # Encrypted reasoning whose usage this process never saw (a resumed conversation, a restarted Relay):
+    # "error" refuses the request; "estimate" counts its ciphertext as Relay estimates elsewhere.
+    unknown_opaque: str = "error"
     MEDIA_COUNTER_NAME: ClassVar[str] = MEDIA_INPUT_BUDGET_COUNTER
     MEDIA_COUNTER_NAMES: ClassVar[frozenset[str]] = frozenset(_MEDIA_COUNTERS)
 
@@ -117,6 +120,8 @@ class InputBudget:
     def __post_init__(self) -> None:
         if self.overflow_fallback not in {"error", "truncate"}:
             raise ValueError("overflow_fallback must be error or truncate")
+        if self.unknown_opaque not in {"error", "estimate"}:
+            raise ValueError("unknown_opaque must be error or estimate")
         if self.limit <= 0 or self.output_reserve < 0 or self.dispatch_slack < 0:
             raise ValueError("Input budget must be positive; output reserve cannot be negative")
         if self.context_limit is not None and self.context_limit <= self.output_reserve:
@@ -164,6 +169,8 @@ class InputBudget:
         if not item.opaque:
             return 0
         if item.opaque_key not in self.reasoning_usage:
+            if self.unknown_opaque == "estimate":
+                return math.ceil(item.opaque / BYTES_PER_TOKEN)
             raise InputAccountingError("Opaque token usage is unknown; ciphertext size is not a token count")
         return self.reasoning_usage[item.opaque_key][0]
 

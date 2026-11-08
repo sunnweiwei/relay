@@ -93,7 +93,8 @@ def budget_from_settings() -> InputBudget | None:
                        int(settings.value("budget_output_reserve", "0")),
                        name=counter,
                        dispatch_slack=int(settings.value("budget_dispatch_slack", "0")),
-                       overflow_fallback=settings.value("overflow_fallback", "error"))
+                       overflow_fallback=settings.value("overflow_fallback", "error"),
+                       unknown_opaque=settings.value("budget_unknown_opaque", "error"))
 
 
 def strategy_from_settings() -> Strategy:

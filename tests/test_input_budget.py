@@ -371,3 +371,10 @@ def test_media_context_and_image_count_are_included_in_the_final_budget_check() 
     assert response.status_code == 200
     assert len(sent) == 1 and sent[0]["input"] == request["input"]
     assert policy.check(CODEC, sent[0], "offline_media_test") == expected
+
+
+def test_unseen_reasoning_is_refused_or_estimated_as_set() -> None:
+    item = Item(Kind.REASONING, "", opaque=4000, opaque_key="seen elsewhere")  # (a resumed conversation's)
+    with pytest.raises(InputAccountingError):
+        InputBudget(1000).opaque_tokens(item)
+    assert InputBudget(1000, unknown_opaque="estimate").opaque_tokens(item) == 1000
