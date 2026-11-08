@@ -15,6 +15,7 @@ from relay.protocols import Gemini, OpenAIChat, OpenAIResponses
 from relay.strategies import ACM, MEM1, AutoCompact, Compaction, SelfCompact
 from relay.strategies.acm import NOTHING, QUERY_MEMORY_PROMPT, SUMMARY_INSTRUCTION
 from relay.strategies.autocompact import PROMPT
+from relay.strategies.mem1 import GUIDANCE
 from relay.strategies.conversation import IGNORED
 from relay.strategies.selfcompact import CONTINUE, QUESTION, RESEARCH, RUBRIC, SUMMARIZER
 
@@ -261,14 +262,14 @@ class GeminiTests(unittest.TestCase):
 
 
 class MEM1Tests(unittest.TestCase):
-    def test_only_the_newest_internal_state_and_what_follows_stay(self) -> None:
+    def test_each_step_sees_the_user_the_newest_response_and_its_results(self) -> None:
         later = Item(Kind.USER, "and file_3?", 9)
-        items = (TASK, *step(1, say="<IS>reading</IS>"), *step(2, say="<IS>file_1: c1</IS>"), *step(3), later, *step(4))
-        guidance, *kept = MEM1().plan(request(*items), Scripted()).items
-        self.assertIn("<IS>", guidance.text)
-        self.assertEqual(kept, [TASK, *step(2, say="<IS>file_1: c1</IS>"), *step(3), later, *step(4)])
+        items = (TASK, *step(1, say="<IS>reading</IS>"), *step(2, say="<IS>file_1: c1</IS>"), later, *step(3))
+        task, *kept = MEM1().plan(request(*items), Scripted()).items
+        self.assertEqual(task, Item(Kind.USER, GUIDANCE + "read the files", 1))  # (MEM1's prompt before the question)
+        self.assertEqual(kept, [later, *step(3)])  # (a response without a state too: every earlier step is cleared)
 
-    def test_an_internal_state_written_beside_the_calls_counts(self) -> None:
+    def test_a_response_beside_its_calls_and_one_with_results_to_come(self) -> None:
         # Chat Completions: one assistant message holds the text and the call.
         codec, engine = OpenAIChat(), Engine(MEM1())
 
@@ -281,11 +282,10 @@ class MEM1Tests(unittest.TestCase):
         messages = [task, *turn(1, "<IS>reading</IS>"), *turn(2, "<IS>file_1 read</IS>")]
         sent = engine.prepare(codec, Harness(), {"model": "m", "messages": messages, "tools": [{}]}, tenant="t",
                               post=lambda r: (500, {})).body["messages"]
-        self.assertEqual(sent[1:], [task, *turn(2, "<IS>file_1 read</IS>")])  # after the guidance
+        self.assertEqual(sent, [{"role": "user", "content": GUIDANCE + "read the files"}, *turn(2, "<IS>file_1 read</IS>")])
 
-    def test_no_internal_state_yet_keeps_everything(self) -> None:
-        items = (TASK, *step(1), *step(2))
-        self.assertEqual(MEM1().plan(request(*items), Scripted()).items[1:], items)
+    def test_the_first_step_sees_the_prompt_and_the_task(self) -> None:
+        self.assertEqual(MEM1().plan(request(TASK), Scripted()).items, (Item(Kind.USER, GUIDANCE + "read the files", 1),))
 
 
 if __name__ == "__main__":
