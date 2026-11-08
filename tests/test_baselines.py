@@ -50,38 +50,48 @@ TASK = Item(Kind.USER, "read the files", 1)
 
 
 class SelfCompactTests(unittest.TestCase):
-    strategy = SelfCompact()  # probes every 2 responses past 37% of the window (10k)
+    strategy = SelfCompact(min_tokens=3_700)  # probes every 2 responses from the third, past 3,700 tokens
 
-    def test_probes_every_second_response_past_the_gate(self) -> None:
+    def test_probes_every_second_response_past_the_gates(self) -> None:
         two, three = (TASK, *step(1), *step(2)), (TASK, *step(1), *step(2), *step(3))
-        self.assertIsNone(self.strategy.plan(request(*two, tokens=3_600), Scripted()))  # below the gate
+        four = (*three, *step(4))
+        self.assertIsNone(self.strategy.plan(request(*two, tokens=5_000), Scripted()))  # too few responses
         self.assertIsNone(self.strategy.plan(request(*three, tokens=5_000), Scripted()))  # an odd response
+        self.assertIsNone(self.strategy.plan(request(*four, tokens=3_600), Scripted()))  # too few tokens
         probe = Scripted("C1: Y\nC2: N -- dispersed\nC3: Y\nN1: N")
-        self.assertIsNone(self.strategy.plan(request(*two, tokens=3_800), probe))  # the rubric says CONTINUE
-        self.assertEqual(probe.calls, [(5, RUBRIC)])
+        self.assertIsNone(self.strategy.plan(request(*four, tokens=3_800), probe))  # the rubric says CONTINUE
+        self.assertEqual(probe.calls, [(9, RUBRIC)])
 
-    def test_a_firing_rubric_replaces_the_trajectory_with_the_summary(self) -> None:
+    def test_a_firing_rubric_replaces_the_trajectory_and_every_user_message_stays(self) -> None:
         later = Item(Kind.USER, "and then?", 9)
-        items = (TASK, *step(1), later, *step(2))
+        items = (TASK, *step(1), later, *step(2), *step(3), *step(4))
         summarizer = Scripted("**C1:** Y -- x\n**C2:** Y -- y\n**C3:** Y -- z\n**N1:** N -- w",
                               "<think>x</think>\n<summary>\n- Essential Information: c1, c2\n</summary>")
         context = self.strategy.plan(request(*items, tokens=4_000), summarizer)
         self.assertEqual([prompt for _, prompt in summarizer.calls],
-                         [RUBRIC, SUMMARIZER + QUESTION.format(question="read the files")])
-        self.assertEqual(context.items, (TASK, Item(Kind.ASSISTANT, RESEARCH + "- Essential Information: c1, c2"),
+                         [RUBRIC, SUMMARIZER + QUESTION.format(question="read the files\n\nand then?")])
+        self.assertEqual(context.items, (TASK, later, Item(Kind.ASSISTANT, RESEARCH + "- Essential Information: c1, c2"),
                                          Item(Kind.USER, CONTINUE)))
         # The count starts again after the summary: one response since, no probe.
-        self.assertIsNone(self.strategy.plan(request(*context.items, *step(3), tokens=4_000), Scripted()))
+        self.assertIsNone(self.strategy.plan(request(*context.items, *step(5), tokens=4_000), Scripted()))
+        # The next summary keeps the user's messages again, its own "continue" not among them.
+        new = Item(Kind.USER, "now the other files", 10)
+        again = self.strategy.plan(request(*context.items, new, *step(5), *step(6), tokens=4_000), Scripted(FIRE, "S2"))
+        self.assertEqual(again.items, (TASK, later, new, Item(Kind.ASSISTANT, RESEARCH + "S2"), Item(Kind.USER, CONTINUE)))
 
     def test_stuck_or_unproven_does_not_fire(self) -> None:
         for answer in ("C1: Y\nC2: Y\nC3: Y\nN1: Y -- duplicates", "C1: Y\nC2: Y\nN1: N"):
-            self.assertIsNone(self.strategy.plan(request(TASK, *step(1), *step(2), tokens=4_000), Scripted(answer)))
+            self.assertIsNone(self.strategy.plan(request(TASK, *(i for n in range(1, 5) for i in step(n)), tokens=4_000),
+                                                 Scripted(answer)))
 
     def test_the_backstop_summarizes_without_asking(self) -> None:
         summarizer = Scripted("SUMMARY")
         context = self.strategy.plan(request(TASK, *step(1), tokens=9_600), summarizer)
         self.assertEqual(summarizer.calls, [(3, SUMMARIZER + QUESTION.format(question="read the files"))])
         self.assertEqual(context.items, (TASK, Item(Kind.ASSISTANT, RESEARCH + "SUMMARY"), Item(Kind.USER, CONTINUE)))
+
+    def test_the_release_gates_by_default(self) -> None:
+        self.assertEqual((SelfCompact().min_tokens, SelfCompact().min_round, SelfCompact().period), (40_000, 3, 2))
 
 
 class AutoCompactTests(unittest.TestCase):

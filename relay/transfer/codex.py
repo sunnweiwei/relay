@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.ir import Kind, Media
-from ..harnesses.codex import Codex
+from ..harnesses.codex import SCRIPT_OUTPUT, Codex, scripted
 from ..prompts import SUMMARY_PREFIX
 from ..protocols import OpenAIResponses
 from . import Call, Message, Session, Written, made, moved, note
@@ -207,12 +207,12 @@ def _standard(item: dict[str, Any], result: dict[str, Any]) -> Call:
     text = raw if isinstance(raw, str) else "".join(p.get("text", "") for p in parts if isinstance(p, dict) and p.get("type") == "input_text")
     media = tuple(Media("image", *_data(p.get("image_url", ""))) for p in parts if isinstance(p, dict) and p.get("type") == "input_image")
     if name == "exec" and kind == "custom_tool_call" and isinstance(given, str):  # (its code mode: a script)
-        ran = re.match(r"Script (completed|failed)[^\n]*\n(?:Wall time[^\n]*\n)?Output:\n", text)
+        ran = SCRIPT_OUTPUT.match(text)
         output, failed = (text[ran.end():], ran.group(1) == "failed") if ran else (text, False)
         base = {"name": name, "input": given, "output": output, "error": failed, "exit": None, "media": media}
-        if (scripted := _scripted(given)) is None:
+        if (made_call := scripted(given)) is None:
             return Call("", {}, **base)
-        tool, value = scripted
+        tool, value = made_call
         if tool == "apply_patch" or HEREDOC.fullmatch(value):
             return Call("change", {"files": _files(HEREDOC.fullmatch(value).group(2) if tool != "apply_patch" else value)}, **base)
         return Call("shell", {"command": value}, **base)
@@ -323,33 +323,6 @@ def _output(text: str) -> tuple[str, int | None]:
         except (ValueError, AttributeError):
             pass
     return text, code
-
-
-def _scripted(script: str) -> tuple[str, str] | None:
-    """The one call a code-mode script makes of exec_command (its command) or apply_patch (its
-    patch), None for any other script."""
-
-    called = re.findall(r"\btools\.(\w+)\s*\(", script)
-    if len(called) != 1 or called[0] not in ("exec_command", "apply_patch"):
-        return None
-    after = script[re.search(r"\btools\.\w+\s*\(", script).end():]
-    if called[0] == "exec_command":
-        found = re.match(r"\s*\{[^}]*?\bcmd\s*:\s*", after, re.S)
-        after = after[found.end():] if found else ""
-    if (named := re.match(r"\s*([A-Za-z_$][\w$]*)\s*[,})]", after)) is not None:  # (given by name: what it was set to)
-        found = re.search(rf"\b(?:const|let|var)\s+{re.escape(named.group(1))}\s*=\s*", script)
-        after = script[found.end():] if found else ""
-    literal = re.match(r'\s*(?:"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'|`((?:[^`\\$]|\\.|\$(?!\{))*)`)', after, re.S)
-    if not literal:
-        return None
-    double, single, template = literal.groups()
-    if template is not None:  # (no ${...} in it: its text as written)
-        return called[0], re.sub(r"\\([`\\$])", r"\1", template)
-    quoted = double if double is not None else single.replace("\\'", "'").replace('"', '\\"')
-    try:
-        return called[0], json.loads(f'"{quoted}"')
-    except ValueError:
-        return None
 
 
 def _files(patch: str) -> list[dict[str, Any]]:

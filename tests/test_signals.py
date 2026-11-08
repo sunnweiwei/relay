@@ -90,6 +90,23 @@ class Signalled(unittest.TestCase):
                                  "output": json.dumps({"output": "[branch] Read models :: read models.py\n", "metadata": {}})})
         self.assertEqual(said(call, result), ("branch", "Read models :: read models.py"))
 
+    def test_codex_code_mode(self) -> None:  # Codex 0.162 on: a script calling exec_command, its output after a header
+        codec = OpenAIResponses()
+
+        def ran(script: str, output: str) -> tuple[Item, Item]:
+            return (codec.classify({"type": "custom_tool_call", "call_id": "c", "name": "exec", "input": script}),
+                    codec.classify({"type": "custom_tool_call_output", "call_id": "c", "output": [
+                        {"type": "input_text", "text": "Script completed\nWall time 0.0 seconds\nOutput:\n"},
+                        {"type": "input_text", "text": output}]}))
+
+        one = 'const r = await tools.exec_command({cmd:%s,workdir:"/app",yield_time_ms:1000}); text(r.output);\n'
+        self.assertEqual(said(*ran(one % json.dumps(ECHO), "[branch] Read models :: read models.py\n")),
+                         ("branch", "Read models :: read models.py"))
+        self.assertEqual(said(*ran(one % json.dumps("echo '[return] found x\nfiles: a.py'"), "[return] found x\nfiles: a.py\n")),
+                         ("return", "found x\nfiles: a.py"))
+        two = one % json.dumps(ECHO) + 'await tools.exec_command({cmd:"ls"});'
+        self.assertIsNone(said(*ran(two, "[branch] Read models :: read models.py\n")))  # (not alone)
+
     def test_chat_completions(self) -> None:
         codec = OpenAIChat()
         call = codec.classify({"role": "assistant", "content": "", "tool_calls": [

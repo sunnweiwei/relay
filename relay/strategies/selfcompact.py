@@ -5,13 +5,15 @@ As in Self-Compact's Algorithm 1, at a probe the rubric is appended to the conve
 prompt cache reused) and the model answers C1 CLOSED-UNIT, C2 SUMMARIZABLE, C3 PROGRESS and N1
 STUCK; only C1 = C2 = C3 = Y and N1 = N fires the summarizer, also appended to the conversation
 with the question, and the summary then replaces the trajectory as Self-Compact's agent replaces it
-(`agent.py`, `summarize`): what is left is the original question (the first user message), the
-summary as the assistant's ("Here is my research so far:"), and the user's "continue", so the
-user's later messages go with the rest. A CONTINUE verdict leaves the conversation as it was.
-Probes come every `period` model responses once the prompt passes `gate` of the budget, as the CLM
-paper runs Self-Compact (every two turns past 37%, the release's 40K of its 108K budget); past
-`backstop` the summary is made without asking, a backstop of Relay's own (at its budget the release
-forces a final answer instead). The prompts are those of Self-Compact's released code (`prompts.py`:
+(`agent.py`, `summarize`): what is left is the question, the summary as the assistant's ("Here is
+my research so far:"), and the user's "continue". The release answers one question, its only user
+message; in a conversation the question is all the user has said, so every user message stays, in
+order, and the summarizer is given them all (with one, exactly the release's). A CONTINUE verdict
+leaves the conversation as it was. As the release gates it (`selfcheck_min_round`,
+`selfcheck_min_tokens`, `selfcheck_period`), probes come once the conversation has `min_round` model
+responses and the prompt `min_tokens` tokens, every `period` responses; past `backstop` of the budget
+the summary is made without asking, a backstop of Relay's own (at its budget the release forces a
+final answer instead). The prompts are those of Self-Compact's released code (`prompts.py`:
 SELFCHECK_PROMPT, SUMMARIZE_PROMPT, CONTINUE_AFTER_SUMMARY), verbatim, and the summary is the answer's
 `<summary>` block, as it parses it.
 """
@@ -92,7 +94,8 @@ VERDICT = re.compile(r"\b(C1|C2|C3|N1)\b(?:\s+[A-Z-]+)?[^A-Za-z0-9\n]*([YN])\b")
 @dataclass(frozen=True)
 class SelfCompact:
     budget: int | None = None  # tokens; None: the model's context window
-    gate: float = 0.37  # probe once the prompt passes this share of the budget
+    min_tokens: int = 40_000  # probe once the prompt has this many tokens
+    min_round: int = 3  # and the conversation this many model responses
     period: int = 2  # every this many model responses since the last summary
     backstop: float = HARD_LIMIT  # summarize without asking past this share
     name: str = "selfcompact"
@@ -102,27 +105,30 @@ class SelfCompact:
         return cls()
 
     def fingerprint(self) -> dict[str, Any]:
-        return {"name": self.name, "budget": self.budget, "gate": self.gate, "period": self.period,
+        return {"name": self.name, "budget": self.budget, "min_tokens": self.min_tokens, "min_round": self.min_round,
+                "period": self.period,
                 "backstop": self.backstop, "rubric": RUBRIC, "summarizer": SUMMARIZER}
 
     def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
         if not request.tools:
             return None
         budget, items = self.budget or request.window or DEFAULT_WINDOW, request.current
-        question = next(n for n, item in enumerate(items) if item.kind is Kind.USER)
         last = max((n for n, item in enumerate(items) if _summary(item)), default=-1)
-        rounds = sum(start > last for start in responses(items))
+        starts = responses(items)
+        rounds = sum(start > last for start in starts)
         forced = request.force or request.tokens >= self.backstop * budget
-        due = request.tokens >= self.gate * budget and rounds and rounds % self.period == 0
+        due = (request.tokens >= self.min_tokens and len(starts) >= self.min_round
+               and rounds and rounds % self.period == 0)
         if not (forced or due) or (cut := summary_cut(request)) is None:
             return None
         if not forced and not _fires(summarizer.summarize(cut, RUBRIC)):
             return None
-        answer = summarizer.summarize(cut, SUMMARIZER + QUESTION.format(question=items[question].text))
+        users = tuple(item for item in items[:cut] if item.kind is Kind.USER and item.text != CONTINUE)
+        answer = summarizer.summarize(cut, SUMMARIZER + QUESTION.format(question="\n\n".join(u.text for u in users)))
         summary = (found.group(1) if (found := SUMMARY.search(answer)) else answer).strip()
         if not summary:
             return None
-        return Context((items[question], Item(Kind.ASSISTANT, RESEARCH + summary), Item(Kind.USER, CONTINUE), *items[cut:]))
+        return Context((*users, Item(Kind.ASSISTANT, RESEARCH + summary), Item(Kind.USER, CONTINUE), *items[cut:]))
 
 
 def _summary(item: Item) -> bool:

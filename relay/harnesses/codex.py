@@ -620,3 +620,34 @@ def _is_user_turn(item: WireItem) -> bool:
         and not is_context(item)
         and not (parts and parts[0].startswith(SUMMARY_PREFIX))
     )
+
+
+# What Codex's code mode reports before a script's output.
+SCRIPT_OUTPUT = re.compile(r"Script (completed|failed|terminated)[^\n]*\n(?:Wall time[^\n]*\n)?Output:\n")
+
+
+def scripted(script: str) -> tuple[str, str] | None:
+    """The one call a code-mode script (the input of Codex's `exec`, JavaScript) makes of
+    exec_command (its command) or apply_patch (its patch), None for any other script."""
+
+    called = re.findall(r"\btools\.(\w+)\s*\(", script)
+    if len(called) != 1 or called[0] not in ("exec_command", "apply_patch"):
+        return None
+    after = script[re.search(r"\btools\.\w+\s*\(", script).end():]
+    if called[0] == "exec_command":
+        found = re.match(r"\s*\{[^}]*?\bcmd\s*:\s*", after, re.S)
+        after = after[found.end():] if found else ""
+    if (named := re.match(r"\s*([A-Za-z_$][\w$]*)\s*[,})]", after)) is not None:  # (given by name: what it was set to)
+        found = re.search(rf"\b(?:const|let|var)\s+{re.escape(named.group(1))}\s*=\s*", script)
+        after = script[found.end():] if found else ""
+    literal = re.match(r'\s*(?:"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'|`((?:[^`\\$]|\\.|\$(?!\{))*)`)', after, re.S)
+    if not literal:
+        return None
+    double, single, template = literal.groups()
+    if template is not None:  # (no ${...} in it: its text as written)
+        return called[0], re.sub(r"\\([`\\$])", r"\1", template)
+    quoted = double if double is not None else single.replace("\\'", "'").replace('"', '\\"')
+    try:
+        return called[0], json.loads(f'"{quoted}"')
+    except ValueError:
+        return None

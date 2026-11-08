@@ -11,6 +11,7 @@ from dataclasses import replace
 from typing import Any
 
 from ..core.ir import Item, Kind
+from ..harnesses.codex import SCRIPT_OUTPUT, scripted
 
 RESPONSE = frozenset({Kind.ASSISTANT, Kind.REASONING, Kind.TOOL_CALL})  # what one model response holds
 CALL = re.compile(r"^([\w.:-]+)[( ](?=[{\[])", re.M)  # a call as the codecs write one: `name(input)`, `name input`
@@ -64,6 +65,7 @@ def signalled(response: Sequence[Item], results: Sequence[Item], pattern: re.Pat
         return name, (echoed[-1][len(name) + 2:] if whole else said).strip(), 0, True
     for k in reversed(range(len(results))):
         for text in _strings(results[k].text):
+            text = SCRIPT_OUTPUT.sub("", text.lstrip(), count=1)  # (code mode's header: the output after it)
             found = pattern.findall(text)  # the last: the output's, after any command the harness repeats
             if found and found[-1][0] == name and (len(results) == 1 or found[-1][1].strip() == said.strip()):
                 if whole and own and len(found) == 1 and text.lstrip().startswith(f"[{name}]"):
@@ -95,8 +97,8 @@ INPUT = re.compile(r"^(?:[\w.:-]+[( ])?(?=[{\[])", re.M)
 
 
 def _inputs(text: str) -> list[list[str]]:
-    """The string values of the input of each tool call in a call's text (the text itself, where
-    none is found)."""
+    """The string values of the input of each tool call in a call's text: of a Codex code-mode
+    script, the command it runs; else the text itself, where none is found."""
 
     inputs, end, decoder = [], 0, json.JSONDecoder()
     for match in INPUT.finditer(text):
@@ -106,6 +108,8 @@ def _inputs(text: str) -> list[list[str]]:
             except ValueError:
                 continue
             inputs.append(_values(value))
+    if not inputs and (ran := scripted(text.strip().partition(" ")[2])) is not None and ran[0] == "exec_command":
+        return [[ran[1]]]
     return inputs or [[text]]
 
 
