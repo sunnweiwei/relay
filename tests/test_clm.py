@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import struct
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from relay.core.engine import Engine
 from relay.harnesses import HARNESSES, Harness
 from relay.protocols import OpenAIResponses
 from relay.strategies import ContextLanguageModel
+from relay.strategies import clm
 
 CODEC, HARNESS = OpenAIResponses(), Harness()
 TOOLS = [{"type": "function", "name": "sh", "parameters": {}}]
@@ -108,6 +111,48 @@ class ClmTests(unittest.TestCase):
         self.assertIn("keep its first line exactly", sent.body["input"][-1]["content"][0]["text"])
         self.edit(lambda s: s.replace("id=1-", "id=x-"))
         self.assertIn("is unknown", self.send(*self.history, *call(3), *call(4)).body["input"][-1]["content"][0]["text"])
+
+    def test_bytes_that_are_not_utf8_are_read_as_the_paper_reads_them(self) -> None:
+        self.send(*self.history)
+        raw = self.mirror().read_bytes()
+        self.mirror().write_bytes(raw.replace(b"output 1 " + b"x" * 400, b"short \xff note"))
+        sent = json.dumps(self.send(*self.history, *call(3)).body["input"])
+        self.assertIn("short \\ufffd note", sent)  # (errors="replace", context_env/env.py)
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads any file")
+    def test_an_unreadable_file_is_said_and_the_context_moves_to_a_new_one(self) -> None:
+        self.send(*self.history)
+        old = self.mirror()
+        old.chmod(0)
+        try:
+            sent = self.send(*self.history, *call(3)).body["input"]
+        finally:
+            old.chmod(0o600)
+        self.assertIn(f"could not read {old}", sent[-1]["content"][0]["text"])
+        (fresh,) = [path for path in self.directory.glob("*.md") if path != old]
+        self.assertIn(str(fresh), sent[1]["content"][0]["text"])  # (the guidance names the new file)
+
+    def test_a_file_that_cannot_be_written_moves_to_a_new_one(self) -> None:
+        self.send(*self.history)
+        old, write = self.mirror(), clm._write
+
+        def refusing(path: Path, text: str) -> None:
+            if path == old:
+                raise PermissionError(13, "Permission denied")
+            write(path, text)
+
+        with mock.patch.object(clm, "_write", refusing):
+            note = self.send(*self.history, *call(3)).body["input"][-1]["content"][0]["text"]
+        self.assertIn(f"could not write {old}", note)
+        self.assertEqual(len(list(self.directory.glob("*.md"))), 2)
+
+    def test_a_directory_every_user_may_write_to_gets_files_every_user_may_edit(self) -> None:
+        self.directory.chmod(0o1777)
+        self.send(*self.history)
+        self.assertEqual(self.mirror().stat().st_mode & 0o777, 0o666)
+        self.directory.chmod(0o700)
+        self.send(*self.history, *call(3))
+        self.assertEqual(self.mirror().stat().st_mode & 0o777, 0o600)
 
     def test_a_header_is_read_by_its_attributes_or_refused(self) -> None:
         # Headers models wrote: `index=new`, attributes reordered, no document at all.
@@ -269,6 +314,29 @@ class ClmTests(unittest.TestCase):
             found += [m.group(1) or "urgent" for m in re.finditer(r"at ~(\d+%) of your|\(URGENT\)", note)]
         self.assertEqual(found[:3], ["25%", "50%", "75%"])
         self.assertTrue(len(found) > 4 and set(found[3:]) == {"urgent"})
+
+    def test_past_25_percent_the_nudges_carry_the_papers_compaction_hint(self) -> None:
+        self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory)))
+        history, notes = [msg("user", "read the files")], {}
+        for i in range(1, 36):
+            history += call(i)
+            sent = self.send(*history).body["input"]
+            note = sent[-1]["content"][0]["text"]
+            tier = re.search(r"at ~(\d+%) of your|\(URGENT\)", note)
+            if tier:
+                notes.setdefault(tier.group(1) or "urgent", note)
+        self.assertIn("3800 tokens", sent[0]["content"][0]["text"])  # (the enforced budget, not the window)
+        self.assertNotIn("by locating stale regions", notes["25%"])
+        for tier in ("50%", "75%", "urgent"):
+            self.assertIn(f"Compact {self.mirror()} by locating stale regions with code", notes[tier])
+
+    def test_the_urgent_nudge_can_be_off_as_in_the_papers_coding_runs(self) -> None:
+        self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory), urgent=None))
+        history, notes = [msg("user", "read the files")], []
+        for i in range(1, 36):
+            history += call(i)
+            notes.append(self.send(*history).body["input"][-1]["content"][0]["text"])
+        self.assertFalse(any("URGENT" in note for note in notes))
 
     def test_past_the_limit_the_oldest_new_tool_results_are_withheld_to_files(self) -> None:
         self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory)))

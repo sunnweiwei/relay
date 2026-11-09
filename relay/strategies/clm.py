@@ -42,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -60,8 +61,8 @@ log = logging.getLogger("relay")
 # The paper's "Managing your context" section (clm_agent/prompts.yaml), with the file's block headers.
 GUIDANCE = r"""## Managing your context
 
-**Goal: maximize task success** — keep going until the task is done (no penalty for extra turns).
-Your context budget is {budget}; each request shows your current size.
+**Goal: maximize task success** — keep going until the task is done or you run out of budget (no penalty
+for extra turns). Your context budget is {budget}; each request shows your current size.
 
 Your conversation is mirrored to `{path}` (refreshed before every request). **Free up context by
 editing that file** — replace stale regions (big outputs, dead ends, superseded notes) with a
@@ -81,8 +82,7 @@ or slice on the headers:
     open(p,"w").write(s)
     PY
 
-**Rules:** leave the user's messages as they are: they say what the user wants; compact your own turns
-and tool output. Don't `cat` this file (its text is already in your context). Keep its first line and the
+**Rules:** don't `cat` this file (its text is already in your context). Keep its first line and the
 `[[CTX_TURN …]]` header of any block you keep — emptying a block's text drops that block. To add a
 block, copy a current header with a unique `id=new-NAME` and a role such as `notes`. Each request
 says whether your last edit was applied. Those receipts, the size readout and CONTEXT BUDGET NUDGEs
@@ -97,18 +97,23 @@ much text FOLLOWS the edit:
   UNLESS you expect to hit the context limit soon, then compact now.
 - **Be generous in the summary**: the tail is re-read regardless, so a detailed replacement is
   essentially free."""
-# The paper's budget nudges (utils/budget.py), for coding as well as search.
+# The paper's budget nudges (utils/budget.py, its only wording), each past 25% with the compaction hint
+# the paper's agent always passes (clm_agent/harness.py), the file and its headers named as here. What
+# follows an overflow is not said: here no final turn comes, the overflow guard or compaction does.
+HINT = ("Compact {path} by locating stale regions with code (match a turn by its [[CTX_TURN … index=i …]] header "
+        "or a block by short start/end anchors) and replacing them with summaries — do not retype the text you "
+        "remove. Compact settled spans; keep anything you have not finished using.")
 NOTE_CONTRACT = ("When you write a replacement note, COPY facts forward from the text you are replacing "
                  "(quote them): every RULED OUT candidate with its reason and the words 'do not retry'; the exact "
                  "queries/commands already tried; exact values marked VERIFIED or UNVERIFIED; and a NEXT line.")
 NUDGES = {
-    0.25: "No action needed. Before your next few steps, make sure your notes record which commands and files you "
-          "already tried.",
+    0.25: "No action needed. Before your next few searches, make sure your notes record which queries and documents "
+          "you already tried.",
     0.5: "Finish the unit of work in flight, then tidy ONCE. " + NOTE_CONTRACT,
     0.75: "close to the limit. Compact settled spans now — but do NOT wipe: edits keeping under 25% of the region they "
           "touch are usually followed by re-doing the deleted work. " + NOTE_CONTRACT,
 }
-URGENT = 0.9  # of the limit: nudged on every request past it
+URGENT = 0.9  # of the limit: nudged on every request past it (the paper's search setting; `clm_urgent`)
 WITHHELD = "[context manager: overflow guard]"
 STEERING = "## Your context-management policy\n\nFollow this policy where it differs from the advice above:"
 META = "[[LIVE_CONTEXT version=1 revision={revision} document={document}]]"
@@ -132,6 +137,7 @@ class ContextLanguageModel:
     steering: str = ""  # a context-management policy in words, added to the guidance (the paper's s)
     nudges: bool = True  # the budget nudges; the size readout stays
     guard: bool = True  # pi-clm's overflow guard: past the limit, the oldest new tool results are withheld
+    urgent: float | None = URGENT  # of the limit, the urgent nudge on every request past it; None: off (the paper's coding runs)
     recovery: Compaction = field(default_factory=Compaction)  # for a request the upstream rejected as too long
     name: str = "clm"
 
@@ -143,12 +149,13 @@ class ContextLanguageModel:
                    steering=Path(steering).read_text(encoding="utf-8").strip() if steering else "",
                    nudges=settings.value("clm_nudges", "on").lower() not in ("0", "off", "false"),
                    guard=settings.value("clm_guard", "on").lower() not in ("0", "off", "false"),
+                   urgent=_ratio(settings.value("clm_urgent", str(URGENT))),
                    recovery=Compaction.from_settings())
 
     def fingerprint(self) -> dict[str, Any]:
         return {"name": self.name, "budget": self.budget, "reserve": self.reserve, "directory": self.directory,
                 "guidance": GUIDANCE, "nudges": NUDGES if self.nudges else None, "steering": self.steering,
-                "guard": self.guard}
+                "guard": self.guard, "urgent": self.urgent, "hint": HINT}
 
     def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
         if not request.tools:
@@ -174,49 +181,64 @@ class ContextLanguageModel:
         anchor = state.get("anchor", task)  # where what the model's last accepted edit kept ends
         if _owner(path) not in (None, state.get("ids")):
             path = path.with_name(f"{path.stem.split('~')[0]}~{_digest(''.join(_ids(items[task:])))[:8]}.md")
-        elif "digest" in state and path.exists() and _digest(edited := path.read_text(encoding="utf-8")) != state["digest"]:
-            applied, tokens, note = _apply(edited, request, task, state, limit)
-            items, notes = applied or items, [note]
-            if applied:  # (the items after the file it was written from follow the edited ones)
-                anchor = len(applied) - (len(request.current) - task - len(state["ids"]))
+        elif "digest" in state:
+            edited, failure = _read(path)
+            if failure:  # (pi-clm says so: "Mirror read failed"; the context is written afresh under a new name)
+                notes.append(f"[context file: edit NOT applied — the context manager could not read {path}: {failure}]")
+                path = _fresh(path)
+            elif edited is not None and _digest(edited) != state["digest"]:
+                applied, tokens, note = _apply(edited, request, task, state, limit)
+                items, notes = applied or items, [note]
+                if applied:  # (the items after the file it was written from follow the edited ones)
+                    anchor = len(applied) - (len(request.current) - task - len(state["ids"]))
         if self.guard and limit and tokens > limit:
             items, tokens, notice = _guard(items, tokens, limit, anchor, path)
             notes += [notice] if notice else []
         revision = state.get("revision", 0) + (recovered or items != list(request.current))
         named = state.get("named", request.conversation)  # (the conversation's name settles only after the first reply)
         text = _render(items[task:], _document(named, revision), revision, items[task - 1] if task else None)
-        _write(path, text)
+        try:
+            _write(path, text)
+        except OSError as error:  # (one the model's tools left behind, e.g. owned by another user: a new file)
+            failed, path = path, _fresh(path)
+            _write(path, text)
+            notes.append(f"[context file: the context manager could not write {failed} ({_reason(error)}); "
+                         f"your context is now mirrored to {path}]")
         _own(path, _ids(items[task:]))
         nudged = state.get("nudged", [])
         if budget:
-            nudged, nudge = self._nudge(tokens, budget, limit, nudged) if self.nudges else (nudged, None)
+            nudged, nudge = self._nudge(tokens, budget, limit, nudged, path) if self.nudges else (nudged, None)
             notes += [nudge] if nudge else []
             over = f" — OVER; compact {path} now" if tokens > limit else ""
             notes.append(f"[context: ~{tokens}/{limit} tokens{over}]")
         else:
             notes.append(f"[context: ~{tokens} tokens]")
-        guidance = GUIDANCE.format(path=path, budget=f"{budget} tokens" if budget else "not set")
+        guidance = GUIDANCE.format(path=path, budget=f"{limit} tokens" if budget else "not set")  # (the enforced one)
         guidance = Item(Kind.SYSTEM, f"{guidance}\n\n{STEERING}\n\n{self.steering}" if self.steering else guidance)
         return Context((guidance, *items),
                        {"revision": revision, "digest": _digest(text), "ids": _ids(items[task:]), "nudged": nudged,
                         "file": path.name, "named": named, "anchor": anchor},
                        tuple(notes))
 
-    def _nudge(self, tokens: int, budget: int, limit: int, nudged: list[float]) -> tuple[list[float], str | None]:
-        """The paper's nudges: urgent on every request past 90% of the limit, else the highest tier
-        newly crossed; a tier re-arms once the context drops below it."""
+    def _nudge(self, tokens: int, budget: int, limit: int, nudged: list[float],
+               path: Path) -> tuple[list[float], str | None]:
+        """The paper's nudges: urgent on every request past `urgent` of the limit (if on), else the
+        highest tier newly crossed; a tier re-arms once the context drops below it. Past 25%, the
+        compaction hint."""
 
-        nudged = [f for f in nudged if tokens >= int(budget * f)]
-        if tokens >= int(URGENT * limit):
+        nudged, hint = [f for f in nudged if tokens >= int(budget * f)], HINT.format(path=path)
+        if self.urgent is not None and tokens >= int(self.urgent * limit):
             return nudged, (f"CONTEXT BUDGET NUDGE (URGENT): You are at {tokens}/{limit} tokens — over "
-                            f"{round(URGENT * 100)}% of your context limit. Compact your context THIS TURN, before anything "
-                            f"else: remove stale regions now, then continue the task.")
+                            f"{round(self.urgent * 100)}% of your hard context limit and about to be cut off. Compact your "
+                            f"context THIS TURN, before anything else: remove stale regions now, then continue the task. "
+                            f"{hint}")
         crossed = [f for f in NUDGES if tokens >= int(budget * f)]
         if not (fire := [f for f in crossed if f not in nudged]):
             return nudged, None
         top = max(fire)
         size = f"context is at ~{round(top * 100)}% of your {budget}-token budget ({tokens} tokens)"
-        return sorted({*nudged, *crossed}), f"CONTEXT BUDGET NUDGE: {size}{' —' if top > 0.5 else '.'} {NUDGES[top]}"
+        return sorted({*nudged, *crossed}), (f"CONTEXT BUDGET NUDGE: {size}{' —' if top > 0.5 else '.'} {NUDGES[top]}"
+                                             + (f" {hint}" if top > 0.25 else ""))
 
 
 def _apply(edited: str, request: Request, task: int, state: dict[str, Any],
@@ -315,7 +337,11 @@ def _guard(items: list[Item], tokens: int, limit: int, anchor: int, path: Path) 
         if saved <= 0:
             continue  # A short result must not grow into a longer file-path note.
         if item.text.strip():
-            _write(file, item.text)
+            try:
+                _write(file, item.text)
+            except OSError:
+                log.warning("clm: could not keep a withheld result at %s; it stays", file, exc_info=True)
+                continue
         items[n] = replacement
         tokens -= saved
         withheld += 1
@@ -393,13 +419,43 @@ def _own(path: Path, ids: list[str]) -> None:
 
 
 def _write(path: Path, text: str) -> None:
-    """Atomically, readable only by the user (it holds the conversation); never committed, should
-    the directory be inside a repository (where a sandboxed harness's tools can reach it)."""
+    """Atomically, readable only by the user (it holds the conversation), unless the directory is one
+    every user may write to (made so for a sandboxed harness whose tools run as another user): then
+    the file is everyone's to edit as well. Never committed, should the directory be inside a
+    repository (where a sandboxed harness's tools can reach it)."""
 
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if not (ignore := path.parent / ".gitignore").exists():
         ignore.write_text("*\n", encoding="utf-8")
     temporary = path.with_suffix(".tmp")
     temporary.write_text(text, encoding="utf-8")
-    temporary.chmod(0o600)
+    temporary.chmod(0o666 if path.parent.stat().st_mode & 0o002 else 0o600)
     temporary.replace(path)
+
+
+def _read(path: Path) -> tuple[str | None, str | None]:
+    """The file's text (None if there is none), or why it cannot be read. Bytes that are not UTF-8
+    become replacement characters, as the paper's harness reads it (`errors="replace"`)."""
+
+    try:
+        return path.read_text(encoding="utf-8", errors="replace"), None
+    except FileNotFoundError:
+        return None, None
+    except OSError as error:
+        return None, _reason(error)
+
+
+def _fresh(path: Path) -> Path:
+    """Another name for the conversation's file, where the old one cannot be used."""
+
+    return path.with_name(f"{path.stem.split('~')[0]}~{_digest(f'{path}{time.time_ns()}')[:8]}.md")
+
+
+def _reason(error: OSError) -> str:
+    return f"{type(error).__name__}: {error.strerror or error}"
+
+
+def _ratio(value: str) -> float | None:
+    """`clm_urgent`: a share of the limit, or off ("none", "off")."""
+
+    return None if value.strip().lower() in ("none", "off", "0", "false", "") else float(value)
