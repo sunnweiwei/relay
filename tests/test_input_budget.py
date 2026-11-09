@@ -378,3 +378,22 @@ def test_unseen_reasoning_is_refused_or_estimated_as_set() -> None:
     with pytest.raises(InputAccountingError):
         InputBudget(1000).opaque_tokens(item)
     assert InputBudget(1000, unknown_opaque="estimate").opaque_tokens(item) == 1000
+
+
+def test_chat_completions_requests_are_counted_by_the_same_rules() -> None:
+    """A Chat Completions request (OSWorld's agent) is counted item by item as a Responses one is: its
+    system message an item, its tools the preamble, an image by the same bound."""
+
+    from relay.core.budget import PNG_JPEG_MEDIA_INPUT_BUDGET_COUNTER
+    from relay.protocols import OpenAIChat
+
+    chat, policy = OpenAIChat(), InputBudget(128000, name=PNG_JPEG_MEDIA_INPUT_BUDGET_COUNTER)
+    image = {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_header(768, 768)}", "detail": "high"}}
+    text = {"model": "gpt-6-luna", "messages": [{"role": "system", "content": "be brief"},
+                                                {"role": "user", "content": [{"type": "text", "text": "inspect"}]}]}
+    shown = {**text, "messages": [text["messages"][0], {"role": "user", "content": [{"type": "text", "text": "inspect"}, image]}]}
+    assert policy.count(chat, shown) - policy.count(chat, text) == 848  # (as test_empirical_luna_media_counter's 768px)
+    tools = [{"type": "function", "function": {"name": "click", "parameters": {"type": "object"}}}]
+    assert policy.count(chat, {**text, "tools": tools}) > policy.count(chat, text)
+    with pytest.raises(InputAccountingError, match="stateless"):
+        policy.count(CODEC, {**body(msg("user", "task")), "previous_response_id": "hidden"})

@@ -321,9 +321,9 @@ class InputBudget:
         return records
 
     def count(self, codec: Codec, body: Body) -> int:
-        if codec.name != "openai_responses" or not codec.managed(body):
-            raise InputAccountingError("The strict input counter currently supports stateless Responses requests only",
-                                       category="unsupported_request_shape")
+        if codec.name not in ("openai_responses", "openai_chat") or not codec.managed(body):
+            raise InputAccountingError("The strict input counter supports stateless Responses and Chat Completions "
+                                       "requests only", category="unsupported_request_shape")
         items = [codec.classify(wire) for wire in codec.items(body)]
         has_media = any(item.media for item in items)
         try:
