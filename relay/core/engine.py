@@ -170,8 +170,22 @@ class Engine:
         diverged = None if state.get("covered") or compacting else self._diverged(thread, keys, depth)
         originals = [replace(harness.refine(codec.classify(item)), ref=index) for index, item in enumerate(raw)]
 
+        current_state: list[Item] = []
+
         def materialize(state: dict[str, Any]) -> tuple[list[Item], list[WireItem]]:
-            items = [_item(h, originals) for h in state.get("head", [])] + originals[state.get("covered", 0):]
+            items = [_item(h, originals) for h in state.get("head", [])]
+            # A block of the harness's own (its context inside a message) is stored as it read then; the
+            # harness may have rewritten it since (an instruction file edited): the block as this request has it.
+            seen: dict[tuple[int, Kind], int] = {}
+            for n, (entry, item) in enumerate(zip(state.get("head", []), items)):
+                if "ref" in entry and "text" in entry and item.kind in CONTEXT_KINDS:
+                    if not current_state:
+                        current_state.extend(harness.state(codec, raw).items)
+                    same = [s for s in current_state if (s.ref, s.kind) == (entry["ref"], item.kind)]
+                    nth = seen[(entry["ref"], item.kind)] = seen.get((entry["ref"], item.kind), -1) + 1
+                    if nth < len(same):
+                        items[n] = same[nth]
+            items += originals[state.get("covered", 0):]
             return items, [_wire(codec, raw, originals, item) for item in items]
 
         items, wire = materialize(state)
