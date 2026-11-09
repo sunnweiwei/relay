@@ -124,6 +124,24 @@ class JevTests(unittest.TestCase):
         self.send(strategy(ask), [*history, msg("assistant", "done"), msg("user", "and the tests?")])
         self.assertEqual(len(ask.asked), 1)
 
+    def test_at_a_turn_start_the_history_before_it_is_compacted_and_the_new_turn_follows_as_it_came(self) -> None:
+        ask = FakeJev(result_t1=0.1, result_t2=0.1, result_t3=0.1)  # (compacted at turn.complete, before the prompt)
+        new = msg("user", "and the tests?")
+        sent = self.send(Jev(trigger=Compaction(threshold=1000), fallback=Compaction(threshold=10**6), ask=ask),
+                         [msg("user", "fix the bug"), *steps(6), msg("assistant", "done"), new])
+        (state, questions), = ask.asked
+        self.assertNotIn("and the tests?", json.dumps(state))
+        self.assertEqual(sorted(questions), ["call_t1", "call_t2", "call_t3", "result_t1", "result_t2", "result_t3"])
+        self.assertEqual(sent[-1], new)
+        self.assertIn("fast-jev-compaction truncated", json.dumps(sent))  # (the history was compacted)
+
+    def test_its_trigger_is_its_own_setting_not_the_fallbacks(self) -> None:
+        from tests.fakes import relay_settings
+        with relay_settings(compact_ratio=0.79):
+            self.assertEqual((Jev.from_settings().trigger.ratio, Jev.from_settings().fallback.ratio), (0.6, 0.79))
+        with relay_settings(jev_compact_at=0.5):
+            self.assertEqual(Jev.from_settings().trigger.ratio, 0.5)
+
     def test_freeing_less_than_a_quarter_is_compaction_instead(self) -> None:
         sent = self.send(jev(FakeJev()), [msg("user", "fix the bug"), *steps(6)])
         self.assertTrue(any(SUMMARY_PREFIX in CODEC.classify(item).text for item in sent))

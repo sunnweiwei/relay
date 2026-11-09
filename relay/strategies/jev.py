@@ -102,8 +102,8 @@ class Jev:
 
     @classmethod
     def from_settings(cls) -> Jev:
-        base = Compaction.from_settings()
-        return cls(trigger=replace(base, ratio=float(settings.value("compact_ratio", "0.6"))), fallback=base,
+        base = Compaction.from_settings()  # (compact_ratio: the fallback's own threshold, not the plugin's trigger)
+        return cls(trigger=replace(base, ratio=float(settings.value("jev_compact_at", "0.6"))), fallback=base,
                    api_key=settings.value("jev_api_key") or os.getenv("TYPESAFE_API_KEY", ""),
                    url=settings.value("jev_url", URL) or URL, model=settings.value("jev_model", MODEL) or MODEL)
 
@@ -116,30 +116,35 @@ class Jev:
     def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
         if not request.tools or not (request.force or self._due(request)):
             return None
+        # The plugin compacts when a turn has ended (`turn.complete`), before the next prompt exists:
+        # at a turn start, the history before it; the new turn follows as it came.
+        start = None if request.force else _turn(request.current)
+        history = request if start is None else replace(
+            request, current=request.current[:start], boundaries=frozenset(b for b in request.boundaries if b <= start),
+            tokens=request.tokens - sum(map(item_tokens, request.current[start:])))
         try:
-            items, stats = self._compact(request)
+            items, stats = self._compact(history)
         except Exception as error:  # (as the plugin: whatever went wrong, the summary instead)
             log.warning("jev: fallback to compaction (%s)", error)
             return self.fallback.plan(replace(request, force=True), summarizer)
         # (the library's `messageChars`: the messages' text, the calls' inputs and the results' text;
         # not the harness's instructions and tools, which Codex declares among the items, nor thinking or media)
         size = lambda kept: sum(len(item.text) for item in kept if item.kind in COUNTED)  # noqa: E731
-        before = size(request.current)
+        before = size(history.current)
         reduction = (before - size(items)) / before if before else 0.0
         log.info("jev: %d%% reduction; %s", round(reduction * 100), stats)
         if reduction < self.min_reduction:
             log.info("jev: fallback to compaction (below %d%% minimum)", round(self.min_reduction * 100))
             return self.fallback.plan(replace(request, force=True), summarizer)
-        return Context(items)
+        return Context(items if start is None else (*items, *request.current[start:]))
 
     def _due(self, request: Request) -> bool:
         """At the trigger when a user turn starts (its history before the turn), as the plugin checks
         when a turn has ended; mid-turn, where the harness compacts."""
 
         items = request.current
-        last = max((n for n, item in enumerate(items) if item.kind in RESPONSE), default=None)
-        if last is not None and any(item.kind is Kind.USER for item in items[last + 1:]):
-            before = request.tokens - sum(map(item_tokens, items[last + 1:]))
+        if (start := _turn(items)) is not None:
+            before = request.tokens - sum(map(item_tokens, items[start:]))
             return self.trigger.due(replace(request, tokens=before))[0]
         return self.fallback.due(request)[0]
 
@@ -332,6 +337,14 @@ def _described(chars: int, media: tuple[Media, ...]) -> str:
     shown = [f"{chars} chars"] if chars or not media else []
     return " and ".join([*shown, *([counted(media)] if media else [])])
 
+
+
+def _turn(items: tuple[Item, ...]) -> int | None:
+    """Where a new user turn starts (the items after the model's last response, a user message among
+    them), or None mid-turn."""
+
+    last = max((n for n, item in enumerate(items) if item.kind in RESPONSE), default=None)
+    return last + 1 if last is not None and any(item.kind is Kind.USER for item in items[last + 1:]) else None
 
 def _messages(items: tuple[Item, ...]) -> list[list[int]]:
     """The conversation as Claude Code's messages: a model response, the results answering it,
