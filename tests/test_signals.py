@@ -104,8 +104,17 @@ class Signalled(unittest.TestCase):
                          ("branch", "Read models :: read models.py"))
         self.assertEqual(said(*ran(one % json.dumps("echo '[return] found x\nfiles: a.py'"), "[return] found x\nfiles: a.py\n")),
                          ("return", "found x\nfiles: a.py"))
-        two = one % json.dumps(ECHO) + 'await tools.exec_command({cmd:"ls"});'
-        self.assertIsNone(said(*ran(two, "[branch] Read models :: read models.py\n")))  # (not alone)
+        two = one % json.dumps(ECHO) + 'await tools.exec_command({cmd:"ls"});'  # (not alone: said, to be ignored)
+        self.assertEqual(signalled(*map(lambda item: [item], ran(two, "[branch] Read models :: read models.py\n")), SIGNAL,
+                                   whole=True), ("branch", "Read models :: read models.py", None, False))
+        quiet = 'await tools.exec_command({cmd:%s});' % json.dumps(ECHO)  # (the script prints nothing)
+        self.assertEqual(said(*ran(quiet, "")), ("branch", "Read models :: read models.py"))
+        noted = one % json.dumps(ECHO) + 'text(["done"]);\n'  # (a line that looks like a call of a tool `text`)
+        self.assertEqual(said(*ran(noted, "[branch] Read models :: read models.py\ndone\n")),
+                         ("branch", "Read models :: read models.py"))
+        back = "echo '[return] found x\nnext: open a [branch] for the tests'"  # (the message mentions another signal)
+        self.assertEqual(said(*ran(one % json.dumps(back), "[return] found x\nnext: open a [branch] for the tests\n")),
+                         ("return", "found x\nnext: open a [branch] for the tests"))
 
     def test_chat_completions(self) -> None:
         codec = OpenAIChat()

@@ -11,7 +11,7 @@ from dataclasses import replace
 from typing import Any
 
 from ..core.ir import Item, Kind
-from ..harnesses.codex import SCRIPT_OUTPUT, scripted
+from ..harnesses.codex import SCRIPT_OUTPUT, script_calls
 
 RESPONSE = frozenset({Kind.ASSISTANT, Kind.REASONING, Kind.TOOL_CALL})  # what one model response holds
 CALL = re.compile(r"^([\w.:-]+)[( ](?=[{\[])", re.M)  # a call as the codecs write one: `name(input)`, `name input`
@@ -77,17 +77,23 @@ def signalled(response: Sequence[Item], results: Sequence[Item], pattern: re.Pat
         return None
     name, said = pattern.match(echoed[-1]).groups()
     own = len(results) == len(calls)  # (a result per call)
-    if own and len(results) == 1 and not results[0].text.strip():  # reported without output: the command says it
+    if own and len(results) == 1 and not _output(results[0].text):  # reported without output: the command says it
         return name, (echoed[-1][len(name) + 2:] if whole else said).strip(), 0, True
     for k in reversed(range(len(results))):
         for text in _strings(results[k].text):
-            text = SCRIPT_OUTPUT.sub("", text.lstrip(), count=1)  # (code mode's header: the output after it)
-            found = pattern.findall(text)  # the last: the output's, after any command the harness repeats
-            if found and found[-1][0] == name and (len(results) == 1 or found[-1][1].strip() == said.strip()):
-                if whole and own and len(found) == 1 and text.lstrip().startswith(f"[{name}]"):
-                    said = text.lstrip()[len(name) + 2:]
+            script = SCRIPT_OUTPUT.match(text.lstrip()) is not None  # (code mode's header: the output after it)
+            text = SCRIPT_OUTPUT.sub("", text.lstrip(), count=1)
+            # The last of this signal: the output's, after any command the harness repeats (the output
+            # may go on to mention another signal, as a message may).
+            found = next((f for f in reversed(pattern.findall(text)) if f[0] == name
+                          and (len(results) == 1 or f[1].strip() == said.strip())), None)
+            if found:
+                if whole and own and text.lstrip().startswith(f"[{name}]"):
+                    # (a script may print more than its echo did: then what the echo printed, its argument)
+                    printed = text.lstrip()
+                    said = (echoed[-1] if script and printed.startswith(echoed[-1].strip()) else printed)[len(name) + 2:]
                 else:
-                    said = found[-1][1]
+                    said = found[1]
                 return name, said.strip(), k if own else None, len(calls) == 1
     return None  # output, but not the echo's
 
@@ -125,6 +131,9 @@ def _inputs(text: str) -> list[list[str]]:
     """The string values of the input of each tool call in a call's text: of a Codex code-mode
     script, the command it runs; else the text itself, where none is found."""
 
+    tool, _, script = text.strip().partition(" ")
+    if tool == "exec":  # (a Codex code-mode script: one input per tool it calls, the command where it is written out)
+        return [[value if value is not None else script] for _, value in script_calls(script)] or [[script]]
     inputs, end, decoder = [], 0, json.JSONDecoder()
     for match in INPUT.finditer(text):
         if match.end() >= end:
@@ -133,9 +142,13 @@ def _inputs(text: str) -> list[list[str]]:
             except ValueError:
                 continue
             inputs.append(_values(value))
-    if not inputs and (ran := scripted(text.strip().partition(" ")[2])) is not None and ran[0] == "exec_command":
-        return [[ran[1]]]
     return inputs or [[text]]
+
+
+def _output(text: str) -> str:
+    """A result's output, without code mode's header (an echo whose script does not print says nothing)."""
+
+    return SCRIPT_OUTPUT.sub("", text.lstrip(), count=1).strip()
 
 
 def _echoed(values: list[str], pattern: re.Pattern[str]) -> str | None:

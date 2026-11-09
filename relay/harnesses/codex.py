@@ -630,24 +630,44 @@ def scripted(script: str) -> tuple[str, str] | None:
     """The one call a code-mode script (the input of Codex's `exec`, JavaScript) makes of
     exec_command (its command) or apply_patch (its patch), None for any other script."""
 
-    called = re.findall(r"\btools\.(\w+)\s*\(", script)
-    if len(called) != 1 or called[0] not in ("exec_command", "apply_patch"):
+    made = script_calls(script)
+    if len(made) != 1 or made[0][0] not in ("exec_command", "apply_patch") or made[0][1] is None:
         return None
-    after = script[re.search(r"\btools\.\w+\s*\(", script).end():]
-    if called[0] == "exec_command":
-        found = re.match(r"\s*\{[^}]*?\bcmd\s*:\s*", after, re.S)
-        after = after[found.end():] if found else ""
-    if (named := re.match(r"\s*([A-Za-z_$][\w$]*)\s*[,})]", after)) is not None:  # (given by name: what it was set to)
-        found = re.search(rf"\b(?:const|let|var)\s+{re.escape(named.group(1))}\s*=\s*", script)
-        after = script[found.end():] if found else ""
-    literal = re.match(r'\s*(?:"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'|`((?:[^`\\$]|\\.|\$(?!\{))*)`)', after, re.S)
+    return made[0][0], made[0][1]
+
+
+def script_calls(script: str) -> list[tuple[str, str | None]]:
+    """Every tool a code-mode script calls, in order, with the command (exec_command) or patch
+    (apply_patch) it gives as a literal, or a constant set to one; None where it is computed, or for
+    another tool."""
+
+    made: list[tuple[str, str | None]] = []
+    for call in re.finditer(r"\btools\.(\w+)\s*\(", script):
+        tool, after = call.group(1), script[call.end():]
+        if tool not in ("exec_command", "apply_patch"):
+            made.append((tool, None))
+            continue
+        if tool == "exec_command":
+            found = re.match(r"\s*\{[^}]*?\bcmd\s*:\s*", after, re.S)
+            after = after[found.end():] if found else ""
+        if (named := re.match(r"\s*([A-Za-z_$][\w$]*)\s*[,})]", after)) is not None:  # (given by name: what it was set to)
+            found = re.search(rf"\b(?:const|let|var)\s+{re.escape(named.group(1))}\s*=\s*", script)
+            after = script[found.end():] if found else ""
+        made.append((tool, _literal(after)))
+    return made
+
+
+def _literal(text: str) -> str | None:
+    """The JavaScript string literal `text` starts with, its value; None if it starts with none."""
+
+    literal = re.match(r'\s*(?:"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'|`((?:[^`\\$]|\\.|\$(?!\{))*)`)', text, re.S)
     if not literal:
         return None
     double, single, template = literal.groups()
     if template is not None:  # (no ${...} in it: its text as written)
-        return called[0], re.sub(r"\\([`\\$])", r"\1", template)
+        return re.sub(r"\\([`\\$])", r"\1", template)
     quoted = double if double is not None else single.replace("\\'", "'").replace('"', '\\"')
     try:
-        return called[0], json.loads(f'"{quoted}"')
+        return json.loads(f'"{quoted}"')
     except ValueError:
         return None
