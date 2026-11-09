@@ -92,6 +92,8 @@ class SelfCompactTests(unittest.TestCase):
         self.assertEqual((first, newest), (TASK, [big[2], big[3]]))  # (the first whole, then the newest)
         self.assertTrue(cut.text.startswith("turn 1") and len(cut.text) < len(big[1].text))  # (the oldest kept, cut)
         self.assertNotIn(big[0].text, [item.text for item in context.items])
+        only = SelfCompact(user_tokens=0).plan(request(*items, *step(5), *step(6), tokens=4_000), Scripted(FIRE, "S"))
+        self.assertEqual(only.items[:3], (TASK, Item(Kind.ASSISTANT, RESEARCH + "S"), Item(Kind.USER, CONTINUE)))  # (the release's)
 
     def test_stuck_or_unproven_does_not_fire(self) -> None:
         for answer in ("C1: Y\nC2: Y\nC3: Y\nN1: Y -- duplicates", "C1: Y\nC2: Y\nN1: N"):

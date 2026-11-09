@@ -27,6 +27,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .. import settings
 from ..core.ir import Context, Item, Kind, Request
 from .base import Summarizer
 from .compaction import DEFAULT_WINDOW, HARD_LIMIT, Compaction, summary_cut
@@ -106,7 +107,7 @@ class SelfCompact:
 
     @classmethod
     def from_settings(cls) -> SelfCompact:
-        return cls()
+        return cls(user_tokens=int(settings.value("retain_user_tokens", "20000")))  # (compaction's setting)
 
     def fingerprint(self) -> dict[str, Any]:
         return {"name": self.name, "budget": self.budget, "gate": self.gate, "min_round": self.min_round, "user_tokens": self.user_tokens,
