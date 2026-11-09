@@ -22,6 +22,7 @@ context lost it.
 from __future__ import annotations
 
 import base64
+import logging
 import hashlib
 import mimetypes
 import json
@@ -35,6 +36,8 @@ from .base import Strategy, Summarizer
 from .compaction import Compaction
 from .conversation import answered
 from .. import settings
+
+log = logging.getLogger("relay")
 
 # PRO-LONG's AGENTS.md block (src/constants.ts INSTRUCTIONS_BLOCK) and skill (templates/prolong/SKILL.md),
 # verbatim; Relay puts its log's path in place of `.prolong/log.jsonl`.
@@ -85,6 +88,8 @@ class ProLong:
     inner: Strategy = field(default_factory=Compaction)
     log: str = "/tmp/.prolong/log.jsonl"  # the harness's tools must reach it (inside the workspace if sandboxed)
     name: str = "prolong"
+    # How far each conversation's history is logged, should a request fail after logging (its state unsaved).
+    _logged: dict[str, int] = field(default_factory=dict, compare=False, repr=False)
 
     @classmethod
     def from_settings(cls) -> ProLong:
@@ -95,10 +100,14 @@ class ProLong:
 
     def plan(self, request: Request, summarizer: Summarizer) -> Context | None:
         state = request.state or {}
-        logged = state.get("logged", 0)
+        logged = max(state.get("logged", 0), self._logged.get(request.conversation, 0))
         if request.tools:
-            _append(Path(self.log), request.conversation, request.history, logged, self.log)
-            logged = len(request.history)
+            try:  # (the log is the hooks' business: one that fails leaves the compaction to go on, as PRO-LONG's would)
+                _append(Path(self.log), request.conversation, request.history, logged, self.log)
+                logged = self._logged[request.conversation] = len(request.history)
+            except OSError:
+                log.warning("prolong: could not append to %s; the events are logged on a later request", self.log,
+                            exc_info=True)
         context = self.inner.plan(replace(request, state=state.get("inner")), summarizer)
         if not request.tools:
             return context

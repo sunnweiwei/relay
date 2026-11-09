@@ -65,6 +65,31 @@ class ProLongTests(unittest.TestCase):
         self.assertIn('"type":"tool_result"', self.log.read_text())  # (written as PRO-LONG's runtime writes JSON)
         self.assertTrue((self.log.parent / ".gitignore").exists())
 
+    def test_a_log_that_cannot_be_written_leaves_the_compaction_on_and_its_events_come_later_once(self) -> None:
+        self.engine = Engine(ProLong(Compaction(threshold=10), str(self.log)))  # (compacts on every request)
+        self.log.parent.mkdir(parents=True)
+        self.log.write_text("")
+        self.log.chmod(0o400)
+        try:
+            with self.assertLogs("relay", "WARNING"):
+                self.assertTrue(self.send(*self.history).compacted)  # (the inner compaction went on)
+        finally:
+            self.log.chmod(0o600)
+        self.assertEqual(self.entries(), [])
+        self.send(*self.history, *run(2, "cat file_2.txt", "color red"))
+        self.assertEqual([e["type"] for e in self.entries()], ["session_start", "user_prompt", "tool_result", "tool_result"])
+
+    def test_events_are_logged_once_though_the_request_failed_after_logging_them(self) -> None:
+        class Failing(Compaction):
+            def plan(self, request: Any, summarizer: Any) -> Any:
+                raise RuntimeError("upstream down")
+
+        engine = Engine(ProLong(Failing(threshold=10), str(self.log)), retry_after=0)
+        with self.assertLogs("relay", "WARNING"):  # (unbounded: the last context forwarded, the state unsaved)
+            self.send(*self.history, engine=engine)
+            self.send(*self.history, *run(2, "cat file_2.txt", "color red"), engine=engine)
+        self.assertEqual([e["type"] for e in self.entries()], ["session_start", "user_prompt", "tool_result", "tool_result"])
+
     def test_an_events_images_are_saved_beside_the_log_and_named_in_it(self) -> None:
         screen = {"type": "input_image", "image_url": "data:image/png;base64," + base64.b64encode(b"png bytes").decode()}
         shot = run(2, "screenshot", "")
