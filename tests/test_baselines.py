@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,7 +19,7 @@ from relay.strategies.acm import QUERY_MEMORY_PROMPT, RESERVE, STOP_PROMPT, SUMM
 from relay.strategies.autocompact import PROMPT
 from relay.strategies.mem1 import GUIDANCE
 from relay.strategies.conversation import IGNORED
-from relay.strategies.selfcompact import CONTINUE, QUESTION, RESEARCH, RUBRIC, SUMMARIZER
+from relay.strategies.selfcompact import CONTINUE, QUESTION, RESEARCH, RUBRIC, SUMMARIZER, _summary
 
 FIRE = "C1: Y -- done\nC2: Y -- 1. a \"x\"\nC3: Y -- new fact\nN1: N -- found x"
 
@@ -54,33 +55,46 @@ TASK = Item(Kind.USER, "read the files", 1)
 
 
 class SelfCompactTests(unittest.TestCase):
-    strategy = SelfCompact()  # probes every 2 responses from the third, past 37% of the window (10k)
+    strategy = SelfCompact()  # probes after a tool round from the third call, 2 apart, past 37% of the window (10k)
 
-    def test_probes_every_second_response_past_the_gates(self) -> None:
+    def test_probes_after_a_tool_round_from_the_third_call_two_apart(self) -> None:
         two, three = (TASK, *step(1), *step(2)), (TASK, *step(1), *step(2), *step(3))
-        four = (*three, *step(4))
-        self.assertIsNone(self.strategy.plan(request(*two, tokens=5_000), Scripted()))  # too few responses
-        self.assertIsNone(self.strategy.plan(request(*three, tokens=5_000), Scripted()))  # an odd response
-        self.assertIsNone(self.strategy.plan(request(*four, tokens=3_600), Scripted()))  # too few tokens
+        self.assertIsNone(self.strategy.plan(request(*two, tokens=5_000), Scripted()))  # too few calls
+        self.assertIsNone(self.strategy.plan(request(*three, tokens=3_600), Scripted()))  # too few tokens
+        self.assertIsNone(self.strategy.plan(request(*three, Item(Kind.USER, "next", 9), tokens=5_000), Scripted()))  # (no tool round)
         probe = Scripted("C1: Y\nC2: N -- dispersed\nC3: Y\nN1: N")
-        self.assertIsNone(self.strategy.plan(request(*four, tokens=3_800), probe))  # the rubric says CONTINUE
-        self.assertEqual(probe.calls, [(9, RUBRIC)])
+        kept = self.strategy.plan(request(*three, tokens=3_800), probe)  # the rubric says CONTINUE
+        self.assertEqual((probe.calls, kept.items, kept.state), ([(7, RUBRIC)], three, {"probe": 3}))
+        four, five = (*three, *step(4)), (*three, *step(4), *step(5))
+        self.assertIsNone(self.strategy.plan(replace(request(*four, tokens=4_000), state=kept.state), Scripted()))  # 1 since
+        self.assertIsNotNone(self.strategy.plan(replace(request(*five, tokens=4_000), state=kept.state), Scripted(FIRE, "S")))
+
+    def test_the_release_parses_the_rubric(self) -> None:  # (agent.py parse_rubric, first_principles_verdict)
+        three = (TASK, *step(1), *step(2), *step(3))
+        for answer, fires in (("C1: Yes\nC2: yes\nC3: Y\nN1: no", True),  # (Y(es)/N(o), any case)
+                              ("C1: N\nC2: Y\nC3: Y\nN1: N\nC1: Y -- now closed", True),  # (a field's last line)
+                              ("**C1:** Y\n**C2:** Y\n**C3:** Y\n**N1:** N", False),  # (a line must start with it)
+                              ("C1: Y\nC2: Y\nC3: Y", False)):  # (a missing answer: CONTINUE)
+            context = self.strategy.plan(request(*three, tokens=4_000), Scripted(answer, "S"))
+            self.assertEqual(any(_summary(item) for item in context.items), fires, answer)
 
     def test_a_firing_rubric_replaces_the_trajectory_and_every_user_message_stays(self) -> None:
         later = Item(Kind.USER, "and then?", 9)
         items = (TASK, *step(1), later, *step(2), *step(3), *step(4))
-        summarizer = Scripted("**C1:** Y -- x\n**C2:** Y -- y\n**C3:** Y -- z\n**N1:** N -- w",
-                              "<think>x</think>\n<summary>\n- Essential Information: c1, c2\n</summary>")
+        summarizer = Scripted(FIRE, "<think>x</think>\n<summary>\n- Essential Information: c1, c2\n</summary>")
         context = self.strategy.plan(request(*items, tokens=4_000), summarizer)
         self.assertEqual([prompt for _, prompt in summarizer.calls],
                          [RUBRIC, SUMMARIZER + QUESTION.format(question="read the files\n\nand then?")])
         self.assertEqual(context.items, (TASK, later, Item(Kind.ASSISTANT, RESEARCH + "- Essential Information: c1, c2"),
                                          Item(Kind.USER, CONTINUE)))
-        # The count starts again after the summary: one response since, no probe.
-        self.assertIsNone(self.strategy.plan(request(*context.items, *step(5), tokens=4_000), Scripted()))
+        self.assertEqual(context.state, {"probe": 4, "base": 4})
+        # The calls go on counting: one since the probe, no probe.
+        self.assertIsNone(self.strategy.plan(replace(request(*context.items, *step(5), tokens=4_000), state=context.state),
+                                             Scripted()))
         # The next summary keeps the user's messages again, its own "continue" not among them.
         new = Item(Kind.USER, "now the other files", 10)
-        again = self.strategy.plan(request(*context.items, new, *step(5), *step(6), tokens=4_000), Scripted(FIRE, "S2"))
+        again = self.strategy.plan(replace(request(*context.items, new, *step(5), *step(6), tokens=4_000), state=context.state),
+                                   Scripted(FIRE, "S2"))
         self.assertEqual(again.items, (TASK, later, new, Item(Kind.ASSISTANT, RESEARCH + "S2"), Item(Kind.USER, CONTINUE)))
 
     def test_later_user_messages_kept_as_codex_keeps_them(self) -> None:
@@ -96,9 +110,9 @@ class SelfCompactTests(unittest.TestCase):
         self.assertEqual(only.items[:3], (TASK, Item(Kind.ASSISTANT, RESEARCH + "S"), Item(Kind.USER, CONTINUE)))  # (the release's)
 
     def test_stuck_or_unproven_does_not_fire(self) -> None:
+        items = (TASK, *(i for n in range(1, 5) for i in step(n)))
         for answer in ("C1: Y\nC2: Y\nC3: Y\nN1: Y -- duplicates", "C1: Y\nC2: Y\nN1: N"):
-            self.assertIsNone(self.strategy.plan(request(TASK, *(i for n in range(1, 5) for i in step(n)), tokens=4_000),
-                                                 Scripted(answer)))
+            self.assertEqual(self.strategy.plan(request(*items, tokens=4_000), Scripted(answer)).items, items)
 
     def test_the_backstop_summarizes_without_asking(self) -> None:
         summarizer = Scripted("SUMMARY")

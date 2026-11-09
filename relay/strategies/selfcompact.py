@@ -12,9 +12,10 @@ as the release keeps its question, and the later ones as Codex keeps a user's me
 compaction, newest first within `user_tokens` (the oldest kept cut in the middle), and the summarizer
 is given those (with one user message, exactly the release's). A CONTINUE verdict
 leaves the conversation as it was. As the release gates it (`selfcheck_min_round`,
-`selfcheck_min_tokens`, `selfcheck_period`), probes come once the conversation has `min_round` model
-responses and the prompt `gate` of the budget (the release's 40,000 tokens of its 108,000, as a share,
-as the CLM paper runs it at other budgets), every `period` responses; past `backstop` of the budget
+`selfcheck_min_tokens`, `selfcheck_period`), a probe comes right after a tool round, once `min_round`
+model calls are made, the prompt has the `gate` of the budget (the release's 40,000 tokens of its 108,000,
+as a share, as the CLM paper runs it at other budgets) and `period` calls have passed since the last
+probe; the verdict is read as the release reads it (`parse_rubric`, `first_principles_verdict`). Past `backstop` of the budget
 the summary is made without asking, a backstop of Relay's own (at its budget the release forces a
 final answer instead). The prompts are those of Self-Compact's released code (`prompts.py`:
 SELFCHECK_PROMPT, SUMMARIZE_PROMPT, CONTINUE_AFTER_SUMMARY), verbatim, and the summary is the answer's
@@ -92,7 +93,7 @@ QUESTION = "\n\nQuestion being researched: {question}"
 RESEARCH = "Here is my research so far:\n"
 CONTINUE = "Continue your research. Use your tools to find the answer, or provide your final answer if you have enough information."
 SUMMARY = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.S | re.I)
-VERDICT = re.compile(r"\b(C1|C2|C3|N1)\b(?:\s+[A-Z-]+)?[^A-Za-z0-9\n]*([YN])\b")  # "C1: Y -- ...", "**C1**: Y"
+FIELDS = ("C1", "C2", "C3", "N1")  # prompts.py SELFCHECK_FIELDS
 
 
 @dataclass(frozen=True)
@@ -119,22 +120,29 @@ class SelfCompact:
             return None
         budget, items = self.budget or request.window or DEFAULT_WINDOW, request.current
         last = max((n for n, item in enumerate(items) if _summary(item)), default=-1)
-        starts = responses(items)
-        rounds = sum(start > last for start in starts)
+        state = dict(request.state or {})
+        # The release's `iteration`, its model calls so far: those before the last summary, then the
+        # responses since. It probes right after a tool round (`if tool_calls`), once `min_round` calls
+        # are made and `period` have passed since the last probe.
+        iteration = state.get("base", 0) + sum(start > last for start in responses(items))
         forced = request.force or request.tokens >= self.backstop * budget
-        due = (request.tokens >= self.gate * budget and len(starts) >= self.min_round
-               and rounds and rounds % self.period == 0)
+        due = (bool(items) and items[-1].kind is Kind.TOOL_RESULT and request.tokens >= self.gate * budget
+               and iteration >= self.min_round
+               and (state.get("probe") is None or iteration - state["probe"] >= self.period))
         if not (forced or due) or (cut := summary_cut(request)) is None:
             return None
-        if not forced and not _fires(summarizer.summarize(cut, RUBRIC)):
-            return None
+        if not forced:
+            state["probe"] = iteration
+            if not _fires(summarizer.summarize(cut, RUBRIC)):
+                return Context(items, state=state)  # (CONTINUE: the conversation as it was, the probe counted)
         asked = tuple(item for item in items[:cut] if item.kind is Kind.USER and item.text != CONTINUE)
         users = (*asked[:1], *Compaction(retain_user_tokens=self.user_tokens)._recent_users(asked[1:]))
         answer = summarizer.summarize(cut, SUMMARIZER + QUESTION.format(question="\n\n".join(u.text for u in users)))
         summary = (found.group(1) if (found := SUMMARY.search(answer)) else answer).strip()
         if not summary:
-            return None
-        return Context((*users, Item(Kind.ASSISTANT, RESEARCH + summary), Item(Kind.USER, CONTINUE), *items[cut:]))
+            return Context(items, state=state) if state != (request.state or {}) else None
+        return Context((*users, Item(Kind.ASSISTANT, RESEARCH + summary), Item(Kind.USER, CONTINUE), *items[cut:]),
+                       state={**state, "base": iteration})
 
 
 def _summary(item: Item) -> bool:
@@ -142,9 +150,15 @@ def _summary(item: Item) -> bool:
 
 
 def _fires(answer: str) -> bool:
-    """Self-Compact's fire rule: COMPRESS iff C1 = C2 = C3 = Y and N1 = N (a missing answer is N)."""
+    """The release's `parse_rubric` and `first_principles_verdict` (agent.py): per field the last line that
+    starts with it, its Y(es)/N(o) in any case; COMPRESS iff C1 = C2 = C3 = Y and N1 = N, a missing answer
+    CONTINUE."""
 
-    verdict: dict[str, str] = {}
-    for label, value in VERDICT.findall(answer):
-        verdict.setdefault(label, value)
-    return all(verdict.get(label) == "Y" for label in ("C1", "C2", "C3")) and verdict.get("N1", "N") == "N"
+    cleaned = re.sub(r"<think>.*?</think>", "", answer, flags=re.DOTALL)
+    answers: dict[str, str | None] = {field: None for field in FIELDS}
+    for field in FIELDS:
+        lines = list(re.finditer(rf"(?im)^\s*{field}\s*[:\.\)]\s*(.*)$", cleaned))
+        if lines and (found := re.search(r"\b(Y(?:es)?|N(?:o)?)\b", lines[-1].group(1), re.IGNORECASE)):
+            answers[field] = found.group(1)[0].upper()
+    return (all(value is not None for value in answers.values())
+            and answers["C1"] == answers["C2"] == answers["C3"] == "Y" and answers["N1"] == "N")
