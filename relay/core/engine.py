@@ -28,7 +28,7 @@ from dataclasses import asdict, dataclass, replace
 from itertools import accumulate
 from typing import Any
 
-from .. import private
+from .. import private, settings
 from ..harnesses import Harness
 from ..protocols.base import Body, Codec, WireItem
 from ..prompts import SUMMARY_PREFIX
@@ -703,10 +703,12 @@ class _Summarizer:
     def _post(self, request: Body, *, scope: str = "summary", protected: set[int] | None = None,
               provider_fallback: bool = False) -> tuple[int, Any]:
         """One request of Relay's own, retried while rate limited, overloaded, cut short or empty
-        (a model may end its turn at once, without a word)."""
+        (a model may end its turn at once, without a word). A rate limit is first waited out for
+        `upstream_429_wait` seconds, as a forwarded request waits it out (the proxy), outside the retries."""
 
         attempt = 0
         provider_trimmed = False
+        wait, delay, waited = float(settings.value("upstream_429_wait", "0") or 0), 2.0, 0.0
         while True:
             if self.input_budget:
                 try:
@@ -734,6 +736,11 @@ class _Summarizer:
                 provider_trimmed = True
                 if self.on_fallback:
                     self.on_fallback({"scope": scope, "provider_rejected": True, **report})
+                continue
+            if status == 429 and waited < wait:
+                log.info("upstream 429 on Relay's own request: sending again in %.0f s", delay)
+                time.sleep(delay)
+                waited, delay = waited + delay, min(delay * 2, 30.0)
                 continue
             answered = isinstance(payload, dict) and self.codec.finished(payload) and self.codec.output_text(payload)
             incomplete = status < 300 and not answered

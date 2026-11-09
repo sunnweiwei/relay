@@ -16,6 +16,7 @@ from relay.harnesses import ClaudeCode, Codex, Harness
 from relay.prompts import SUMMARY_PREFIX
 from relay.protocols import AnthropicMessages, OpenAIResponses
 from relay.strategies import Compaction
+from tests.fakes import relay_settings
 
 CODEC, HARNESS = OpenAIResponses(), Harness()
 SUMMARY_OK = (200, {"status": "completed", "output": [{"type": "message", "role": "assistant",
@@ -489,6 +490,22 @@ class SummaryRetryTests(unittest.TestCase):
                                       tenant="t", post=upstream)
         self.assertTrue(exchange.compacted)
         self.assertEqual(len(upstream.requests), 3)
+
+    def test_a_rate_limit_is_waited_out_as_a_forwarded_request_waits_it_out(self) -> None:
+        limited = (429, {"error": {"message": "slow down"}})
+        request = body(msg("user", "task"), *step(1), *step(2))
+        with relay_settings(upstream_429_wait=300), unittest.mock.patch("relay.core.engine.time.sleep") as sleep:
+            upstream = Upstream(*[limited] * 8)  # (more than the five retries)
+            exchange = Engine(Compaction(threshold=300, min_gain=0)).prepare(CODEC, HARNESS, request, tenant="t",
+                                                                             post=upstream)
+        self.assertTrue(exchange.compacted)
+        self.assertEqual(len(upstream.requests), 9)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4, 8, 16, 30, 30, 30, 30])
+        with relay_settings(), unittest.mock.patch("relay.core.engine.time.sleep"), self.assertLogs("relay", "WARNING"):
+            upstream = Upstream(*[limited] * 8)  # (unset: the five retries alone)
+            exchange = Engine(Compaction(threshold=300, min_gain=0)).prepare(CODEC, HARNESS, request, tenant="t",
+                                                                             post=upstream)
+        self.assertEqual((exchange.body, len(upstream.requests)), (request, 6))
 
     def test_incomplete_summaries_are_retried_and_never_used(self) -> None:
         cut_short = (200, {"output": [{"type": "message", "role": "assistant",
