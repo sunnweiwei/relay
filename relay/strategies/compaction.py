@@ -20,7 +20,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from ..core.ir import AGENT_KINDS, Context, Item, Kind, Request
-from ..core.tokens import approx_tokens, item_tokens, truncate_middle
+from ..core.tokens import approx_tokens, counting_with, item_tokens, truncate_middle
 from ..prompts import SUMMARIZATION_PROMPT, SUMMARY_PREFIX
 from .base import Summarizer
 from .. import settings
@@ -105,8 +105,14 @@ class Compaction:
         return Context((*users, summary, *request.current[cut:]))
 
     def _recent_users(self, items: tuple[Item, ...]) -> list[Item]:
-        """The newest user messages within budget; the oldest one kept may be truncated."""
+        """The newest user messages within budget; the oldest one kept may be truncated. Counted and
+        cut as Codex does (`approx_token_count`: a token for 4 bytes), whatever counter an
+        evaluation holds the window with."""
 
+        with counting_with(None):
+            return self._within(items)
+
+    def _within(self, items: tuple[Item, ...]) -> list[Item]:
         kept: list[Item] = []
         remaining = self.retain_user_tokens
         for item in reversed(items):

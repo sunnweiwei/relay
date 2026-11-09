@@ -167,6 +167,9 @@ class Gemini:
         candidate = {"content": {"role": "model", "parts": parts}, "finishReason": reason}
         return {"candidates": [candidate], "usageMetadata": usage}
 
+    def answer_text(self, payload: Body) -> str:
+        return self.output_text(payload)
+
     def output_text(self, payload: Body) -> str:
         texts = (p.get("text") for p in _parts(payload) if not p.get("thought"))
         return "".join(t for t in texts if isinstance(t, str)).strip()

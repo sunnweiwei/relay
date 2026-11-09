@@ -168,6 +168,9 @@ class AnthropicMessages:
                      if e.get("type") == "message_delta" and isinstance(e.get("delta"), dict)), None)
         return {"content": [{"type": "text", "text": "".join(d.get("text", "") for d in deltas)}], "stop_reason": stop}
 
+    def answer_text(self, payload: Body) -> str:
+        return self.output_text(payload)
+
     def output_text(self, payload: Body) -> str:
         return "\n".join(
             block["text"]

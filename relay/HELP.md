@@ -126,8 +126,8 @@ To change the strategy later, run `relay strategy <name>`. It needs no restart.
 
 | Strategy | What the model sees | Settings |
 | --- | --- | --- |
-| `compaction` (default) | Codex's local compaction: past a threshold, a summary and the recent user messages | `compact_ratio` (0.9 of the window), `compact_threshold`, `compact_growth`, `retain_user_tokens` (20000), `compact_min_gain` (0.1) |
-| `clm` | Context Language Models: the model edits its own context in a file, with its own tools | `clm_budget`, `clm_reserve` (2048), `clm_dir` (/tmp/.live_ctx, a place the harness can write), `clm_nudges` (on), `clm_guard` (on: past the budget, the oldest new tool outputs are set aside in files), `clm_steering` |
+| `compaction` (default) | Codex's local compaction: past a threshold, a summary and the recent user messages | `compact_ratio` (0.9 of the window), `compact_threshold`, `compact_growth`, `retain_user_tokens` (20000), `compact_min_gain` (0: off, as in Codex) |
+| `clm` | Context Language Models: the model edits its own context in a file, with its own tools | `clm_budget`, `clm_reserve` (2048), `clm_dir` (/tmp/.live_ctx, a place the harness can write), `clm_nudges` (on), `clm_urgent` (0.9 of the limit, or none), `clm_guard` (on: past the budget, the oldest new tool outputs are set aside in files), `clm_steering` |
 | `folding` | Context Folding: the agent branches off a sub-task, and the branch's steps fold away when it returns | the `compaction` settings, as its fallback |
 | `prolong` | PRO-LONG: compaction, plus a session log the agent can search | `prolong_log` (/tmp/.prolong/log.jsonl) |
 | `selfcompact` | Self-Compact: a rubric decides when the model summarizes its own trajectory | |
@@ -135,7 +135,7 @@ To change the strategy later, run `relay strategy <name>`. It needs no restart.
 | `acm` | ACM: the model compresses its context when it decides to, and recalls what it compressed | `acm_dir` (/tmp/.acm) |
 | `ace` | ACE: a playbook of lessons from the tasks the agent ended, kept across conversations, with compaction for the window | `ace_playbook` (`ace_playbook.md` in Relay's directory), the `compaction` settings |
 | `mem1` | MEM1: the model carries its memory in a state it rewrites every turn | |
-| `jev` | fast-jev-compaction: past 60% of the window, TypeSafe's Jev decides which tool calls and results stay; the rest stays verbatim (compaction where it cannot) | `jev_api_key` (else `TYPESAFE_API_KEY`), `jev_url`, `jev_model` (OpenRouter's: `https://openrouter.ai/api/alpha/decisions`, `~typesafe/jev-latest`), `compact_ratio` (0.6), the `compaction` settings |
+| `jev` | fast-jev-compaction: past 60% of the window, TypeSafe's Jev decides which tool calls and results stay; the rest stays verbatim (compaction where it cannot) | `jev_api_key` (else `TYPESAFE_API_KEY`), `jev_url`, `jev_model` (OpenRouter's: `https://openrouter.ai/api/alpha/decisions`, `~typesafe/jev-latest`), `jev_compact_at` (0.6, when a turn ends), the `compaction` settings (its fallback) |
 | `headroom` | Headroom compresses each tool result in place as it comes in (logs to their errors, JSON arrays to tables, a repeated output to a pointer; file reads stay), what was forwarded kept as it was; compaction keeps it within the window | a running `headroom proxy --port 8790`; `headroom_url`, `headroom_mode` (`ccr` with Headroom's MCP tool), `headroom_model`, `headroom_token`, the `compaction` settings |
 | `rlm`, `rlm_persistent` | RLM: the conversation becomes a variable in a Python REPL the model works over (runs model-written code) | `rlm_environment` (local), `rlm_max_depth` (1), `rlm_max_iterations` (30) |
 

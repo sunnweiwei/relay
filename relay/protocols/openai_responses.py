@@ -182,6 +182,16 @@ class OpenAIResponses:
             payload.get("output_text") or ""
         ).strip()
 
+    def answer_text(self, payload: Body) -> str:
+        """The last message, as Codex takes a compaction's summary (`get_last_assistant_message_from_turn`):
+        the final answer where gpt-6 wrote commentary first (`phase` commentary, then final_answer)."""
+
+        said = [(item.get("phase"), text) for item in payload.get("output") or []
+                if item.get("type") == "message" and item.get("role") == "assistant"
+                and (text := _content_text(item.get("content"))[0])]
+        final = [text for phase, text in said if phase == "final_answer"]
+        return (final[-1] if final else said[-1][1] if said else self.output_text(payload)).strip()
+
     def finished(self, payload: Body) -> bool:
         return payload.get("status") == "completed"
 

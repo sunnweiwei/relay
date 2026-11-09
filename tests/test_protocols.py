@@ -90,6 +90,15 @@ class OpenAIResponsesTests(unittest.TestCase):
                               message(code, "commentary"), message(code, "final_answer")]}
         self.assertEqual(self.codec.output_text(payload), f"Let me look.\n{code}")
 
+    def test_the_answer_to_relays_own_request_is_its_final_message(self) -> None:
+        def message(text: str, phase: str | None = None) -> dict:
+            return {"type": "message", "role": "assistant", **({"phase": phase} if phase else {}),
+                    "content": [{"type": "output_text", "text": text}]}
+
+        handoff = {"output": [message("Batch 24 is appended. I'll hand off.", "commentary"), message("## Summary", "final_answer")]}
+        self.assertEqual(self.codec.answer_text(handoff), "## Summary")  # (Codex: the last assistant message)
+        self.assertEqual(self.codec.answer_text({"output": [message("one"), message("two")]}), "two")
+
     def test_classify_marks_media_and_tool_items(self) -> None:
         image = {"type": "message", "role": "user",
                  "content": [{"type": "input_text", "text": "look"},

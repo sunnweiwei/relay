@@ -153,6 +153,9 @@ class OpenAIChat:
         reason = next((c["finish_reason"] for c in reversed(choices) if c.get("finish_reason")), None)
         return {"choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": reason}]}
 
+    def answer_text(self, payload: Body) -> str:
+        return self.output_text(payload)
+
     def output_text(self, payload: Body) -> str:
         choices = payload.get("choices") or [{}]
         return _content_text((choices[0].get("message") or {}).get("content"))[0].strip()

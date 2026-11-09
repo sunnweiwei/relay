@@ -70,6 +70,10 @@ class Codec(Protocol):
 
     def output_text(self, payload: Body) -> str: ...
 
+    def answer_text(self, payload: Body) -> str:
+        """The model's answer to a request of Relay's own (a summary, a probe): its final message,
+        not commentary written before it."""
+
     def finished(self, payload: Body) -> bool:
         """Whether the response ended normally: not cut off by a token limit or a broken stream."""
 

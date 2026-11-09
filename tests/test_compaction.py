@@ -104,6 +104,17 @@ class CompactionTests(unittest.TestCase):
         self.assertEqual(Compaction().limit(context_window("gpt-6-luna")), 244_800)  # Codex: 90% of 272k
 
 
+class KeptUserTests(unittest.TestCase):
+    def test_kept_user_messages_are_counted_as_codex_counts_them_whatever_the_window_is_held_with(self) -> None:
+        from relay.core.tokens import counting_with
+        users = tuple(Item(Kind.USER, "x" * 400, n) for n in range(3))  # (100 tokens each, at 4 bytes a token)
+        strategy = Compaction(retain_user_tokens=250)
+        with counting_with(lambda text: len(text)):  # (a counter that would make each 400 tokens)
+            kept = strategy._recent_users(users)
+        self.assertEqual([item.ref for item in kept[1:]], [1, 2])
+        self.assertIn("…50 tokens truncated…", kept[0].text)  # (the oldest kept cut to the 50 left, as Codex cuts it)
+
+
 class GrowthTests(unittest.TestCase):
     def test_growth_counts_tokens_added_since_the_window_began(self) -> None:
         strategy = Compaction(growth=500, min_gain=0)

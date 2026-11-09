@@ -589,7 +589,7 @@ class _Summarizer:
                 raise RuntimeError(f"summary request failed with HTTP {status}: {payload!r:.300}")
             if not (isinstance(payload, dict) and self.codec.finished(payload)):
                 raise RuntimeError(f"the summary response did not complete: {payload!r:.300}")  # never used, like Codex
-            if not (summary := self.codec.output_text(payload)):
+            if not (summary := self.codec.answer_text(payload)):
                 raise RuntimeError("the summary response contained no text")
             rest = rest[piece:]
             if not rest:
@@ -693,7 +693,7 @@ class _Summarizer:
                 continue
             if status >= 300 or not (isinstance(payload, dict) and self.codec.finished(payload)):
                 raise RuntimeError(f"the summary response failed: HTTP {status}: {payload!r:.300}")
-            summary = self.codec.output_text(payload)
+            summary = self.codec.answer_text(payload)
             if not summary:
                 raise RuntimeError("the summary response contained no text")
             rest, maximum = rest[chosen:], None
