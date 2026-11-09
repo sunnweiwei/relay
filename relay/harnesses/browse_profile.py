@@ -9,8 +9,9 @@ would silently run a different harness condition under the profile's name.
 
 from __future__ import annotations
 
-import re
 import hashlib
+import os
+import re
 
 from ..protocols.base import Body
 
@@ -47,8 +48,10 @@ def apply_profile(body: Body, profile: str | None) -> Body:
                 continue
             original = text = part.get("text", "")
             if text.startswith(CODING_PREFIX):
-                if hashlib.sha256(text.encode()).hexdigest() != CODING_SHA256:
-                    raise ValueError(f"{PROFILE}: unrecognized Codex coding instructions; refusing to "
+                digest = hashlib.sha256(text.encode()).hexdigest()
+                # (a later Codex's instructions, checked by hand and named in the run's environment)
+                if digest not in (CODING_SHA256, os.environ.get("RELAY_PROFILE_CODING_SHA256")):
+                    raise ValueError(f"{PROFILE}: unrecognized Codex coding instructions ({digest}); refusing to "
                                      "forward them under this profile")
                 text = BROWSE_INSTRUCTIONS
             else:
