@@ -113,7 +113,7 @@ NUDGES = {
     0.75: "close to the limit. Compact settled spans now — but do NOT wipe: edits keeping under 25% of the region they "
           "touch are usually followed by re-doing the deleted work. " + NOTE_CONTRACT,
 }
-URGENT = 0.9  # of the limit: nudged on every request past it (the paper's search setting; `clm_urgent`)
+URGENT = 0.9  # of the limit: the urgent nudge of the paper's search runs (configs/bcp.yaml), with `clm_urgent=0.9`
 WITHHELD = "[context manager: overflow guard]"
 STEERING = "## Your context-management policy\n\nFollow this policy where it differs from the advice above:"
 META = "[[LIVE_CONTEXT version=1 revision={revision} document={document}]]"
@@ -137,7 +137,9 @@ class ContextLanguageModel:
     steering: str = ""  # a context-management policy in words, added to the guidance (the paper's s)
     nudges: bool = True  # the budget nudges; the size readout stays
     guard: bool = True  # pi-clm's overflow guard: past the limit, the oldest new tool results are withheld
-    urgent: float | None = URGENT  # of the limit, the urgent nudge on every request past it; None: off (the paper's coding runs)
+    # Of the limit, the urgent nudge on every request past it; None: off, as the paper ran its coding tasks
+    # (configs/edgebench.yaml: persistent_nudge_ratio none), which a coding harness's are.
+    urgent: float | None = None
     recovery: Compaction = field(default_factory=Compaction)  # for a request the upstream rejected as too long
     name: str = "clm"
 
@@ -149,7 +151,7 @@ class ContextLanguageModel:
                    steering=Path(steering).read_text(encoding="utf-8").strip() if steering else "",
                    nudges=settings.value("clm_nudges", "on").lower() not in ("0", "off", "false"),
                    guard=settings.value("clm_guard", "on").lower() not in ("0", "off", "false"),
-                   urgent=_ratio(settings.value("clm_urgent", str(URGENT))),
+                   urgent=_ratio(settings.value("clm_urgent", "none")),
                    recovery=Compaction.from_settings())
 
     def fingerprint(self) -> dict[str, Any]:

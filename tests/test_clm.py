@@ -305,8 +305,8 @@ class ClmTests(unittest.TestCase):
         self.assertTrue(sent[0]["content"][0]["text"].endswith(policy))
         self.assertRegex(sent[-1]["content"][0]["text"], r"\[context: ~\d+/3800 tokens — OVER")
 
-    def test_nudges_escalate_once_per_tier_then_every_request_near_the_limit(self) -> None:
-        self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory)))
+    def test_nudges_escalate_once_per_tier_then_every_request_near_the_limit(self) -> None:  # (the search runs' urgent nudge)
+        self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory), urgent=0.9))
         history, found = [msg("user", "read the files")], []
         for i in range(1, 36):
             history += call(i)
@@ -316,7 +316,7 @@ class ClmTests(unittest.TestCase):
         self.assertTrue(len(found) > 4 and set(found[3:]) == {"urgent"})
 
     def test_past_25_percent_the_nudges_carry_the_papers_compaction_hint(self) -> None:
-        self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory)))
+        self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory), urgent=0.9))
         history, notes = [msg("user", "read the files")], {}
         for i in range(1, 36):
             history += call(i)
@@ -330,8 +330,8 @@ class ClmTests(unittest.TestCase):
         for tier in ("50%", "75%", "urgent"):
             self.assertIn(f"Compact {self.mirror()} by locating stale regions with code", notes[tier])
 
-    def test_the_urgent_nudge_can_be_off_as_in_the_papers_coding_runs(self) -> None:
-        self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory), urgent=None))
+    def test_by_default_no_urgent_nudge_as_in_the_papers_coding_runs(self) -> None:
+        self.engine = Engine(ContextLanguageModel(budget=4_000, reserve=200, directory=str(self.directory)))
         history, notes = [msg("user", "read the files")], []
         for i in range(1, 36):
             history += call(i)

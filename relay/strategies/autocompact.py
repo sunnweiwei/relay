@@ -67,5 +67,8 @@ class AutoCompact:
             recent = starts[-1]
         summary = summarizer.summarize(cut, PROMPT).strip()
         summary = summary if summary.startswith(HEADER) else f"{HEADER}\n\n{summary}"
-        users = (item for item in items[:recent] if item.kind is Kind.USER)
+        # The user's messages: the first whole, as the paper keeps its task; the later ones as Codex keeps
+        # them through a compaction (the fallback's `retain_user_tokens`, newest first).
+        asked = tuple(item for item in items[:recent] if item.kind is Kind.USER)
+        users = (*asked[:1], *self.fallback._recent_users(asked[1:]))
         return Context((guidance, *users, *items[recent:echo], replace(items[echo], text=summary), *items[echo + 1:]), notes=notes)

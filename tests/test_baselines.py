@@ -127,6 +127,16 @@ class SelfCompactTests(unittest.TestCase):
 class AutoCompactTests(unittest.TestCase):
     strategy = AutoCompact()
 
+    def test_later_user_messages_are_kept_as_codex_keeps_them(self) -> None:
+        big = [Item(Kind.USER, f"turn {n} " + "x" * 400, 20 + n) for n in range(3)]  # (102 tokens each)
+        compact = step(5, 'echo "[compact]"', "[compact]")
+        items = (TASK, *step(1), big[0], *step(2), big[1], *step(3), big[2], *step(4), *compact)
+        strategy = AutoCompact(fallback=Compaction(retain_user_tokens=250))
+        users = [item for item in strategy.plan(request(*items), Scripted("S")).items if item.kind is Kind.USER]
+        self.assertEqual(users[0], TASK)
+        self.assertEqual(users[2:], [big[1], big[2]])
+        self.assertTrue(users[1].text.startswith("turn 0") and len(users[1].text) < len(big[0].text))
+
     def test_compact_keeps_the_task_the_summary_and_the_last_turn(self) -> None:
         compact = step(4, 'echo "[compact]"', "[compact]", say="Localization is done.")
         items = (TASK, *step(1), *step(2), *step(3), *compact)
@@ -374,6 +384,14 @@ class MEM1Tests(unittest.TestCase):
 
     def test_the_first_step_sees_the_prompt_and_the_task(self) -> None:
         self.assertEqual(MEM1().plan(request(TASK), Scripted()).items, (Item(Kind.USER, GUIDANCE + "read the files", 1),))
+
+    def test_later_user_messages_are_kept_as_codex_keeps_them(self) -> None:
+        big = [Item(Kind.USER, f"turn {n} " + "x" * 400, 20 + n) for n in range(3)]  # (102 tokens each, 4 bytes a token)
+        items = (TASK, *step(1), big[0], *step(2), big[1], *step(3), big[2], *step(4))
+        users = [item for item in MEM1(user_tokens=250).plan(request(*items), Scripted()).items if item.kind is Kind.USER]
+        self.assertEqual(users[0].text, GUIDANCE + TASK.text)  # (the first whole, the prompt before it)
+        self.assertEqual(users[2:], [big[1], big[2]])  # (the newest within 250)
+        self.assertTrue(users[1].text.startswith("turn 0") and len(users[1].text) < len(big[0].text))  # (the oldest, cut)
 
     def test_the_prompt_goes_in_once(self) -> None:  # (the context as last sent comes back with it)
         sent = MEM1().plan(request(TASK, *step(1)), Scripted()).items
