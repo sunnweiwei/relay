@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 import struct
 from dataclasses import dataclass
 from typing import Any
@@ -397,3 +398,26 @@ def test_chat_completions_requests_are_counted_by_the_same_rules() -> None:
     assert policy.count(chat, {**text, "tools": tools}) > policy.count(chat, text)
     with pytest.raises(InputAccountingError, match="stateless"):
         policy.count(CODEC, {**body(msg("user", "task")), "previous_response_id": "hidden"})
+
+
+def test_uncovered_images_are_refused_or_estimated_as_set() -> None:
+    """An image past the convention (another format, past 2048 px) refuses the request by default; with
+    unknown_media="estimate" it counts as an upper bound: scaled to fit 2048 px, else a 2048 x 2048 image."""
+
+    from relay.core.budget import PNG_JPEG_MEDIA_INPUT_BUDGET_COUNTER
+
+    webp = {"type": "input_image", "image_url": "data:image/webp;base64," + base64.b64encode(b"RIFF0000WEBPVP8 ").decode(),
+            "detail": "high"}
+    wide = image_message(4096, 2048)
+    text = {**body(msg("user", "inspect")), "model": "gpt-6-luna"}
+    shown = lambda image: {**body({"type": "message", "role": "user",  # noqa: E731
+                                    "content": [{"type": "input_text", "text": "inspect"}, image]}), "model": "gpt-6-luna"}
+    strict = InputBudget(128000, name=PNG_JPEG_MEDIA_INPUT_BUDGET_COUNTER)
+    for request in (shown(webp), {**body(wide), "model": "gpt-6-luna"}):
+        with pytest.raises(InputAccountingError):
+            strict.count(CODEC, request)
+    lenient = InputBudget(128000, name=PNG_JPEG_MEDIA_INPUT_BUDGET_COUNTER, unknown_media="estimate")
+    assert lenient.count(CODEC, shown(webp)) - lenient.count(CODEC, text) == 128 + math.ceil(1.25 * 64 * 64)
+    assert lenient.count(CODEC, {**body(wide), "model": "gpt-6-luna"}) - lenient.count(CODEC, text) == 128 + math.ceil(1.25 * 64 * 32)
+    assert lenient.count(CODEC, {**body(image_message(512, 512)), "model": "gpt-6-luna"}) == \
+        strict.count(CODEC, {**body(image_message(512, 512)), "model": "gpt-6-luna"})

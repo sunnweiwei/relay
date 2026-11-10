@@ -113,6 +113,8 @@ class InputBudget:
     # Encrypted reasoning whose usage this process never saw (a resumed conversation, a restarted Relay):
     # "error" refuses the request; "estimate" counts its ciphertext as Relay estimates elsewhere.
     unknown_opaque: str = "error"
+    # An image the media convention does not cover: "error" refuses the request; "estimate" counts an upper bound.
+    unknown_media: str = "error"
     MEDIA_COUNTER_NAME: ClassVar[str] = MEDIA_INPUT_BUDGET_COUNTER
     MEDIA_COUNTER_NAMES: ClassVar[frozenset[str]] = frozenset(_MEDIA_COUNTERS)
 
@@ -122,6 +124,8 @@ class InputBudget:
             raise ValueError("overflow_fallback must be error or truncate")
         if self.unknown_opaque not in {"error", "estimate"}:
             raise ValueError("unknown_opaque must be error or estimate")
+        if self.unknown_media not in {"error", "estimate"}:
+            raise ValueError("unknown_media must be error or estimate")
         if self.limit <= 0 or self.output_reserve < 0 or self.dispatch_slack < 0:
             raise ValueError("Input budget must be positive; output reserve cannot be negative")
         if self.context_limit is not None and self.context_limit <= self.output_reserve:
@@ -226,50 +230,71 @@ class InputBudget:
             raise InputAccountingError("Media token accounting is not supported by this input-budget policy",
                                        category="unsupported_policy")
         total = 0
-        if not item.media:
-            return total
         for image in item.media:
-            if image.type != "image":
-                raise InputAccountingError("Empirical image accounting supports image media only",
-                                           category="unsupported_media_kind")
-            if image.detail not in (None, "auto", "high"):
-                raise InputAccountingError("Empirical image accounting supports high or automatic detail only",
-                                           category="unsupported_detail")
-            if not image.data or image.url:
-                raise InputAccountingError("Empirical image accounting requires inline base64 image data",
-                                           category="non_inline_media")
-            if len(image.data) > _MEDIA_MAX_BASE64_CHARS:
-                raise InputAccountingError("Inline image exceeds the media accounting size limit",
-                                           category="encoded_image_too_large")
             try:
-                data = base64.b64decode(image.data, validate=True)
-            except (ValueError, base64.binascii.Error) as exc:
-                raise InputAccountingError("Inline image base64 is malformed",
-                                           category="malformed_base64") from exc
-            detected_mime, width, height = _image_dimensions(data)
-            declared_mime = image.mime.lower()
-            allowed_mimes = {"image/png"}
-            if self.name == PNG_JPEG_MEDIA_INPUT_BUDGET_COUNTER:
-                allowed_mimes.add("image/jpeg")
-            if self.name == MEDIA_INPUT_BUDGET_COUNTER and declared_mime != "image/png":
+                total += self._image_tokens(image)
+            except InputAccountingError:
+                if self.unknown_media != "estimate":
+                    raise
+                total += self._image_estimate(image)
+        return total
+
+    def _image_estimate(self, image: Any) -> int:
+        """An image the convention does not cover (another format, past 2048 px, by URL, low detail), counted as an
+        upper bound: its pixels scaled to fit 2048 px a side when they can be read, else a 2048 x 2048 image."""
+
+        width = height = _MEDIA_MAX_DIMENSION
+        try:
+            if image.data and not image.url:
+                _, w, h = _image_dimensions(base64.b64decode(image.data, validate=True))
+                if w > 0 and h > 0:
+                    scale = min(1.0, _MEDIA_MAX_DIMENSION / max(w, h))
+                    width, height = max(1, math.ceil(w * scale)), max(1, math.ceil(h * scale))
+        except (InputAccountingError, ValueError, base64.binascii.Error):
+            pass
+        return 128 + math.ceil(1.25 * ((width + 31) // 32) * ((height + 31) // 32))
+
+    def _image_tokens(self, image: Any) -> int:
+        if image.type != "image":
+            raise InputAccountingError("Empirical image accounting supports image media only",
+                                       category="unsupported_media_kind")
+        if image.detail not in (None, "auto", "high"):
+            raise InputAccountingError("Empirical image accounting supports high or automatic detail only",
+                                       category="unsupported_detail")
+        if not image.data or image.url:
+            raise InputAccountingError("Empirical image accounting requires inline base64 image data",
+                                       category="non_inline_media")
+        if len(image.data) > _MEDIA_MAX_BASE64_CHARS:
+            raise InputAccountingError("Inline image exceeds the media accounting size limit",
+                                       category="encoded_image_too_large")
+        try:
+            data = base64.b64decode(image.data, validate=True)
+        except (ValueError, base64.binascii.Error) as exc:
+            raise InputAccountingError("Inline image base64 is malformed",
+                                       category="malformed_base64") from exc
+        detected_mime, width, height = _image_dimensions(data)
+        declared_mime = image.mime.lower()
+        allowed_mimes = {"image/png"}
+        if self.name == PNG_JPEG_MEDIA_INPUT_BUDGET_COUNTER:
+            allowed_mimes.add("image/jpeg")
+        if self.name == MEDIA_INPUT_BUDGET_COUNTER and declared_mime != "image/png":
+            raise InputAccountingError("PNG images only are supported by this accounting policy",
+                                       category="unsupported_mime")
+        if detected_mime != declared_mime:
+            raise InputAccountingError("Declared image MIME does not match its encoded bytes",
+                                       category="mime_signature_mismatch")
+        if declared_mime not in allowed_mimes:
+            if self.name == MEDIA_INPUT_BUDGET_COUNTER:
                 raise InputAccountingError("PNG images only are supported by this accounting policy",
                                            category="unsupported_mime")
-            if detected_mime != declared_mime:
-                raise InputAccountingError("Declared image MIME does not match its encoded bytes",
-                                           category="mime_signature_mismatch")
-            if declared_mime not in allowed_mimes:
-                if self.name == MEDIA_INPUT_BUDGET_COUNTER:
-                    raise InputAccountingError("PNG images only are supported by this accounting policy",
-                                               category="unsupported_mime")
-                raise InputAccountingError("Image MIME is unsupported by the selected accounting policy",
-                                           category="unsupported_mime")
-            if width <= 0 or height <= 0 or max(width, height) > _MEDIA_MAX_DIMENSION:
-                raise InputAccountingError(
-                    f"Empirical image policy supports dimensions only through {_MEDIA_MAX_DIMENSION}px per side",
-                    category="invalid_or_oversized_dimensions")
-            patches = ((width + 31) // 32) * ((height + 31) // 32)
-            total += 128 + math.ceil(1.25 * patches)
-        return total
+            raise InputAccountingError("Image MIME is unsupported by the selected accounting policy",
+                                       category="unsupported_mime")
+        if width <= 0 or height <= 0 or max(width, height) > _MEDIA_MAX_DIMENSION:
+            raise InputAccountingError(
+                f"Empirical image policy supports dimensions only through {_MEDIA_MAX_DIMENSION}px per side",
+                category="invalid_or_oversized_dimensions")
+        patches = ((width + 31) // 32) * ((height + 31) // 32)
+        return 128 + math.ceil(1.25 * patches)
 
     @staticmethod
     def _safe_media_mime(value: str) -> str:
